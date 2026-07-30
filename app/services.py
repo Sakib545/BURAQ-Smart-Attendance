@@ -65,9 +65,9 @@ def process(phone,text):
     if cmd in {'help','5'}: return menu()
     e=employee_by_phone(phone)
     if not e:return '❌ আগে Register করুন। শুধু লিখুন: Register'
-    if cmd in {'check in','checkin','in','2'}:return check_in(e)
-    if cmd in {'check out','checkout','out','3'}:return check_out(e)
-    if cmd in {'my attendance','attendance','report','4'}:return report(e)
+    if cmd in {'check in','checkin','check_in','in','2'}:return check_in(e)
+    if cmd in {'check out','checkout','check_out','out','3'}:return check_out(e)
+    if cmd in {'my attendance','my_attendance','attendance','report','4'}:return report(e)
     return 'বুঝতে পারিনি। Menu দেখতে লিখুন: Hi'
 def log(direction,phone,typ,content,message_id=None):
     try:
