@@ -1,0 +1,54 @@
+from dataclasses import dataclass
+from pathlib import Path
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _database_url() -> str:
+    # Railway injects DATABASE_URL when PostgreSQL is attached.
+    value = os.getenv("DATABASE_URL", "").strip()
+    if value.startswith("postgres://"):
+        value = "postgresql+psycopg://" + value[len("postgres://"):]
+    elif value.startswith("postgresql://"):
+        value = "postgresql+psycopg://" + value[len("postgresql://"):]
+    if value:
+        return value
+    path = os.getenv("DATABASE_PATH", "data/buraq_attendance.db")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{path}"
+
+
+@dataclass(frozen=True)
+class Settings:
+    app_name: str = os.getenv("APP_NAME", "BURAQ Smart Attendance")
+    environment: str = os.getenv("ENVIRONMENT", "production")
+    timezone: str = os.getenv("TIMEZONE", "Asia/Dhaka")
+    database_url: str = _database_url()
+    whatsapp_verify_token: str = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+    whatsapp_access_token: str = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+    whatsapp_phone_number_id: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+    meta_api_version: str = os.getenv("META_API_VERSION", "v23.0")
+    admin_api_key: str = os.getenv("ADMIN_API_KEY", "")
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+
+    @property
+    def is_postgres(self) -> bool:
+        return self.database_url.startswith("postgresql+")
+
+    def validate(self) -> list[str]:
+        missing = []
+        for key, value in {
+            "WHATSAPP_VERIFY_TOKEN": self.whatsapp_verify_token,
+            "WHATSAPP_ACCESS_TOKEN": self.whatsapp_access_token,
+            "WHATSAPP_PHONE_NUMBER_ID": self.whatsapp_phone_number_id,
+            "ADMIN_API_KEY": self.admin_api_key,
+        }.items():
+            if not value:
+                missing.append(key)
+        return missing
+
+
+settings = Settings()
+Path("exports").mkdir(exist_ok=True)
