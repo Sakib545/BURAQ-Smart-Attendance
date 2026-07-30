@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from html import escape
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
@@ -13,13 +14,13 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
-from app.database import database_ok, get_db, init_db
+from app.database import database_kind, database_ok, database_warning, get_db, init_db
 from app.runtime import configured, get_setting, set_setting
 from app.whatsapp import handle, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="4.2.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="4.3.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 CSS = """
@@ -58,8 +59,21 @@ def startup():
 
 @app.get("/health")
 def health():
-    if not database_ok(): raise HTTPException(503, "Database unavailable")
-    return {"ok": True, "version": "4.2.0", "database": "connected", "whatsapp_configured": configured()}
+    # Railway healthcheck is a liveness check. It must stay 200 while the
+    # dashboard explains any optional database/configuration warning.
+    return {
+        "ok": True,
+        "version": "4.3.0",
+        "database": database_kind(),
+        "database_connected": database_ok(),
+        "whatsapp_configured": configured(),
+    }
+
+@app.get("/ready")
+def ready():
+    if not database_ok():
+        raise HTTPException(503, "Database unavailable")
+    return {"ready": True, "database": database_kind()}
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
@@ -104,16 +118,16 @@ def logout(request: Request):
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
     require_login(request)
-    today = datetime.now().date().isoformat()
+    today = datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
     with get_db() as c:
         employees = c.execute("SELECT COUNT(*) c FROM employees").fetchone()["c"]
         registered = c.execute("SELECT COUNT(*) c FROM employees WHERE registration_status='approved'").fetchone()["c"]
         pending = c.execute("SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"]
         present = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_in IS NOT NULL", (today,)).fetchone()["c"]
         recent = c.execute("SELECT a.work_date,a.check_in,a.check_out,a.late_minutes,a.overtime_minutes,e.staff_id,e.name FROM attendance a JOIN employees e ON e.id=a.employee_id ORDER BY a.id DESC LIMIT 12").fetchall()
-    cfg = configured(); db = database_ok(); webhook=f"{base_url(request)}/webhook/whatsapp"
+    cfg = configured(); db = database_ok(); db_kind = database_kind(); warning = database_warning(); webhook=f"{base_url(request)}/webhook/whatsapp"
     rows=''.join(f"<tr><td>{escape(str(r['work_date']))}</td><td>{escape(r['staff_id'])}</td><td>{escape(r['name'])}</td><td>{escape((r['check_in'] or '-')[11:16] if r['check_in'] else '-')}</td><td>{escape((r['check_out'] or '-')[11:16] if r['check_out'] else '-')}</td><td>{r['late_minutes']}m</td><td>{r['overtime_minutes']}m</td></tr>" for r in recent) or "<tr><td colspan='7'>এখনো attendance নেই</td></tr>"
-    body=f"<div class='wrap'><div class='top'><div><div class='brand'>BURAQ Smart Attendance</div><div class='sub'>Professional Control Center</div></div><a class='btn secondary' href='/logout'>Logout</a></div><div class='nav'><a class='btn' href='/dashboard'>Dashboard</a><a class='btn secondary' href='/employees'>Employees</a><a class='btn secondary' href='/pending'>Approvals</a><a class='btn secondary' href='/settings'>Settings</a><a class='btn secondary' href='/export/attendance.csv'>Export CSV</a></div><div class='grid'><div class='card'><div class='sub'>Total Employees</div><div class='metric'>{employees}</div></div><div class='card'><div class='sub'>Registered</div><div class='metric'>{registered}</div></div><div class='card'><div class='sub'>Present Today</div><div class='metric'>{present}</div></div><div class='card'><div class='sub'>Pending Approval</div><div class='metric'>{pending}</div></div></div><div style='height:16px'></div><div class='two'><div class='card'><h3>System Status</h3><p><span class='status {'ok' if db else 'bad'}'>Database {'Connected' if db else 'Error'}</span></p><p><span class='status {'ok' if cfg else 'warn'}'>WhatsApp {'Ready' if cfg else 'Setup needed'}</span></p><div class='sub'>Webhook URL</div><div class='code'>{escape(webhook)}</div><p class='sub'>Meta-তে এই URL একবার বসালেই হবে। এরপর Mac বন্ধ থাকলেও Railway-এ চলবে।</p></div><div class='card'><h3>Quick Test</h3><form method='post' action='/test-message'><label>WhatsApp number (country codeসহ)</label><input name='phone' placeholder='8801XXXXXXXXX' required><label>Message</label><input name='message' value='BURAQ Attendance connected ✅'><button class='btn'>Send Test Message</button></form></div></div><div style='height:16px'></div><div class='card'><h2>Recent Attendance</h2><div style='overflow:auto'><table><thead><tr><th>Date</th><th>Staff ID</th><th>Name</th><th>In</th><th>Out</th><th>Late</th><th>OT</th></tr></thead><tbody>{rows}</tbody></table></div></div></div>"
+    body=f"<div class='wrap'><div class='top'><div><div class='brand'>BURAQ Smart Attendance</div><div class='sub'>Professional Control Center</div></div><a class='btn secondary' href='/logout'>Logout</a></div><div class='nav'><a class='btn' href='/dashboard'>Dashboard</a><a class='btn secondary' href='/employees'>Employees</a><a class='btn secondary' href='/pending'>Approvals</a><a class='btn secondary' href='/settings'>Settings</a><a class='btn secondary' href='/export/attendance.csv'>Export CSV</a></div><div class='grid'><div class='card'><div class='sub'>Total Employees</div><div class='metric'>{employees}</div></div><div class='card'><div class='sub'>Registered</div><div class='metric'>{registered}</div></div><div class='card'><div class='sub'>Present Today</div><div class='metric'>{present}</div></div><div class='card'><div class='sub'>Pending Approval</div><div class='metric'>{pending}</div></div></div><div style='height:16px'></div><div class='two'><div class='card'><h3>System Status</h3><p><span class='status {'ok' if db else 'bad'}'>Database {'Connected' if db else 'Error'} ({escape(db_kind)})</span></p>{f"<div class='notice' style='background:#fef3c7;color:#92400e'>{escape(warning)}</div>" if warning else ''}<p><span class='status {'ok' if cfg else 'warn'}'>WhatsApp {'Ready' if cfg else 'Setup needed'}</span></p><div class='sub'>Webhook URL</div><div class='code'>{escape(webhook)}</div><p class='sub'>Meta-তে এই URL একবার বসালেই হবে। এরপর Mac বন্ধ থাকলেও Railway-এ চলবে।</p></div><div class='card'><h3>Quick Test</h3><form method='post' action='/test-message'><label>WhatsApp number (country codeসহ)</label><input name='phone' placeholder='8801XXXXXXXXX' required><label>Message</label><input name='message' value='BURAQ Attendance connected ✅'><button class='btn'>Send Test Message</button></form></div></div><div style='height:16px'></div><div class='card'><h2>Recent Attendance</h2><div style='overflow:auto'><table><thead><tr><th>Date</th><th>Staff ID</th><th>Name</th><th>In</th><th>Out</th><th>Late</th><th>OT</th></tr></thead><tbody>{rows}</tbody></table></div></div></div>"
     return layout("BURAQ Dashboard", body)
 
 @app.post("/test-message")

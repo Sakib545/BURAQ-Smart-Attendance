@@ -1,68 +1,22 @@
-# BURAQ Smart Attendance v4.1 — Railway + PostgreSQL
+# BURAQ Smart Attendance v4.3 — Production Ready
 
-A production-ready WhatsApp Cloud API attendance system. Railway keeps it online even when your Mac is off.
+## Railway-তে ব্যবহার
 
-## Main features
-- Permanent Railway webhook URL
-- PostgreSQL on Railway; SQLite fallback locally
-- Staff ID registration
-- Check In / Check Out / My Attendance
-- Morning shift 08:00–16:00 and evening shift 16:00–22:00
-- Overtime after 22:00
-- Duplicate Meta webhook protection
-- WhatsApp API error logging
-- Database-aware `/health` endpoint
-- Employee CSV import and attendance CSV export
+1. এই project GitHub-এ upload/push করুন।
+2. Railway-তে repository deploy করুন। আলাদা Start Command বা PORT লিখবেন না।
+3. Railway project-এ PostgreSQL service add করে app service-এ `DATABASE_URL` reference দিন।
+4. app-এর public domain খুলুন এবং `/setup` page-এ Admin password, WhatsApp Access Token, Phone Number ID ও Verify Token save করুন।
+5. Dashboard-এ দেখানো Callback URL এবং Verify Token Meta WhatsApp Configuration-এ একবার বসিয়ে `messages` subscribe করুন।
 
-## Railway deployment
-1. Upload this project to a GitHub repository.
-2. In Railway choose **New Project → Deploy from GitHub Repo**.
-3. In the same Railway project choose **New → Database → PostgreSQL**.
-4. Railway will provide `DATABASE_URL` to the app automatically. If it does not, add a variable reference from PostgreSQL to the app service.
-5. Add these variables to the app service:
+এরপর Mac/PC বন্ধ থাকলেও service Railway-এ চলবে।
 
-```env
-APP_NAME=BURAQ Smart Attendance
-TIMEZONE=Asia/Dhaka
-WHATSAPP_VERIFY_TOKEN=your-long-random-verify-token
-WHATSAPP_ACCESS_TOKEN=your-meta-access-token
-WHATSAPP_PHONE_NUMBER_ID=your-phone-number-id
-META_API_VERSION=v23.0
-ADMIN_API_KEY=your-long-random-admin-key
-LOG_LEVEL=INFO
-```
+## গুরুত্বপূর্ণ URL
 
-6. In Railway service settings generate a public domain.
-7. Open `https://YOUR-RAILWAY-DOMAIN/health`. It should return `{"ok":true,"database":"connected"}`.
-8. In Meta set the callback URL:
+- `/` — Admin dashboard/login
+- `/health` — Railway liveness healthcheck (সবসময় দ্রুত 200)
+- `/ready` — Database readiness check
+- `/webhook/whatsapp` — Meta webhook
 
-```text
-https://YOUR-RAILWAY-DOMAIN/webhook/whatsapp
-```
+## Railway Healthcheck fix
 
-9. Enter the exact same `WHATSAPP_VERIFY_TOKEN`, verify it, and subscribe to the `messages` field.
-10. Send `Hi` to the WhatsApp test/business number.
-
-## Local setup
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-## Commands
-`Hi`, `Register`, `Check In`, `Check Out`, `My Attendance`, `Help`
-
-## Import employees
-```bash
-python scripts/import_employees.py employees.csv
-```
-
-## Export attendance
-```bash
-python scripts/export_attendance.py
-```
-
-Never commit `.env`, access tokens, databases, or exported private employee data.
+v4.3-এ `/health` database provisioning-এর জন্য 503 দেয় না। PostgreSQL সাময়িকভাবে unavailable হলে app retry করে এবং startup বন্ধ না করে temporary SQLite fallback ব্যবহার করে। Dashboard warning দেখায়, যাতে service deploy হয় এবং পরে PostgreSQL reference ঠিক করা যায়। স্থায়ী attendance data-এর জন্য PostgreSQL অবশ্যই যুক্ত রাখুন।
