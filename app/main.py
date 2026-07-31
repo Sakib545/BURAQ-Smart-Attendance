@@ -24,7 +24,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.5.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.6.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -71,6 +71,7 @@ def layout(title: str, body: str, request: Request | None = None, active: str = 
             ("pending","Approvals","/pending","approvals_view"),
             ("duplicates","Duplicate Analysis","/duplicates","approvals_view"),
             ("reports","Reports","/reports","reports_view"),
+            ("payroll","Payroll","/payroll","payroll_view"),
             ("operations","HR Operations","/hr-operations","leave_view"),
             ("hr","User Accounts","/hr-accounts","user_accounts_view"),
             ("audit","Activity Logs","/audit-logs","audit_view"),
@@ -109,6 +110,9 @@ PERMISSION_CATALOG = {
     "approvals_manage": ("Approvals: Approve/Reject", "Registration approve/reject করবে"),
     "reports_view": ("Reports: View", "Attendance report দেখবে"),
     "reports_export": ("Reports: Export", "CSV/PDF/Excel export করবে"),
+    "payroll_view": ("Payroll: View", "Private salary records দেখবে"),
+    "payroll_manage": ("Payroll: Manage", "Salary, overtime, bonus ও payment status পরিবর্তন করবে"),
+    "payroll_export": ("Payroll: Export", "Private payslip ও monthly Excel/PDF export করবে"),
     "leave_view": ("Leave: View", "Leave এবং correction request দেখবে"),
     "leave_manage": ("Leave: Approve/Reject", "Leave ও correction approve/reject করবে"),
     "attendance_edit": ("Attendance: Correct", "Attendance correction request করবে"),
@@ -121,8 +125,8 @@ PERMISSION_CATALOG = {
     "user_accounts_manage": ("User Accounts: Manage", "Admin/HR account create, disable বা delete করবে"),
 }
 DEFAULT_ROLE_PERMISSIONS = {
-    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
-    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
     "hr_executive": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit"},
     "hr_officer": {"dashboard_view","employees_view","performance_view","reports_view","leave_view"},
     "viewer": {"dashboard_view","reports_view"},
@@ -740,6 +744,125 @@ def _attendance_report_rows(start_date: str, end_date: str, status: str = "", de
     sql = "SELECT a.*,e.staff_id,e.name,e.department,e.shift FROM attendance a JOIN employees e ON e.id=a.employee_id WHERE " + " AND ".join(clauses) + " ORDER BY a.work_date DESC,e.staff_id"
     with get_db() as c:
         return c.execute(sql, params).fetchall()
+
+def _payroll_rows(month: str):
+    with get_db() as c:
+        return c.execute("""SELECT p.*,e.staff_id,e.name,e.department,e.designation
+            FROM payroll_records p JOIN employees e ON e.id=p.employee_id
+            WHERE p.salary_month=? ORDER BY e.staff_id""",(month,)).fetchall()
+
+def _money(value):
+    return f"{float(value or 0):,.2f}"
+
+@app.get("/payroll", response_class=HTMLResponse)
+def payroll_page(request: Request, month: str="", saved: str="", error: str=""):
+    require_permission(request,"payroll_view")
+    current=datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m")
+    month=month or current
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    rows=_payroll_rows(month); can_manage=has_permission(request,"payroll_manage"); can_export=has_permission(request,"payroll_export")
+    with get_db() as c: employees=c.execute("SELECT id,staff_id,name FROM employees WHERE is_active=1 ORDER BY staff_id").fetchall()
+    employee_options=''.join(f"<option value='{e['id']}'>{escape(e['staff_id'])} - {escape(e['name'])}</option>" for e in employees)
+    notices="<div class='notice'>Payroll saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Payroll could not be saved.</div>" if error else "")
+    form=""
+    if can_manage:
+        form=f"""<div class='card'><h2>Add or Update Salary</h2><p class='sub'>Saving the same employee and month updates the existing record.</p><form method='post' action='/payroll'><input type='hidden' name='return_month' value='{month}'><label>Employee</label><select name='employee_id' required>{employee_options}</select><label>Salary Month</label><input type='month' name='salary_month' value='{month}' required><div class='two'><div><label>Fixed Salary</label><input type='number' min='0' step='0.01' name='fixed_salary' required></div><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='0'></div></div><div class='two'><div><label>Overtime Hours</label><input type='number' min='0' step='0.01' name='overtime_hours' value='0'></div><div><label>Overtime Rate / Hour</label><input type='number' min='0' step='0.01' name='overtime_rate' value='0'></div></div><label>Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='0'><label>Private HR Note</label><textarea name='note'></textarea><button class='btn'>Calculate & Save</button></form></div>"""
+    table=[]
+    for r in rows:
+        controls=""
+        if can_manage:
+            next_status="paid" if r['payment_status']!='paid' else "unpaid"
+            controls+=f"<form method='post' action='/payroll/{r['id']}/status' style='display:inline'><input type='hidden' name='month' value='{month}'><input type='hidden' name='status' value='{next_status}'><button class='btn {'secondary' if next_status=='unpaid' else ''}'>{'Mark Unpaid' if next_status=='unpaid' else 'Mark Paid'}</button></form> "
+        if can_export: controls+=f"<a class='btn secondary' href='/payroll/{r['id']}/payslip.pdf'>Payslip</a>"
+        state='ok' if r['payment_status']=='paid' else 'warn'
+        table.append(f"<tr><td><b>{escape(r['staff_id'])}</b><br><span class='sub'>{escape(r['name'])}</span></td><td>{_money(r['fixed_salary'])}</td><td>{r['overtime_hours']:.2f} × {_money(r['overtime_rate'])}<br><b>{_money(r['overtime_amount'])}</b></td><td>{_money(r['bonus'])}</td><td>{_money(r['deduction'])}</td><td><b>{_money(r['net_salary'])}</b></td><td><span class='status {state}'>{escape(r['payment_status'])}</span></td><td>{controls}</td></tr>")
+    gross=sum(float(r['net_salary']) for r in rows); paid=sum(float(r['net_salary']) for r in rows if r['payment_status']=='paid')
+    export_buttons=f"<a class='btn secondary' href='/payroll/export.xlsx?month={month}'>Excel</a><a class='btn secondary' href='/payroll/export.pdf?month={month}'>PDF</a>" if can_export else ""
+    body=f"""{notices}<div class='hero'><div><div class='eyebrow'>Private HR Module</div><h2>Salary & Payroll</h2><div class='sub'>Employees cannot access this page or its exports.</div></div><div class='actions'>{export_buttons}</div></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><div style='max-width:220px'><label>Salary Month</label><input type='month' name='month' value='{month}'></div><button class='btn'>Open Month</button></form></div><div class='grid'><div class='card'><div class='sub'>Employees</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Net Payroll</div><div class='metric'>৳{_money(gross)}</div></div><div class='card'><div class='sub'>Paid</div><div class='metric'>৳{_money(paid)}</div></div><div class='card'><div class='sub'>Unpaid</div><div class='metric'>৳{_money(gross-paid)}</div></div></div><div class='section-gap'></div><div class='two'>{form}<div class='card'><h2>Calculation</h2><div class='code'>Overtime = Hours × Rate\nNet Salary = Fixed + Overtime + Bonus - Deduction</div><p class='sub'>All inputs are entered manually by authorized HR/Admin. Attendance remains separate and employee-visible salary is disabled.</p></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>{escape(month)} Salary Sheet</h2><table><thead><tr><th>Employee</th><th>Fixed</th><th>Overtime</th><th>Bonus</th><th>Deduction</th><th>Net</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(table) or '<tr><td colspan=8>No salary records for this month.</td></tr>'}</tbody></table></div>"""
+    return layout("Private Payroll",body,request,"payroll")
+
+@app.post("/payroll")
+def save_payroll(request: Request, employee_id: int=Form(...), salary_month: str=Form(...), fixed_salary: float=Form(...), overtime_hours: float=Form(0), overtime_rate: float=Form(0), bonus: float=Form(0), deduction: float=Form(0), note: str=Form(""), return_month: str=Form("")):
+    require_permission(request,"payroll_manage")
+    values=(fixed_salary,overtime_hours,overtime_rate,bonus,deduction)
+    if not re.fullmatch(r"\d{4}-\d{2}",salary_month) or any(v<0 for v in values): return RedirectResponse(f"/payroll?month={return_month or salary_month}&error=1",303)
+    overtime=round(overtime_hours*overtime_rate,2); net=round(fixed_salary+overtime+bonus-deduction,2)
+    actor=str(request.session.get('hr_id') or 'super_admin')
+    with get_db() as c:
+        c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,note,created_by,updated_by)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(employee_id,salary_month) DO UPDATE SET fixed_salary=excluded.fixed_salary,overtime_hours=excluded.overtime_hours,overtime_rate=excluded.overtime_rate,overtime_amount=excluded.overtime_amount,bonus=excluded.bonus,deduction=excluded.deduction,net_salary=excluded.net_salary,note=excluded.note,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP""",
+            (employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime,bonus,deduction,net,note.strip(),actor,actor))
+    audit(request,"save","payroll",f"{employee_id}:{salary_month}",f"Net salary: {net:.2f}")
+    return RedirectResponse(f"/payroll?month={salary_month}&saved=1",303)
+
+@app.post("/payroll/{payroll_id}/status")
+def payroll_status(request: Request, payroll_id: int, status: str=Form(...), month: str=Form(...)):
+    require_permission(request,"payroll_manage")
+    if status not in {"paid","unpaid"}: raise HTTPException(400,"Invalid payment status")
+    paid="CURRENT_TIMESTAMP" if status=="paid" else "NULL"
+    with get_db() as c: c.execute(f"UPDATE payroll_records SET payment_status=?,paid_at={paid},updated_at=CURRENT_TIMESTAMP WHERE id=?",(status,payroll_id))
+    audit(request,"payment_status","payroll",str(payroll_id),status)
+    return RedirectResponse(f"/payroll?month={month}",303)
+
+@app.get("/payroll/export.xlsx")
+def payroll_xlsx(request: Request, month: str):
+    require_permission(request,"payroll_export")
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    rows=_payroll_rows(month); wb=Workbook(); ws=wb.active; ws.title="Payroll"
+    ws.append(["BURAQ PRIVATE PAYROLL",month]); ws.merge_cells("A1:L1"); ws["A1"].font=Font(bold=True,size=16,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="0D3B2E"); ws["A1"].alignment=Alignment(horizontal="center")
+    headers=["Staff ID","Employee","Department","Fixed Salary","OT Hours","OT Rate","OT Amount","Bonus","Deduction","Net Salary","Status","Note"]; ws.append(headers)
+    for c in ws[2]: c.font=Font(bold=True,color="FFFFFF"); c.fill=PatternFill("solid",fgColor="087F5B")
+    for r in rows: ws.append([r['staff_id'],r['name'],r['department'] or "",r['fixed_salary'],r['overtime_hours'],r['overtime_rate'],r['overtime_amount'],r['bonus'],r['deduction'],r['net_salary'],r['payment_status'],r['note'] or ""])
+    total_row=ws.max_row+1; ws.cell(total_row,9,"TOTAL"); ws.cell(total_row,10,f"=SUM(J3:J{total_row-1})"); ws.cell(total_row,9).font=ws.cell(total_row,10).font=Font(bold=True)
+    for row in ws.iter_rows(min_row=3,min_col=4,max_col=10):
+        for cell in row: cell.number_format='#,##0.00'
+    ws.freeze_panes="A3"; ws.auto_filter.ref=f"A2:L{max(2,ws.max_row)}"
+    for col in ws.columns:
+        letter=col[0].column_letter; ws.column_dimensions[letter].width=min(max(len(str(x.value or "")) for x in col)+2,32)
+    out=io.BytesIO(); wb.save(out); out.seek(0)
+    return StreamingResponse(out,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payroll-{month}.xlsx"})
+
+def _pdf_font():
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    path="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if os.path.exists(path):
+        try: pdfmetrics.registerFont(TTFont("BuraqUnicode",path))
+        except Exception: pass
+        return "BuraqUnicode"
+    return "Helvetica"
+
+@app.get("/payroll/export.pdf")
+def payroll_pdf(request: Request, month: str):
+    require_permission(request,"payroll_export")
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    rows=_payroll_rows(month); out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
+    data=[["Staff ID","Employee","Fixed","OT","Bonus","Deduction","Net","Status"]]+[[str(r['staff_id']),str(r['name']),_money(r['fixed_salary']),_money(r['overtime_amount']),_money(r['bonus']),_money(r['deduction']),_money(r['net_salary']),str(r['payment_status']).title()] for r in rows]
+    data.append(["","TOTAL","","","","",_money(sum(float(r['net_salary']) for r in rows)),""])
+    doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=24,rightMargin=24,topMargin=24,bottomMargin=24); table=Table(data,repeatRows=1,colWidths=[65,155,75,70,70,75,80,60])
+    table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),font),("FONTNAME",(0,-1),(-1,-1),font),("FONTNAME",(0,-1),(-1,-1),font),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#B7C8C2")),("ROWBACKGROUNDS",(0,1),(-1,-2),[colors.white,colors.HexColor("#F4F7F6")]),("ALIGN",(2,1),(-2,-1),"RIGHT"),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
+    doc.build([Paragraph("BURAQ Private Payroll Report",styles['Title']),Paragraph(f"Salary month: {month} | HR/Admin confidential",styles['Normal']),Spacer(1,12),table]); out.seek(0)
+    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payroll-{month}.pdf"})
+
+@app.get("/payroll/{payroll_id}/payslip.pdf")
+def payroll_payslip(request: Request, payroll_id: int):
+    require_permission(request,"payroll_export")
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    with get_db() as c: r=c.execute("SELECT p.*,e.staff_id,e.name,e.department,e.designation FROM payroll_records p JOIN employees e ON e.id=p.employee_id WHERE p.id=?",(payroll_id,)).fetchone()
+    if not r: raise HTTPException(404,"Payroll not found")
+    out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
+    data=[["Salary Item","Amount (BDT)"],["Fixed Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],["Deduction",f"- {_money(r['deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
+    table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#DCFCE7")),("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10)]))
+    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=45,bottomMargin=45)
+    doc.build([Paragraph("BURAQ Salary Statement",styles['Title']),Paragraph(f"Employee: {escape(str(r['name']))}<br/>Staff ID: {escape(str(r['staff_id']))}<br/>Department: {escape(str(r['department'] or '-'))}<br/>Salary month: {r['salary_month']}<br/>Payment status: {str(r['payment_status']).title()}",styles['Normal']),Spacer(1,18),table,Spacer(1,18),Paragraph("Confidential - generated for HR/Admin use only.",styles['Normal'])]); out.seek(0)
+    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payslip-{r['staff_id']}-{r['salary_month']}.pdf"})
 
 @app.get("/reports", response_class=HTMLResponse)
 def reports_page(request: Request, start_date: str = "", end_date: str = "", status: str = "", department: str = ""):

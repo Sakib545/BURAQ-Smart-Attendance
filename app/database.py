@@ -307,11 +307,32 @@ def apply_feature_migrations() -> None:
         )""",
         "CREATE INDEX IF NOT EXISTS ix_attendance_fingerprints_employee_created ON attendance_fingerprints(employee_id, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_attendance_fingerprints_review ON attendance_fingerprints(decision, review_status)",
+        """CREATE TABLE IF NOT EXISTS payroll_records(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, salary_month TEXT NOT NULL,
+            fixed_salary REAL NOT NULL DEFAULT 0, overtime_hours REAL NOT NULL DEFAULT 0,
+            overtime_rate REAL NOT NULL DEFAULT 0, overtime_amount REAL NOT NULL DEFAULT 0,
+            bonus REAL NOT NULL DEFAULT 0, deduction REAL NOT NULL DEFAULT 0,
+            net_salary REAL NOT NULL DEFAULT 0, payment_status TEXT NOT NULL DEFAULT 'unpaid',
+            note TEXT, created_by TEXT, updated_by TEXT, finalized_at TEXT, paid_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_id,salary_month), FOREIGN KEY(employee_id) REFERENCES employees(id)
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS payroll_records(
+            id BIGSERIAL PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id), salary_month TEXT NOT NULL,
+            fixed_salary DOUBLE PRECISION NOT NULL DEFAULT 0, overtime_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+            overtime_rate DOUBLE PRECISION NOT NULL DEFAULT 0, overtime_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+            bonus DOUBLE PRECISION NOT NULL DEFAULT 0, deduction DOUBLE PRECISION NOT NULL DEFAULT 0,
+            net_salary DOUBLE PRECISION NOT NULL DEFAULT 0, payment_status TEXT NOT NULL DEFAULT 'unpaid',
+            note TEXT, created_by TEXT, updated_by TEXT, finalized_at TIMESTAMPTZ, paid_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_id,salary_month)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_payroll_month_status ON payroll_records(salary_month,payment_status)",
     ]
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
     mark_migration("v9.5-attendance-fingerprints")
+    mark_migration("v9.6-private-payroll")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.

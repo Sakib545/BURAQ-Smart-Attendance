@@ -140,3 +140,11 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Existing SQLite and PostgreSQL databases upgrade automatically; `python scripts/migrate_v9_5.py` is also available.
 - Thresholds are configurable with `DUPLICATE_ACCEPT_BELOW` (0.70), `DUPLICATE_REJECT_AT` (0.90), and the four `DUPLICATE_*_WEIGHT` variables.
 - Pending analysis does not create attendance automatically; approval records the security review and the employee then retries with a fresh live selfie.
+
+## v9.6 Private HR/Admin Payroll
+
+- HR/Admin manually enters fixed salary, overtime hours/rate, bonus, deduction and private notes.
+- Net salary and overtime amount are calculated automatically.
+- Monthly paid/unpaid tracking, individual PDF payslips, monthly PDF report and styled Excel export.
+- `payroll_view`, `payroll_manage` and `payroll_export` permissions protect every page and download.
+- Employees receive no salary command, menu item or payroll access; their attendance experience is unchanged.
