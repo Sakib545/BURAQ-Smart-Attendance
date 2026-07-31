@@ -24,7 +24,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.1.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -51,6 +51,8 @@ CSS = """
 [data-theme="dark"]{--bg:#0f1715;--panel:#17201d;--panel2:#1c2824;--ink:#eef7f3;--muted:#a4b5af;--brand:#20a97a;--brand2:#37bd8f;--line:#2b3b36;--shadow:none}
 *{box-sizing:border-box}html{color-scheme:light}html[data-theme="dark"]{color-scheme:dark}body{margin:0;background:var(--bg);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink)}
 a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px 1fr}.sidebar{background:#0d3b2e;color:#fff;padding:24px 18px;position:sticky;top:0;height:100vh}.logo{font-size:22px;font-weight:900;line-height:1.2;margin-bottom:6px}.logo:before{content:'◉';color:#59d4a9;margin-right:8px}.side-sub{font-size:12px;color:#b8d4ca;margin-bottom:28px}.side-nav{display:grid;gap:7px}.side-nav a{padding:11px 13px;border-radius:11px;text-decoration:none;color:#d8ebe4;font-weight:650}.side-nav a:hover,.side-nav a.active{background:rgba(255,255,255,.13);color:#fff}.main{min-width:0}.topbar{height:70px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 28px;position:sticky;top:0;z-index:5}.page{padding:26px;max-width:1400px;margin:auto}.title{font-size:27px;font-weight:850;letter-spacing:-.5px}.sub{color:var(--muted);font-size:14px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:15px}.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:20px;box-shadow:var(--shadow)}.metric{font-size:31px;font-weight:850;margin-top:7px}.status{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:999px;font-size:13px;font-weight:750}.status:before{content:'●';font-size:10px}.ok{background:#dcfce7;color:var(--ok)}.warn{background:#fef3c7;color:var(--warn)}.bad{background:#fee2e2;color:var(--bad)}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{border:0;border-radius:11px;padding:10px 14px;background:var(--brand);color:#fff;font-weight:750;cursor:pointer;text-decoration:none;display:inline-block}.btn:hover{background:var(--brand2)}.btn.secondary{background:var(--panel2);border:1px solid var(--line);color:var(--ink)}.btn.danger{background:#fee2e2;color:var(--bad)}input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;margin:6px 0 14px;background:var(--panel);color:var(--ink)}label{font-size:14px;font-weight:700}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line)}th{color:var(--muted)}h2{margin:0 0 14px}h3{margin:0 0 10px}.notice{padding:13px 15px;border-radius:12px;background:#ecfeff;color:#155e75;margin-bottom:16px}.code{font-family:ui-monospace,monospace;background:#111827;color:#f9fafb;padding:12px;border-radius:10px;overflow:auto}.login{max-width:450px;margin:7vh auto;padding:18px}.login .card{padding:30px}.masked{font-family:ui-monospace,monospace;letter-spacing:.5px;background:var(--panel2);padding:11px;border-radius:10px;border:1px solid var(--line)}.section-gap{height:16px}.mobile-menu{display:none}.health-list{display:grid;gap:10px}.health-row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}
+
+.hero{display:flex;justify-content:space-between;gap:20px;align-items:center;padding:24px;background:linear-gradient(135deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);margin-bottom:16px}.hero h2{font-size:25px;margin-bottom:6px}.eyebrow{text-transform:uppercase;letter-spacing:1.4px;font-size:11px;font-weight:850;color:var(--brand)}.metric-card{position:relative;overflow:hidden}.metric-card:after{content:'';position:absolute;right:-25px;top:-25px;width:85px;height:85px;border-radius:50%;background:rgba(8,127,91,.08)}.metric-label{font-size:13px;color:var(--muted);font-weight:700}.metric-foot{margin-top:10px;font-size:12px;color:var(--muted)}.kpi-icon{width:38px;height:38px;display:grid;place-items:center;border-radius:11px;background:var(--panel2);border:1px solid var(--line);font-size:18px}.card-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}.timeline{display:grid;gap:4px}.timeline-item{display:grid;grid-template-columns:42px 1fr auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.avatar{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:var(--panel2);font-weight:850;color:var(--brand);border:1px solid var(--line)}.pill{display:inline-flex;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:800;background:var(--panel2);border:1px solid var(--line)}.chart{height:210px;display:flex;gap:10px;align-items:flex-end;padding:18px 8px 4px}.bar-wrap{flex:1;min-width:0;text-align:center}.bar{min-height:5px;border-radius:8px 8px 3px 3px;background:linear-gradient(180deg,var(--brand),var(--brand2));position:relative}.bar-value{position:absolute;top:-22px;left:50%;transform:translateX(-50%);font-size:11px;font-weight:800}.bar-label{font-size:11px;color:var(--muted);margin-top:8px}.progress{height:8px;background:var(--panel2);border-radius:999px;overflow:hidden;border:1px solid var(--line)}.progress span{display:block;height:100%;background:var(--brand);border-radius:999px}.quick-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.quick-link{padding:14px;border:1px solid var(--line);border-radius:13px;text-decoration:none;background:var(--panel2);font-weight:750}.quick-link:hover{border-color:var(--brand);transform:translateY(-1px)}.health-dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--ok);box-shadow:0 0 0 4px rgba(21,128,61,.12)}
 @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{display:none}.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}.mobile-menu{display:block}.page{padding:16px}.topbar{padding:0 16px}}
 @media(max-width:540px){.grid{grid-template-columns:1fr}.topbar{height:auto;padding:13px 16px;gap:10px}.title{font-size:22px}}
 </style>
@@ -193,11 +195,11 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.1 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.0.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.1.0"}
 
 
 @app.get("/ready")
@@ -209,7 +211,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.0.0",
+        "version": "9.1.0",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -286,32 +288,76 @@ def logout(request: Request):
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
     require_permission(request, "dashboard_view")
-    today = datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
+    now = datetime.now(ZoneInfo(settings.timezone))
+    today = now.date().isoformat()
+    week_days = [(now.date() - timedelta(days=i)) for i in range(6, -1, -1)]
     with get_db() as c:
         employees = c.execute("SELECT COUNT(*) c FROM employees").fetchone()["c"]
         registered = c.execute("SELECT COUNT(*) c FROM employees WHERE registration_status='approved'").fetchone()["c"]
-        pending = c.execute("SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"]
+        pending_registration = c.execute("SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"]
         present = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_in IS NOT NULL", (today,)).fetchone()["c"]
         checked_out = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_out IS NOT NULL", (today,)).fetchone()["c"]
-        recent = c.execute("SELECT a.work_date,a.check_in,a.check_out,a.late_minutes,a.overtime_minutes,e.staff_id,e.name FROM attendance a JOIN employees e ON e.id=a.employee_id ORDER BY a.id DESC LIMIT 12").fetchall()
+        late = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND late_minutes>0", (today,)).fetchone()["c"]
+        overtime = c.execute("SELECT COALESCE(SUM(overtime_minutes),0) c FROM attendance WHERE work_date=?", (today,)).fetchone()["c"]
+        on_leave = c.execute("SELECT COUNT(DISTINCT employee_id) c FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?", (today,today)).fetchone()["c"]
+        pending_leave = c.execute("SELECT COUNT(*) c FROM leave_requests WHERE status='pending'").fetchone()["c"]
+        pending_correction = c.execute("SELECT COUNT(*) c FROM attendance_corrections WHERE status='pending'").fetchone()["c"]
+        recent = c.execute("SELECT a.work_date,a.check_in,a.check_out,a.late_minutes,a.overtime_minutes,e.staff_id,e.name,e.department FROM attendance a JOIN employees e ON e.id=a.employee_id ORDER BY COALESCE(a.check_out,a.check_in,a.created_at) DESC LIMIT 10").fetchall()
+        weekly = []
+        for day in week_days:
+            count = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_in IS NOT NULL", (day.isoformat(),)).fetchone()["c"]
+            weekly.append((day, count))
+    absent = max(employees - present - on_leave, 0)
+    attendance_rate = round((present / employees * 100), 1) if employees else 0
     cfg, db = configured(), database_ok()
     warning = database_warning()
     can_whatsapp = has_permission(request, "whatsapp_settings")
     can_export = has_permission(request, "reports_export")
-    webhook = f"{base_url(request)}/webhook/whatsapp" if can_whatsapp else ""
-    rows=''.join(f"<tr><td>{escape(str(r['work_date']))}</td><td><b>{escape(r['staff_id'])}</b></td><td>{escape(r['name'])}</td><td>{escape((r['check_in'] or '-')[11:16] if r['check_in'] else '-')}</td><td>{escape((r['check_out'] or '-')[11:16] if r['check_out'] else '-')}</td><td>{r['late_minutes']}m</td><td>{r['overtime_minutes']}m</td></tr>" for r in recent) or "<tr><td colspan='7'>এখনো attendance নেই</td></tr>"
-    system_extra = ""
-    if can_whatsapp:
-        system_extra = f"<div class='sub'>Webhook URL</div><div class='code'>{escape(webhook)}</div>"
-    else:
-        system_extra = "<div class='notice'>আপনার account-এ WhatsApp Settings permission নেই; credentials ও webhook গোপন রাখা হয়েছে।</div>"
-    whatsapp_panel = ""
-    if can_whatsapp:
-        whatsapp_panel = f"<div class='card'><h3>Quick WhatsApp Test</h3><form method='post' action='/test-message'><label>WhatsApp number</label><input name='phone' placeholder='8801XXXXXXXXX' required><label>Message</label><input name='message' value='BURAQ Attendance connected ✅'><button class='btn'>Send Test Message</button></form><p class='sub'>Pending approvals: <b>{pending}</b></p></div>"
-    else:
-        whatsapp_panel = f"<div class='card'><h3>Attendance Operations</h3><p class='sub'>Pending approvals</p><div class='metric'>{pending}</div><p class='sub'>Webhook URL, access token, Phone Number ID and Verify Token are hidden for this account.</p></div>"
-    body=f"<div class='grid'><div class='card'><div class='sub'>Total Employees</div><div class='metric'>{employees}</div></div><div class='card'><div class='sub'>Registered</div><div class='metric'>{registered}</div></div><div class='card'><div class='sub'>Present Today</div><div class='metric'>{present}</div></div><div class='card'><div class='sub'>Checked Out</div><div class='metric'>{checked_out}</div></div></div><div class='section-gap'></div><div class='two'><div class='card'><h3>System Health</h3><div class='health-list'><div class='health-row'><span>Database</span><span class='status {'ok' if db else 'bad'}'>{escape(database_kind())}</span></div><div class='health-row'><span>WhatsApp</span><span class='status {'ok' if cfg else 'warn'}'>{'Connected' if cfg else 'Setup needed'}</span></div><div class='health-row'><span>Webhook</span><span class='status ok'>Active</span></div><div class='health-row'><span>Face AI</span><span class='status ok'>Ready</span></div></div>{f"<div class='notice' style='background:#fef3c7;color:#92400e'>{escape(warning)}</div>" if warning else ''}{system_extra}</div>{whatsapp_panel}</div><div class='section-gap'></div><div class='card'><div class='actions' style='justify-content:space-between;align-items:center'><h2>Recent Attendance</h2>{"<a class='btn secondary' href='/export/attendance.csv'>Download CSV</a>" if can_export else ''}</div><div style='overflow:auto'><table><thead><tr><th>Date</th><th>Staff ID</th><th>Name</th><th>In</th><th>Out</th><th>Late</th><th>OT</th></tr></thead><tbody>{rows}</tbody></table></div></div>"
-    return layout("Dashboard", body, request, "dashboard")
+    can_approvals = has_permission(request, "approvals_view")
+    can_operations = has_permission(request, "leave_view")
+    max_week = max([v for _,v in weekly] + [1])
+    chart = ''.join(f"<div class='bar-wrap'><div class='bar' style='height:{max(8, int(v/max_week*150))}px'><span class='bar-value'>{v}</span></div><div class='bar-label'>{d.strftime('%a')}</div></div>" for d,v in weekly)
+    timeline = ''
+    for r in recent:
+        event_time = (r['check_out'] or r['check_in'] or '')
+        event_label = 'Checked out' if r['check_out'] else 'Checked in'
+        initials = ''.join(x[0] for x in str(r['name']).split()[:2]).upper() or 'E'
+        badge = 'Late' if r['late_minutes'] else ('OT' if r['overtime_minutes'] else 'On time')
+        timeline += f"<div class='timeline-item'><div class='avatar'>{escape(initials)}</div><div><b>{escape(r['name'])}</b><div class='sub'>{escape(r['staff_id'])} • {event_label} • {escape((event_time[11:16] if len(event_time)>15 else event_time) or '-')}</div></div><span class='pill'>{badge}</span></div>"
+    if not timeline: timeline = "<div class='notice'>আজ এখনো কোনো attendance activity নেই।</div>"
+    quick=[]
+    if has_permission(request,'employees_view'): quick.append("<a class='quick-link' href='/employees'>👥 Employee Directory</a>")
+    if can_approvals: quick.append(f"<a class='quick-link' href='/pending'>✅ Registration Approvals <span class='pill'>{pending_registration}</span></a>")
+    if can_operations: quick.append(f"<a class='quick-link' href='/hr-operations'>🗂 HR Operations <span class='pill'>{pending_leave+pending_correction}</span></a>")
+    if has_permission(request,'reports_view'): quick.append("<a class='quick-link' href='/reports'>📊 Open Reports</a>")
+    if has_permission(request,'user_accounts_view'): quick.append("<a class='quick-link' href='/hr-accounts'>🔐 User & Permissions</a>")
+    if has_permission(request,'settings_view'): quick.append("<a class='quick-link' href='/settings'>⚙️ System Settings</a>")
+    system_note = f"<div class='notice' style='background:#fef3c7;color:#92400e'>{escape(warning)}</div>" if warning else ''
+    body=f"""
+    <section class='hero'><div><div class='eyebrow'>BURAQ Control Center</div><h2>Good {('morning' if now.hour<12 else 'afternoon' if now.hour<17 else 'evening')}, {escape(str(request.session.get('user_name','Admin')))}</h2><div class='sub'>Live workforce overview for {now.strftime('%A, %d %B %Y')}</div></div><div><span class='status {'ok' if db else 'bad'}'>{'All systems operational' if db else 'System attention required'}</span></div></section>
+    <div class='grid'>
+      <div class='card metric-card'><div class='card-head'><span class='metric-label'>Present Today</span><span class='kpi-icon'>✓</span></div><div class='metric'>{present}</div><div class='metric-foot'>{attendance_rate}% of workforce</div></div>
+      <div class='card metric-card'><div class='card-head'><span class='metric-label'>Late Today</span><span class='kpi-icon'>◷</span></div><div class='metric'>{late}</div><div class='metric-foot'>Needs HR visibility</div></div>
+      <div class='card metric-card'><div class='card-head'><span class='metric-label'>Absent</span><span class='kpi-icon'>!</span></div><div class='metric'>{absent}</div><div class='metric-foot'>{on_leave} employee(s) on leave</div></div>
+      <div class='card metric-card'><div class='card-head'><span class='metric-label'>Overtime</span><span class='kpi-icon'>↗</span></div><div class='metric'>{overtime}m</div><div class='metric-foot'>{checked_out} check-outs completed</div></div>
+    </div>
+    <div class='section-gap'></div>
+    <div class='two'>
+      <div class='card'><div class='card-head'><div><h3>7-Day Attendance Trend</h3><div class='sub'>Daily checked-in employees</div></div>{"<a class='btn secondary' href='/reports'>View report</a>" if has_permission(request,'reports_view') else ''}</div><div class='chart'>{chart}</div></div>
+      <div class='card'><div class='card-head'><div><h3>Workforce Readiness</h3><div class='sub'>Registration and attendance coverage</div></div><span class='pill'>{employees} employees</span></div><p class='sub'>WhatsApp registered</p><div class='progress'><span style='width:{(registered/employees*100 if employees else 0):.1f}%'></span></div><p><b>{registered}</b> of {employees}</p><p class='sub'>Today attendance</p><div class='progress'><span style='width:{attendance_rate}%'></span></div><p><b>{present}</b> checked in • <b>{checked_out}</b> checked out</p></div>
+    </div>
+    <div class='section-gap'></div>
+    <div class='two'>
+      <div class='card'><div class='card-head'><div><h3>Live Attendance Timeline</h3><div class='sub'>Most recent employee activity</div></div>{"<a class='btn secondary' href='/export/attendance.csv'>Export</a>" if can_export else ''}</div><div class='timeline'>{timeline}</div></div>
+      <div style='display:grid;gap:16px'>
+        <div class='card'><div class='card-head'><h3>Pending Work</h3><span class='pill'>{pending_registration+pending_leave+pending_correction}</span></div><div class='health-list'><div class='health-row'><span>Registration approvals</span><b>{pending_registration}</b></div><div class='health-row'><span>Leave requests</span><b>{pending_leave}</b></div><div class='health-row'><span>Attendance corrections</span><b>{pending_correction}</b></div></div></div>
+        <div class='card'><h3>Quick Actions</h3><div class='quick-grid'>{''.join(quick)}</div></div>
+      </div>
+    </div>
+    <div class='section-gap'></div>
+    <div class='card'><div class='card-head'><div><h3>System Health</h3><div class='sub'>Production services and integrations</div></div><span class='status {'ok' if db and cfg else 'warn'}'>{'Healthy' if db and cfg else 'Attention'}</span></div>{system_note}<div class='grid'><div><span class='health-dot'></span> <b>Database</b><div class='sub'>{escape(database_kind())}</div></div><div><span class='health-dot' style='background:{'#15803d' if cfg else '#b45309'}'></span> <b>WhatsApp</b><div class='sub'>{'Connected' if cfg else 'Setup needed'}</div></div><div><span class='health-dot'></span> <b>Webhook</b><div class='sub'>Active</div></div><div><span class='health-dot'></span> <b>Face AI</b><div class='sub'>Ready</div></div></div></div>
+    """
+    return layout("Control Center", body, request, "dashboard")
 
 @app.post("/test-message")
 async def test_message(request: Request, phone: str = Form(...), message: str = Form(...)):

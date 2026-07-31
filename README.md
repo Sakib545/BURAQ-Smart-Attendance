@@ -88,3 +88,17 @@ Keep the existing WhatsApp and office-location variables unchanged.
 pip install -r requirements-dev.txt
 ENVIRONMENT=development REQUIRE_SECURE_SECRETS=false pytest -q
 ```
+
+## v9.1 Enterprise Control Center
+
+- Commercial HRMS-style control center
+- Live KPI cards: present, late, absent, leave and overtime
+- Seven-day attendance trend chart without external JavaScript dependencies
+- Live employee attendance timeline
+- Pending registration, leave and correction workload
+- Permission-aware quick actions
+- Workforce registration and attendance progress
+- Production service health panel
+- Fully responsive desktop, tablet and mobile layout
+
+Existing employee, attendance, HR, permission and WhatsApp data are preserved.
