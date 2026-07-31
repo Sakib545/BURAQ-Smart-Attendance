@@ -211,3 +211,47 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Performance remains inside each Employee Profile, avoiding a duplicate top-level menu.
 - Existing feature URLs remain available, while active navigation highlights their new parent section.
 - Responsive mobile navigation exposes the same five simple sections.
+
+## v9.14 Disaster Recovery
+
+- A daily full backup includes every database table: employees, face embeddings, attendance, duties, approvals, payroll, users, settings and audit logs.
+- Backups use an atomic write, gzip compression and encryption with `BACKUP_ENCRYPTION_KEY` (or `CONFIG_ENCRYPTION_KEY` when a separate key is not set).
+- Super Admin can download a `.buraq` backup or restore it from Settings. A safety snapshot is created automatically before every restore.
+- The portable format supports PostgreSQL-to-PostgreSQL and SQLite/PostgreSQL migration after the new host creates the current application schema.
+- Local retention defaults to 30 backups. Optional S3-compatible upload supports AWS S3, Cloudflare R2, Backblaze B2 and MinIO.
+- PostgreSQL serial sequences are repaired after restore, so new records continue normally.
+
+### Required production recovery variables
+
+Keep these values in a password manager outside the hosting provider. Losing the encryption key makes encrypted backups impossible to restore.
+
+```text
+BACKUP_DIR=/data/backups
+BACKUP_RETENTION_DAYS=30
+BACKUP_ENCRYPTION_KEY=<a permanent random value of at least 32 characters>
+```
+
+For a genuinely crash-independent copy, configure an S3-compatible bucket:
+
+```text
+BACKUP_S3_BUCKET=<bucket name>
+BACKUP_S3_ENDPOINT=<provider endpoint; omit for AWS S3>
+BACKUP_S3_REGION=auto
+BACKUP_S3_ACCESS_KEY_ID=<access key>
+BACKUP_S3_SECRET_ACCESS_KEY=<secret key>
+BACKUP_S3_PREFIX=buraq-attendance
+```
+
+### Move to another hosting provider
+
+1. Deploy the same code and attach PostgreSQL.
+2. Copy the original `BACKUP_ENCRYPTION_KEY`, `CONFIG_ENCRYPTION_KEY` and `SESSION_SECRET` values.
+3. Set the new `DATABASE_URL` and start the app once so the schema is created.
+4. Sign in as Super Admin, open Settings and upload the latest `.buraq` file under Disaster Recovery.
+5. Update the Meta webhook callback URL only if the public domain changed.
+
+If the dashboard is unavailable, restore from the command line:
+
+```bash
+python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
+```

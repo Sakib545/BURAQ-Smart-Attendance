@@ -8,9 +8,11 @@ import logging
 import os
 import re
 import secrets
+import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from html import escape
 
@@ -25,11 +27,11 @@ from app.employee_seed import import_employees
 from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_text
 from app.reminders import reminder_worker
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
-from app.backups import payroll_backup_worker
+from app.backups import create_full_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.13.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.14.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -214,7 +216,7 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9.13 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.14 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
@@ -232,7 +234,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.13.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.14.0"}
 
 
 @app.get("/ready")
@@ -244,7 +246,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.13.0",
+        "version": "9.14.0",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -449,6 +451,20 @@ def settings_page(request: Request, saved: str = "", error: str = ""):
         body=f"{notice}<div class='two'><div class='card'><h2>WhatsApp Connection</h2><p><span class='status {'ok' if configured() else 'warn'}'>{'Connected' if configured() else 'Setup needed'}</span></p><div class='sub'>Access Token</div><div class='masked'>{escape(mask_secret(access))}</div><br><div class='sub'>Phone Number ID</div><div class='masked'>{escape(mask_secret(phone))}</div><br><div class='sub'>Verify Token</div><div class='masked'>{escape(mask_secret(verify))}</div><br><details><summary class='btn secondary'>Edit credentials</summary><form method='post' style='margin-top:15px'><label>New Access Token</label><input type='password' name='access_token'><label>New Phone Number ID</label><input name='phone_id'><label>New Verify Token</label><input type='password' name='verify_token'><button class='btn'>Save securely</button></form></details></div><div class='card'><h2>Connection & Webhook</h2><div class='sub'>Callback URL</div><div class='code'>{escape(webhook)}</div><p class='sub'>Sensitive access is controlled by Super Admin permission.</p></div></div>"
     else:
         body=f"{notice}<div class='card'><h2>General Settings</h2><div class='notice'>আপনার account-এ WhatsApp Settings permission নেই। Token, Phone Number ID, Verify Token এবং Webhook URL গোপন রাখা হয়েছে।</div></div>"
+    if request.session.get("role") == "super_admin":
+        offsite = bool(os.getenv("BACKUP_S3_BUCKET", "").strip())
+        body += f"""<div class='card' style='margin-top:18px'><h2>Disaster Recovery</h2>
+        <p><span class='status {'ok' if offsite else 'warn'}'>{'Off-site backup active' if offsite else 'Local backup only'}</span></p>
+        <p class='sub'>Full backup-এ employee, face embedding, attendance, duty, payroll, approval, user, settings ও audit history থাকে। প্রতিদিন automatic backup হয়।</p>
+        <div class='table-actions'><a class='btn' href='/settings/full-backup'>Download Full Backup</a>
+        <form method='post' action='/settings/full-backup/offsite'><button class='btn secondary'>Backup Now</button></form></div>
+        <hr style='border:0;border-top:1px solid var(--line);margin:20px 0'>
+        <details><summary class='btn danger'>Restore on this server</summary>
+        <div class='notice' style='background:#fee2e2;color:#991b1b;margin-top:14px'>Restore বর্তমান database replace করবে। Restore-এর আগে automatic safety backup রাখা হবে।</div>
+        <form method='post' action='/settings/full-restore' enctype='multipart/form-data'>
+        <label>BURAQ encrypted full backup (.buraq)</label><input type='file' name='backup_file' accept='.buraq,.gz' required>
+        <label>Confirmation</label><input name='confirmation' placeholder='RESTORE BURAQ' required>
+        <button class='btn danger'>Restore Full Database</button></form></details></div>"""
     return layout("Settings", body, request, "settings")
 
 @app.post("/settings")
@@ -501,6 +517,46 @@ def payroll_backup(request: Request):
     data=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode("utf-8")
     stamp=datetime.now(ZoneInfo(settings.timezone)).strftime("%Y%m%d-%H%M%S")
     return StreamingResponse(io.BytesIO(data),media_type="application/json",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payroll-Backup-{stamp}.json"})
+
+@app.get("/settings/full-backup")
+def full_backup_download(request: Request):
+    require_super_admin(request)
+    path=create_full_backup()
+    audit(request,"full_backup_downloaded","system","database",f"file={path.name}")
+    data=path.read_bytes()
+    return StreamingResponse(io.BytesIO(data),media_type="application/octet-stream",headers={"Content-Disposition":f"attachment; filename={path.name}","Cache-Control":"no-store"})
+
+@app.post("/settings/full-backup/offsite")
+def full_backup_offsite(request: Request):
+    require_super_admin(request)
+    try:
+        path=create_full_backup(); uploaded=upload_offsite(path)
+        audit(request,"full_backup_created","system","database",f"file={path.name}; offsite={uploaded}")
+        return RedirectResponse("/settings?saved=backup" if uploaded else "/settings?error=offsite-not-configured",303)
+    except Exception:
+        logger.exception("Manual full backup failed")
+        return RedirectResponse("/settings?error=backup",303)
+
+@app.post("/settings/full-restore")
+async def full_backup_restore(request: Request):
+    require_super_admin(request)
+    form=await request.form(); upload=form.get("backup_file"); confirmation=str(form.get("confirmation", "")).strip()
+    if confirmation != "RESTORE BURAQ" or not upload:
+        return RedirectResponse("/settings?error=restore-confirmation",303)
+    temporary=Path(tempfile.gettempdir())/f"buraq-restore-{uuid.uuid4().hex}.buraq"
+    try:
+        content=await upload.read()
+        if len(content) > 250 * 1024 * 1024: raise ValueError("Backup is too large")
+        temporary.write_bytes(content)
+        read_backup(temporary)
+        result=restore_full_backup(temporary)
+        logger.warning("Full database restored created_at=%s safety=%s",result["created_at"],result["safety_backup"])
+    except Exception:
+        logger.exception("Full restore failed")
+        return RedirectResponse("/settings?error=full-restore",303)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return RedirectResponse("/settings?saved=full-restore",303)
 
 @app.get("/employees", response_class=HTMLResponse)
 def employees_page(request: Request, q: str = "", department: str = "", shift: str = "", status: str = ""):
