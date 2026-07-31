@@ -400,3 +400,18 @@ def apply_feature_migrations() -> None:
             continue
         with engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE employees ADD COLUMN {column} {definition}"))
+
+    payroll_columns = [
+        ("scheduled_duty_days", "INTEGER NOT NULL DEFAULT 0"),
+        ("worked_duty_days", "INTEGER NOT NULL DEFAULT 0"),
+        ("paid_leave_days", "INTEGER NOT NULL DEFAULT 0"),
+        ("absent_days", "INTEGER NOT NULL DEFAULT 0"),
+        ("absent_deduction", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+    ]
+    existing_payroll = {col["name"] for col in inspect(engine).get_columns("payroll_records")}
+    for column, definition in payroll_columns:
+        if column in existing_payroll:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE payroll_records ADD COLUMN {column} {definition}"))
+    mark_migration("v9.11-duty-based-salary")

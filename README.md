@@ -179,3 +179,11 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Morning, evening and night presets remain fully overridable with selectable start/end time and office.
 - Night duty can be one-time or weekly; an end time earlier than start is treated as next day.
 - Attendance checkout and WhatsApp checkout reminders correctly follow overnight duties across midnight.
+
+## v9.11 Duty-Based Salary Export
+
+- Fixed salary is divided by scheduled duty days to calculate the per-day salary.
+- Missed scheduled duties are deducted automatically; approved paid leave is excluded from absence.
+- The monthly Excel workbook includes every active employee in one file, with Summary and Salary Sheet tabs.
+- Salary Sheet shows scheduled, worked, leave and absent days alongside fixed salary, deductions, overtime, bonus, gross and net salary.
+- Payroll management and exports remain private to authorized HR/Admin users.

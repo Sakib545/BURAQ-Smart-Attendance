@@ -27,7 +27,7 @@ from app.reminders import reminder_worker
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.10.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.11.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -240,7 +240,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.10.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.11.0"}
 
 
 @app.get("/ready")
@@ -252,7 +252,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.10.0",
+        "version": "9.11.0",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -867,6 +867,45 @@ def _payroll_rows(month: str):
             FROM payroll_records p JOIN employees e ON e.id=p.employee_id
             WHERE p.salary_month=? ORDER BY e.staff_id""",(month,)).fetchall()
 
+def _payroll_duty_metrics(employee_id: int, month: str):
+    first=datetime.strptime(month+'-01','%Y-%m-%d').date(); next_month=(first.replace(day=28)+timedelta(days=4)).replace(day=1); last=next_month-timedelta(days=1)
+    today=datetime.now(ZoneInfo(settings.timezone)).date()
+    effective_last=min(last,today) if first<=today<=last else last
+    if today<first: effective_last=first-timedelta(days=1)
+    with get_db() as c:
+        weekly=c.execute("SELECT * FROM duty_schedules WHERE employee_id=? AND is_active",(employee_id,)).fetchall()
+        custom=c.execute("SELECT * FROM custom_duties WHERE employee_id=? AND duty_date>=? AND duty_date<=? AND is_active",(employee_id,first.isoformat(),effective_last.isoformat())).fetchall() if effective_last>=first else []
+        attendance=c.execute("SELECT work_date FROM attendance WHERE employee_id=? AND work_date>=? AND work_date<=? AND check_in IS NOT NULL",(employee_id,first.isoformat(),effective_last.isoformat())).fetchall() if effective_last>=first else []
+        leaves=c.execute("SELECT start_date,end_date FROM leave_requests WHERE employee_id=? AND status='approved' AND start_date<=? AND end_date>=?",(employee_id,effective_last.isoformat(),first.isoformat())).fetchall() if effective_last>=first else []
+    weekly_days={int(r['weekday']) for r in weekly}; custom_dates={r['duty_date'] for r in custom}; scheduled=set(); day=first
+    while day<=effective_last:
+        if day.isoformat() in custom_dates or day.weekday() in weekly_days: scheduled.add(day.isoformat())
+        day+=timedelta(days=1)
+    worked={r['work_date'] for r in attendance} & scheduled; leave_dates=set()
+    for leave in leaves:
+        day=max(datetime.fromisoformat(leave['start_date']).date(),first); end=min(datetime.fromisoformat(leave['end_date']).date(),effective_last)
+        while day<=end:
+            if day.isoformat() in scheduled: leave_dates.add(day.isoformat())
+            day+=timedelta(days=1)
+    paid_leave=leave_dates-worked; absent=scheduled-worked-paid_leave
+    return {"scheduled":len(scheduled),"worked":len(worked),"paid_leave":len(paid_leave),"absent":len(absent)}
+
+def _salary_sheet_rows(month: str):
+    with get_db() as c:
+        rows=c.execute("""SELECT e.id employee_id,e.staff_id,e.name,e.department,e.designation,
+            p.id payroll_id,p.fixed_salary,p.overtime_hours,p.overtime_rate,p.overtime_amount,p.bonus,p.deduction,p.payment_status,p.note
+            FROM employees e LEFT JOIN payroll_records p ON p.employee_id=e.id AND p.salary_month=?
+            WHERE e.is_active ORDER BY e.staff_id""",(month,)).fetchall()
+    output=[]
+    for row in rows:
+        item=dict(row); item.update(_payroll_duty_metrics(row['employee_id'],month)); fixed=float(row['fixed_salary'] or 0); scheduled=item['scheduled']; absent=item['absent']
+        item['per_day_salary']=round(fixed/scheduled,2) if scheduled else 0
+        item['absent_deduction']=round(item['per_day_salary']*absent,2)
+        item['gross_salary']=round(fixed+float(row['overtime_amount'] or 0)+float(row['bonus'] or 0),2)
+        item['net_salary']=round(item['gross_salary']-item['absent_deduction']-float(row['deduction'] or 0),2)
+        output.append(item)
+    return output
+
 def _money(value):
     return f"{float(value or 0):,.2f}"
 
@@ -882,7 +921,7 @@ def payroll_page(request: Request, month: str="", saved: str="", error: str=""):
     notices="<div class='notice'>Payroll saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Payroll could not be saved.</div>" if error else "")
     form=""
     if can_manage:
-        form=f"""<div class='card'><h2>Add or Update Salary</h2><p class='sub'>Saving the same employee and month updates the existing record.</p><form method='post' action='/payroll'><input type='hidden' name='return_month' value='{month}'><label>Employee</label><select name='employee_id' required>{employee_options}</select><label>Salary Month</label><input type='month' name='salary_month' value='{month}' required><div class='two'><div><label>Fixed Salary</label><input type='number' min='0' step='0.01' name='fixed_salary' required></div><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='0'></div></div><div class='two'><div><label>Overtime Hours</label><input type='number' min='0' step='0.01' name='overtime_hours' value='0'></div><div><label>Overtime Rate / Hour</label><input type='number' min='0' step='0.01' name='overtime_rate' value='0'></div></div><label>Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='0'><label>Private HR Note</label><textarea name='note'></textarea><button class='btn'>Calculate & Save</button></form></div>"""
+        form=f"""<div class='card'><h2>Add or Update Salary</h2><p class='sub'>Saving the same employee and month updates the existing record.</p><form method='post' action='/payroll'><input type='hidden' name='return_month' value='{month}'><label>Employee</label><select name='employee_id' required>{employee_options}</select><label>Salary Month</label><input type='month' name='salary_month' value='{month}' required><div class='two'><div><label>Fixed Salary</label><input type='number' min='0' step='0.01' name='fixed_salary' required></div><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='0'></div></div><div class='two'><div><label>Overtime Hours</label><input type='number' min='0' step='0.01' name='overtime_hours' value='0'></div><div><label>Overtime Rate / Hour</label><input type='number' min='0' step='0.01' name='overtime_rate' value='0'></div></div><label>Other / Manual Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='0'><label>Private HR Note</label><textarea name='note'></textarea><button class='btn'>Calculate & Save</button></form></div>"""
     table=[]
     for r in rows:
         controls=""
@@ -894,7 +933,7 @@ def payroll_page(request: Request, month: str="", saved: str="", error: str=""):
         table.append(f"<tr><td><b>{escape(r['staff_id'])}</b><br><span class='sub'>{escape(r['name'])}</span></td><td>{_money(r['fixed_salary'])}</td><td>{r['overtime_hours']:.2f} × {_money(r['overtime_rate'])}<br><b>{_money(r['overtime_amount'])}</b></td><td>{_money(r['bonus'])}</td><td>{_money(r['deduction'])}</td><td><b>{_money(r['net_salary'])}</b></td><td><span class='status {state}'>{escape(r['payment_status'])}</span></td><td>{controls}</td></tr>")
     gross=sum(float(r['net_salary']) for r in rows); paid=sum(float(r['net_salary']) for r in rows if r['payment_status']=='paid')
     export_buttons=f"<a class='btn secondary' href='/payroll/export.xlsx?month={month}'>Excel</a><a class='btn secondary' href='/payroll/export.pdf?month={month}'>PDF</a>" if can_export else ""
-    body=f"""{notices}<div class='hero'><div><div class='eyebrow'>Private HR Module</div><h2>Salary & Payroll</h2><div class='sub'>Employees cannot access this page or its exports.</div></div><div class='actions'>{export_buttons}</div></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><div style='max-width:220px'><label>Salary Month</label><input type='month' name='month' value='{month}'></div><button class='btn'>Open Month</button></form></div><div class='grid'><div class='card'><div class='sub'>Employees</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Net Payroll</div><div class='metric'>৳{_money(gross)}</div></div><div class='card'><div class='sub'>Paid</div><div class='metric'>৳{_money(paid)}</div></div><div class='card'><div class='sub'>Unpaid</div><div class='metric'>৳{_money(gross-paid)}</div></div></div><div class='section-gap'></div><div class='two'>{form}<div class='card'><h2>Calculation</h2><div class='code'>Overtime = Hours × Rate\nNet Salary = Fixed + Overtime + Bonus - Deduction</div><p class='sub'>All inputs are entered manually by authorized HR/Admin. Attendance remains separate and employee-visible salary is disabled.</p></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>{escape(month)} Salary Sheet</h2><table><thead><tr><th>Employee</th><th>Fixed</th><th>Overtime</th><th>Bonus</th><th>Deduction</th><th>Net</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(table) or '<tr><td colspan=8>No salary records for this month.</td></tr>'}</tbody></table></div>"""
+    body=f"""{notices}<div class='hero'><div><div class='eyebrow'>Private HR Module</div><h2>Salary & Payroll</h2><div class='sub'>Employees cannot access this page or its exports.</div></div><div class='actions'>{export_buttons}</div></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><div style='max-width:220px'><label>Salary Month</label><input type='month' name='month' value='{month}'></div><button class='btn'>Open Month</button></form></div><div class='grid'><div class='card'><div class='sub'>Employees</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Net Payroll</div><div class='metric'>৳{_money(gross)}</div></div><div class='card'><div class='sub'>Paid</div><div class='metric'>৳{_money(paid)}</div></div><div class='card'><div class='sub'>Unpaid</div><div class='metric'>৳{_money(gross-paid)}</div></div></div><div class='section-gap'></div><div class='two'>{form}<div class='card'><h2>Calculation</h2><div class='code'>Per Day = Fixed Salary ÷ Scheduled Duty Days\nAbsent = Scheduled - Worked - Paid Leave\nNet = Fixed + Overtime + Bonus - Absent Deduction - Other Deduction</div><p class='sub'>Approved leave is paid and does not reduce salary. Employees cannot view payroll.</p></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>{escape(month)} Salary Sheet</h2><table><thead><tr><th>Employee</th><th>Fixed</th><th>Overtime</th><th>Bonus</th><th>Other Deduction</th><th>Net</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(table) or '<tr><td colspan=8>No salary records for this month.</td></tr>'}</tbody></table></div>"""
     return layout("Private Payroll",body,request,"payroll")
 
 @app.post("/payroll")
@@ -902,12 +941,14 @@ def save_payroll(request: Request, employee_id: int=Form(...), salary_month: str
     require_permission(request,"payroll_manage")
     values=(fixed_salary,overtime_hours,overtime_rate,bonus,deduction)
     if not re.fullmatch(r"\d{4}-\d{2}",salary_month) or any(v<0 for v in values): return RedirectResponse(f"/payroll?month={return_month or salary_month}&error=1",303)
-    overtime=round(overtime_hours*overtime_rate,2); net=round(fixed_salary+overtime+bonus-deduction,2)
+    overtime=round(overtime_hours*overtime_rate,2); duty=_payroll_duty_metrics(employee_id,salary_month)
+    per_day=round(fixed_salary/duty['scheduled'],2) if duty['scheduled'] else 0
+    absent_deduction=round(per_day*duty['absent'],2); net=round(fixed_salary+overtime+bonus-absent_deduction-deduction,2)
     actor=str(request.session.get('hr_id') or 'super_admin')
     with get_db() as c:
-        c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,note,created_by,updated_by)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(employee_id,salary_month) DO UPDATE SET fixed_salary=excluded.fixed_salary,overtime_hours=excluded.overtime_hours,overtime_rate=excluded.overtime_rate,overtime_amount=excluded.overtime_amount,bonus=excluded.bonus,deduction=excluded.deduction,net_salary=excluded.net_salary,note=excluded.note,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP""",
-            (employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime,bonus,deduction,net,note.strip(),actor,actor))
+        c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,note,created_by,updated_by,scheduled_duty_days,worked_duty_days,paid_leave_days,absent_days,absent_deduction)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(employee_id,salary_month) DO UPDATE SET fixed_salary=excluded.fixed_salary,overtime_hours=excluded.overtime_hours,overtime_rate=excluded.overtime_rate,overtime_amount=excluded.overtime_amount,bonus=excluded.bonus,deduction=excluded.deduction,net_salary=excluded.net_salary,note=excluded.note,updated_by=excluded.updated_by,scheduled_duty_days=excluded.scheduled_duty_days,worked_duty_days=excluded.worked_duty_days,paid_leave_days=excluded.paid_leave_days,absent_days=excluded.absent_days,absent_deduction=excluded.absent_deduction,updated_at=CURRENT_TIMESTAMP""",
+            (employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime,bonus,deduction,net,note.strip(),actor,actor,duty['scheduled'],duty['worked'],duty['paid_leave'],duty['absent'],absent_deduction))
     audit(request,"save","payroll",f"{employee_id}:{salary_month}",f"Net salary: {net:.2f}")
     if profile_employee_id==employee_id: return RedirectResponse(f"/employees/{employee_id}?month={salary_month}#payroll",303)
     return RedirectResponse(f"/payroll?month={salary_month}&saved=1",303)
@@ -926,18 +967,53 @@ def payroll_status(request: Request, payroll_id: int, status: str=Form(...), mon
 def payroll_xlsx(request: Request, month: str):
     require_permission(request,"payroll_export")
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
-    rows=_payroll_rows(month); wb=Workbook(); ws=wb.active; ws.title="Payroll"
-    ws.append(["BURAQ PRIVATE PAYROLL",month]); ws.merge_cells("A1:L1"); ws["A1"].font=Font(bold=True,size=16,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="0D3B2E"); ws["A1"].alignment=Alignment(horizontal="center")
-    headers=["Staff ID","Employee","Department","Fixed Salary","OT Hours","OT Rate","OT Amount","Bonus","Deduction","Net Salary","Status","Note"]; ws.append(headers)
-    for c in ws[2]: c.font=Font(bold=True,color="FFFFFF"); c.fill=PatternFill("solid",fgColor="087F5B")
-    for r in rows: ws.append([r['staff_id'],r['name'],r['department'] or "",r['fixed_salary'],r['overtime_hours'],r['overtime_rate'],r['overtime_amount'],r['bonus'],r['deduction'],r['net_salary'],r['payment_status'],r['note'] or ""])
-    total_row=ws.max_row+1; ws.cell(total_row,9,"TOTAL"); ws.cell(total_row,10,f"=SUM(J3:J{total_row-1})"); ws.cell(total_row,9).font=ws.cell(total_row,10).font=Font(bold=True)
-    for row in ws.iter_rows(min_row=3,min_col=4,max_col=10):
-        for cell in row: cell.number_format='#,##0.00'
-    ws.freeze_panes="A3"; ws.auto_filter.ref=f"A2:L{max(2,ws.max_row)}"
-    for col in ws.columns:
-        letter=col[0].column_letter; ws.column_dimensions[letter].width=min(max(len(str(x.value or "")) for x in col)+2,32)
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    rows=_salary_sheet_rows(month); wb=Workbook(); summary=wb.active; summary.title="Summary"; ws=wb.create_sheet("Salary Sheet")
+    dark="0D3B2E"; green="087F5B"; mint="EAF7F2"; pale="F4F7F6"; amber="FFF3CD"; red="FDE2E2"; white="FFFFFF"; grey="64748B"
+    thin=Side(style="thin",color="D9E4E0"); border=Border(bottom=thin)
+    headers=["SL","Staff ID","Employee Name","Department","Designation","Scheduled Duty Days","Worked Duty Days","Paid Leave Days","Absent Days","Fixed Salary","Per Day Salary","Absent Deduction","OT Hours","OT Amount","Bonus","Gross Salary","Other Deduction","Total Deduction","Net Salary","Payment Status","HR Note"]
+    ws.merge_cells("A1:U1"); ws["A1"]="BURAQ MONTHLY SALARY SHEET"; ws["A1"].font=Font(bold=True,size=20,color=white); ws["A1"].fill=PatternFill("solid",fgColor=dark); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.row_dimensions[1].height=34
+    ws.merge_cells("A2:U2"); ws["A2"]=f"Salary Month: {month}  |  Generated: {datetime.now(ZoneInfo(settings.timezone)).strftime('%d %b %Y, %I:%M %p')}  |  HR/Admin Confidential"; ws["A2"].font=Font(italic=True,color=grey); ws["A2"].alignment=Alignment(horizontal="center")
+    for col,title in enumerate(headers,1):
+        cell=ws.cell(4,col,title); cell.font=Font(bold=True,color=white); cell.fill=PatternFill("solid",fgColor=green); cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+    ws.row_dimensions[4].height=42
+    for index,r in enumerate(rows,1):
+        row=4+index
+        values=[index,r['staff_id'],r['name'],r['department'] or "",r['designation'] or "",r['scheduled'],r['worked'],r['paid_leave'],r['absent'],float(r['fixed_salary'] or 0),None,float(r['absent_deduction']),float(r['overtime_hours'] or 0),float(r['overtime_amount'] or 0),float(r['bonus'] or 0),None,float(r['deduction'] or 0),None,None,(r['payment_status'] or "not prepared").title() if r['payroll_id'] else "Not Prepared",r['note'] or ""]
+        for col,value in enumerate(values,1): ws.cell(row,col,value)
+        ws.cell(row,11,f'=IF(F{row}=0,0,J{row}/F{row})')
+        ws.cell(row,12,f'=K{row}*I{row}')
+        ws.cell(row,16,f'=J{row}+N{row}+O{row}')
+        ws.cell(row,18,f'=L{row}+Q{row}')
+        ws.cell(row,19,f'=P{row}-R{row}')
+        fill=PatternFill("solid",fgColor=white if index%2 else pale)
+        for cell in ws[row]: cell.fill=fill; cell.border=border; cell.alignment=Alignment(vertical="center",wrap_text=cell.column in {3,21})
+        status=ws.cell(row,20); status.alignment=Alignment(horizontal="center"); status.fill=PatternFill("solid",fgColor=(mint if status.value=="Paid" else amber if status.value=="Unpaid" else red))
+    first_data=5; last_data=max(first_data,4+len(rows)); total_row=last_data+1
+    ws.cell(total_row,1,"TOTAL"); ws.merge_cells(start_row=total_row,start_column=1,end_row=total_row,end_column=5)
+    for col in [6,7,8,9,10,12,13,14,15,16,17,18,19]: ws.cell(total_row,col,f"=SUM({get_column_letter(col)}{first_data}:{get_column_letter(col)}{last_data})" if rows else 0)
+    for cell in ws[total_row]: cell.font=Font(bold=True,color=white); cell.fill=PatternFill("solid",fgColor=dark); cell.border=border
+    ws.cell(total_row,1).alignment=Alignment(horizontal="right")
+    money_fmt='#,##0.00;[Red](#,##0.00);-'
+    for row in ws.iter_rows(min_row=5,max_row=total_row):
+        for col in [10,11,12,14,15,16,17,18,19]: row[col-1].number_format=money_fmt
+    ws.freeze_panes="F5"; ws.auto_filter.ref=f"A4:U{last_data}"; ws.sheet_view.showGridLines=False
+    widths=[7,14,25,18,18,15,14,14,12,16,16,18,11,15,14,16,18,18,17,16,28]
+    for col,width in enumerate(widths,1): ws.column_dimensions[get_column_letter(col)].width=width
+    ws.page_setup.orientation="landscape"; ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0; ws.print_title_rows="1:4"; ws.sheet_properties.pageSetUpPr.fitToPage=True
+
+    summary.merge_cells("A1:H1"); summary["A1"]="BURAQ PAYROLL SUMMARY"; summary["A1"].font=Font(bold=True,size=20,color=white); summary["A1"].fill=PatternFill("solid",fgColor=dark); summary["A1"].alignment=Alignment(horizontal="center"); summary.row_dimensions[1].height=34
+    summary.merge_cells("A2:H2"); summary["A2"]=f"Salary Month: {month}  |  All active employees included"; summary["A2"].font=Font(italic=True,color=grey); summary["A2"].alignment=Alignment(horizontal="center")
+    metrics=[("Active Employees",len(rows)),("Payroll Prepared",sum(1 for r in rows if r['payroll_id'])),("Scheduled Duties",sum(r['scheduled'] for r in rows)),("Worked Duties",sum(r['worked'] for r in rows)),("Paid Leave Days",sum(r['paid_leave'] for r in rows)),("Absent Days",sum(r['absent'] for r in rows)),("Gross Salary",f"='Salary Sheet'!P{total_row}"),("Total Deductions",f"='Salary Sheet'!R{total_row}"),("Net Payroll",f"='Salary Sheet'!S{total_row}")]
+    for i,(label,value) in enumerate(metrics):
+        row=4+(i//3)*3; col=1+(i%3)*3; summary.merge_cells(start_row=row,start_column=col,end_row=row,end_column=col+1); summary.merge_cells(start_row=row+1,start_column=col,end_row=row+1,end_column=col+1)
+        summary.cell(row,col,label).font=Font(bold=True,color=grey); summary.cell(row,col).alignment=Alignment(horizontal="center"); summary.cell(row+1,col,value).font=Font(bold=True,size=18,color=dark); summary.cell(row+1,col).alignment=Alignment(horizontal="center"); summary.cell(row,col).fill=summary.cell(row+1,col).fill=PatternFill("solid",fgColor=mint)
+        if i>=6: summary.cell(row+1,col).number_format=money_fmt
+    summary.merge_cells("A14:H14"); summary["A14"]="Formula: Fixed Salary ÷ Scheduled Days × Absent Days = Absent Deduction; Paid leave is not deducted."; summary["A14"].alignment=Alignment(horizontal="center",wrap_text=True); summary["A14"].font=Font(italic=True,color=grey)
+    summary.sheet_view.showGridLines=False
+    for col in range(1,9): summary.column_dimensions[get_column_letter(col)].width=17
     out=io.BytesIO(); wb.save(out); out.seek(0)
     return StreamingResponse(out,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payroll-{month}.xlsx"})
 
@@ -958,8 +1034,8 @@ def payroll_pdf(request: Request, month: str):
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.styles import getSampleStyleSheet
-    rows=_payroll_rows(month); out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
-    data=[["Staff ID","Employee","Fixed","OT","Bonus","Deduction","Net","Status"]]+[[str(r['staff_id']),str(r['name']),_money(r['fixed_salary']),_money(r['overtime_amount']),_money(r['bonus']),_money(r['deduction']),_money(r['net_salary']),str(r['payment_status']).title()] for r in rows]
+    rows=_salary_sheet_rows(month); out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
+    data=[["Staff ID","Employee","Duty","Absent","Fixed","Total Ded.","Net","Status"]]+[[str(r['staff_id']),str(r['name']),f"{r['worked']}/{r['scheduled']}",str(r['absent']),_money(r['fixed_salary']),_money(r['absent_deduction']+float(r['deduction'] or 0)),_money(r['net_salary']),str(r['payment_status'] or 'not prepared').title()] for r in rows]
     data.append(["","TOTAL","","","","",_money(sum(float(r['net_salary']) for r in rows)),""])
     doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=24,rightMargin=24,topMargin=24,bottomMargin=24); table=Table(data,repeatRows=1,colWidths=[65,155,75,70,70,75,80,60])
     table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),font),("FONTNAME",(0,-1),(-1,-1),font),("FONTNAME",(0,-1),(-1,-1),font),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#B7C8C2")),("ROWBACKGROUNDS",(0,1),(-1,-2),[colors.white,colors.HexColor("#F4F7F6")]),("ALIGN",(2,1),(-2,-1),"RIGHT"),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
@@ -976,7 +1052,7 @@ def payroll_payslip(request: Request, payroll_id: int):
     with get_db() as c: r=c.execute("SELECT p.*,e.staff_id,e.name,e.department,e.designation FROM payroll_records p JOIN employees e ON e.id=p.employee_id WHERE p.id=?",(payroll_id,)).fetchone()
     if not r: raise HTTPException(404,"Payroll not found")
     out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
-    data=[["Salary Item","Amount (BDT)"],["Fixed Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],["Deduction",f"- {_money(r['deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
+    data=[["Salary Item","Amount (BDT)"],["Fixed Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],[f"Absent deduction ({r['absent_days']} days)",f"- {_money(r['absent_deduction'])}"],["Other deduction",f"- {_money(r['deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
     table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#DCFCE7")),("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10)]))
     doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=45,bottomMargin=45)
     doc.build([Paragraph("BURAQ Salary Statement",styles['Title']),Paragraph(f"Employee: {escape(str(r['name']))}<br/>Staff ID: {escape(str(r['staff_id']))}<br/>Department: {escape(str(r['department'] or '-'))}<br/>Salary month: {r['salary_month']}<br/>Payment status: {str(r['payment_status']).title()}",styles['Normal']),Spacer(1,18),table,Spacer(1,18),Paragraph("Confidential - generated for HR/Admin use only.",styles['Normal'])]); out.seek(0)
