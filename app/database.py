@@ -327,12 +327,23 @@ def apply_feature_migrations() -> None:
             UNIQUE(employee_id,salary_month)
         )""",
         "CREATE INDEX IF NOT EXISTS ix_payroll_month_status ON payroll_records(salary_month,payment_status)",
+        "CREATE INDEX IF NOT EXISTS ix_face_samples_employee ON face_samples(employee_id)",
+        "CREATE INDEX IF NOT EXISTS ix_attendance_work_date ON attendance(work_date)",
+        "CREATE INDEX IF NOT EXISTS ix_attendance_evidence_employee_created ON attendance_evidence(employee_id,created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_pending_registrations_status ON pending_registrations(status)",
+        "CREATE INDEX IF NOT EXISTS ix_leave_requests_status_dates ON leave_requests(status,start_date,end_date)",
+        "CREATE INDEX IF NOT EXISTS ix_corrections_status ON attendance_corrections(status)",
+        "CREATE INDEX IF NOT EXISTS ix_performance_employee_reviewed ON performance_reviews(employee_id,reviewed_at)",
+        "CREATE INDEX IF NOT EXISTS ix_fingerprints_phash ON attendance_fingerprints(phash)",
+        "CREATE INDEX IF NOT EXISTS ix_fingerprints_ahash ON attendance_fingerprints(ahash)",
+        "CREATE INDEX IF NOT EXISTS ix_fingerprints_dhash ON attendance_fingerprints(dhash)",
     ]
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
     mark_migration("v9.5-attendance-fingerprints")
     mark_migration("v9.6-private-payroll")
+    mark_migration("v9.8-performance-optimization")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.

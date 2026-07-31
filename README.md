@@ -151,3 +151,12 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - v9.6.1 fixes active-employee filtering on Railway PostgreSQL for Payroll and Performance pages.
 - v9.6.2 fixes the missing regular-expression import used by Payroll month validation.
 - v9.7 adds a polished confidential Payroll section inside each Employee 360 profile with inline salary create/edit, month summary, history, payment controls and payslip download.
+
+## v9.8 Performance & Railway Optimization
+
+- Face AI models are cached per worker thread instead of being recreated for every selfie.
+- Permission lookups are cached for each HTTP request, removing repeated database queries from complex pages.
+- Dashboard attendance metrics and seven-day trend use grouped aggregate queries.
+- Duplicate detection checks indexed exact hashes plus a bounded recent comparison set.
+- New indexes accelerate face samples, attendance, approvals, leave, corrections, performance and duplicate fingerprints.
+- Existing data, permissions, attendance behavior and payroll calculations remain unchanged.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import urllib.request
+import threading
 from pathlib import Path
 
 import cv2
@@ -14,6 +15,9 @@ DETECTOR = MODEL_DIR / "face_detection_yunet_2023mar.onnx"
 RECOGNIZER = MODEL_DIR / "face_recognition_sface_2021dec.onnx"
 DETECTOR_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 RECOGNIZER_URL = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+
+
+_MODEL_STATE = threading.local()
 
 
 class FaceAIError(Exception):
@@ -33,11 +37,15 @@ def ensure_models() -> None:
 
 
 def _models():
+    cached = getattr(_MODEL_STATE, "models", None)
+    if cached is not None:
+        return cached
     ensure_models()
     try:
         detector = cv2.FaceDetectorYN.create(str(DETECTOR), "", (320, 320), 0.55, 0.30, 5000)
         recognizer = cv2.FaceRecognizerSF.create(str(RECOGNIZER), "")
-        return detector, recognizer
+        _MODEL_STATE.models = (detector, recognizer)
+        return _MODEL_STATE.models
     except Exception as exc:
         raise FaceAIError("Face AI model load হয়নি। Railway logs পরীক্ষা করুন।") from exc
 

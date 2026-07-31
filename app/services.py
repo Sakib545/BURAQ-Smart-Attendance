@@ -273,7 +273,13 @@ def receive_image(phone, media_id, image_bytes=None):
         settings.duplicate_hash_weight, settings.duplicate_face_weight,
         settings.duplicate_pose_weight, settings.duplicate_landmark_weight)
     with get_db() as c:
-        prior = c.execute("SELECT * FROM attendance_fingerprints ORDER BY id DESC LIMIT 1000").fetchall()
+        exact = c.execute("""SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints
+            WHERE phash=? OR ahash=? OR dhash=? ORDER BY id DESC LIMIT 100""",(fingerprint["phash"],fingerprint["ahash"],fingerprint["dhash"])).fetchall()
+        recent = c.execute("SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints ORDER BY id DESC LIMIT 600").fetchall()
+        seen=set(); prior=[]
+        for row in [*exact,*recent]:
+            if row['id'] not in seen:
+                seen.add(row['id']); prior.append(row)
     duplicate = detect_duplicate(fingerprint, prior, limits)
     review_status = "pending" if duplicate.decision == "pending" else "none"
     with get_db() as c:

@@ -25,7 +25,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.7.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.8.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -140,8 +140,13 @@ def require_login(request: Request):
 
 def current_permissions(request: Request):
     require_login(request)
+    cached = getattr(request.state, "permission_cache", None)
+    if cached is not None:
+        return cached
     if request.session.get("role") == "super_admin" and request.session.get("admin"):
-        return set(PERMISSION_CATALOG) | {"*"}
+        allowed = set(PERMISSION_CATALOG) | {"*"}
+        request.state.permission_cache = allowed
+        return allowed
     account_id = request.session.get("hr_id")
     if not account_id:
         return set()
@@ -149,12 +154,17 @@ def current_permissions(request: Request):
         rows = c.execute("SELECT permission FROM account_permissions WHERE account_id=?", (account_id,)).fetchall()
         raw = {r["permission"] for r in rows}
         if "__configured__" in raw:
-            return {p for p in raw if p in PERMISSION_CATALOG}
+            allowed = {p for p in raw if p in PERMISSION_CATALOG}
+            request.state.permission_cache = allowed
+            return allowed
         explicit = {p for p in raw if p in PERMISSION_CATALOG}
         if explicit:
+            request.state.permission_cache = explicit
             return explicit
         role = request.session.get("role", "viewer")
-        return set(DEFAULT_ROLE_PERMISSIONS.get(role, set()))
+        allowed = set(DEFAULT_ROLE_PERMISSIONS.get(role, set()))
+        request.state.permission_cache = allowed
+        return allowed
 
 def has_permission(request: Request, permission: str):
     if not logged_in(request):
@@ -305,21 +315,20 @@ def dashboard(request: Request):
     today = now.date().isoformat()
     week_days = [(now.date() - timedelta(days=i)) for i in range(6, -1, -1)]
     with get_db() as c:
-        employees = c.execute("SELECT COUNT(*) c FROM employees").fetchone()["c"]
-        registered = c.execute("SELECT COUNT(*) c FROM employees WHERE registration_status='approved'").fetchone()["c"]
+        workforce = c.execute("SELECT COUNT(*) employees,SUM(CASE WHEN registration_status='approved' THEN 1 ELSE 0 END) registered FROM employees").fetchone()
+        employees = workforce["employees"]; registered = int(workforce["registered"] or 0)
         pending_registration = c.execute("SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"]
-        present = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_in IS NOT NULL", (today,)).fetchone()["c"]
-        checked_out = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_out IS NOT NULL", (today,)).fetchone()["c"]
-        late = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND late_minutes>0", (today,)).fetchone()["c"]
-        overtime = c.execute("SELECT COALESCE(SUM(overtime_minutes),0) c FROM attendance WHERE work_date=?", (today,)).fetchone()["c"]
+        daily = c.execute("""SELECT SUM(CASE WHEN check_in IS NOT NULL THEN 1 ELSE 0 END) present,
+            SUM(CASE WHEN check_out IS NOT NULL THEN 1 ELSE 0 END) checked_out,
+            SUM(CASE WHEN late_minutes>0 THEN 1 ELSE 0 END) late,
+            COALESCE(SUM(overtime_minutes),0) overtime FROM attendance WHERE work_date=?""",(today,)).fetchone()
+        present=int(daily["present"] or 0); checked_out=int(daily["checked_out"] or 0); late=int(daily["late"] or 0); overtime=int(daily["overtime"] or 0)
         on_leave = c.execute("SELECT COUNT(DISTINCT employee_id) c FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?", (today,today)).fetchone()["c"]
         pending_leave = c.execute("SELECT COUNT(*) c FROM leave_requests WHERE status='pending'").fetchone()["c"]
         pending_correction = c.execute("SELECT COUNT(*) c FROM attendance_corrections WHERE status='pending'").fetchone()["c"]
         recent = c.execute("SELECT a.work_date,a.check_in,a.check_out,a.late_minutes,a.overtime_minutes,e.staff_id,e.name,e.department FROM attendance a JOIN employees e ON e.id=a.employee_id ORDER BY COALESCE(a.check_out,a.check_in,a.created_at) DESC LIMIT 10").fetchall()
-        weekly = []
-        for day in week_days:
-            count = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_in IS NOT NULL", (day.isoformat(),)).fetchone()["c"]
-            weekly.append((day, count))
+        week_counts=c.execute("SELECT work_date,COUNT(*) c FROM attendance WHERE work_date>=? AND work_date<=? AND check_in IS NOT NULL GROUP BY work_date",(week_days[0].isoformat(),week_days[-1].isoformat())).fetchall()
+        by_day={r['work_date']:r['c'] for r in week_counts}; weekly=[(day,by_day.get(day.isoformat(),0)) for day in week_days]
     absent = max(employees - present - on_leave, 0)
     attendance_rate = round((present / employees * 100), 1) if employees else 0
     cfg, db = configured(), database_ok()
