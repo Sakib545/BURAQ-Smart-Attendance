@@ -89,7 +89,7 @@ pip install -r requirements-dev.txt
 ENVIRONMENT=development REQUIRE_SECURE_SECRETS=false pytest -q
 ```
 
-## v9.2 Enterprise Control Center
+## v9.3 Enterprise Control Center
 
 - Commercial HRMS-style control center
 - Live KPI cards: present, late, absent, leave and overtime
@@ -104,7 +104,7 @@ ENVIRONMENT=development REQUIRE_SECURE_SECRETS=false pytest -q
 Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 
 
-## v9.2 Enterprise Employee Center
+## v9.3 Enterprise Employee Center
 - Employee 360-degree profile
 - Attendance calendar and timeline
 - Advanced search and filters
@@ -113,3 +113,12 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Private HR notes with audit trail
 - Documents intentionally excluded from this release
 - Existing PostgreSQL/SQLite data is migrated automatically
+
+
+## v9.3 Simple Performance Review
+- Employee summary card with attendance, late, overtime and latest rating
+- Profile tabs for Profile, Attendance, Leave, Performance and Activity
+- 1–5 ratings across six practical categories
+- HR comments, goals and review history
+- Dynamic `performance_view` and `performance_manage` permissions
+- No Documents module
