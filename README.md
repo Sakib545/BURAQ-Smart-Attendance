@@ -28,3 +28,11 @@ v4.3-এ `/health` database provisioning-এর জন্য 503 দেয় ন�
 - Pending admin approval when the number does not match.
 - Improved check-in, check-out, worked-hours, late and early-leave messages.
 - Safer duplicate-registration handling.
+
+## v5.1.1 Registration Fix
+
+- Railway startup now automatically syncs the bundled 29-person BURAQ employee list.
+- Real Staff IDs such as `B520202` work without running an import command.
+- Existing WhatsApp registrations are preserved during startup sync.
+- The obsolete `BRQ001` demo record and example were removed.
+- Efad's corrected phone number is included: `01706759945`.

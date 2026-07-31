@@ -163,7 +163,7 @@ def process(phone, text):
         employee = employee_by_phone(phone); return menu(employee["name"] if employee else None)
     if command in {"register", "1"}:
         if employee_by_phone(phone): return "✅ এই WhatsApp নম্বর ইতিমধ্যে registered।"
-        set_state(phone, "awaiting_staff_id"); return "আপনার Staff ID পাঠান। উদাহরণ: BRQ001"
+        set_state(phone, "awaiting_staff_id"); return "আপনার Staff ID পাঠান। উদাহরণ: B520202"
     if command in {"help", "5"}: return menu()
     employee = employee_by_phone(phone)
     if not employee: return "❌ আগে Register করুন। শুধু লিখুন: Register"
