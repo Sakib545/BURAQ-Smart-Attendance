@@ -2,6 +2,7 @@ import csv
 import hashlib
 import hmac
 import io
+import json
 import logging
 import os
 import secrets
@@ -15,26 +16,33 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
 from app.database import database_kind, database_ok, database_warning, get_db, init_db
-from app.runtime import configured, get_setting, set_setting
+from app.runtime import configured, get_setting, set_setting, import_environment_defaults, get_stored_setting, restore_stored_setting
 from app.employee_seed import import_employees
 from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="6.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="7.0.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 CSS = """
 <style>
-:root{--bg:#eef4f3;--card:#fff;--ink:#10231f;--muted:#61716d;--brand:#087f5b;--brand2:#056647;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--line:#e5e9f0}
-*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#edf8f4 0%,#f5f7fb 48%,#eef4f3 100%);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink)}
-.wrap{max-width:1160px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.brand{font-size:26px;font-weight:900;letter-spacing:-.5px}.brand:before{content:'◉';color:var(--brand);margin-right:9px}.sub{color:var(--muted);font-size:14px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 12px 35px rgba(15,70,55,.08)}.metric{font-size:30px;font-weight:800;margin-top:8px}.status{display:inline-block;padding:7px 11px;border-radius:999px;font-size:13px;font-weight:700}.ok{background:#dcfce7;color:var(--ok)}.warn{background:#fef3c7;color:var(--warn)}.bad{background:#fee2e2;color:var(--bad)}
-.actions{display:flex;gap:10px;flex-wrap:wrap}.btn{border:0;border-radius:11px;padding:11px 15px;background:var(--brand);color:white;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}.btn:hover{background:var(--brand2)}.btn.secondary{background:#e7f3f1;color:var(--brand2)}.btn.danger{background:#fee2e2;color:var(--bad)}input,select{width:100%;padding:11px 12px;border:1px solid #d7dce5;border-radius:10px;margin:6px 0 14px;background:white}.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line)}th{color:var(--muted)}h2{margin:0 0 14px}h3{margin:0 0 10px}.notice{padding:13px 15px;border-radius:12px;background:#ecfeff;color:#155e75;margin-bottom:16px}.code{font-family:ui-monospace,monospace;background:#111827;color:#f9fafb;padding:12px;border-radius:10px;overflow:auto}.login{max-width:430px;margin:8vh auto}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}@media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}}@media(max-width:520px){.grid{grid-template-columns:1fr}.wrap{padding:14px}.top{align-items:flex-start;gap:12px}}
+:root{--bg:#f4f7f6;--panel:#ffffff;--panel2:#f8faf9;--ink:#15211e;--muted:#697873;--brand:#087f5b;--brand2:#066747;--line:#dfe8e4;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--shadow:0 12px 34px rgba(22,59,49,.09)}
+[data-theme="dark"]{--bg:#0f1715;--panel:#17201d;--panel2:#1c2824;--ink:#eef7f3;--muted:#a4b5af;--brand:#20a97a;--brand2:#37bd8f;--line:#2b3b36;--shadow:none}
+*{box-sizing:border-box}html{color-scheme:light}html[data-theme="dark"]{color-scheme:dark}body{margin:0;background:var(--bg);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink)}
+a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px 1fr}.sidebar{background:#0d3b2e;color:#fff;padding:24px 18px;position:sticky;top:0;height:100vh}.logo{font-size:22px;font-weight:900;line-height:1.2;margin-bottom:6px}.logo:before{content:'◉';color:#59d4a9;margin-right:8px}.side-sub{font-size:12px;color:#b8d4ca;margin-bottom:28px}.side-nav{display:grid;gap:7px}.side-nav a{padding:11px 13px;border-radius:11px;text-decoration:none;color:#d8ebe4;font-weight:650}.side-nav a:hover,.side-nav a.active{background:rgba(255,255,255,.13);color:#fff}.main{min-width:0}.topbar{height:70px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 28px;position:sticky;top:0;z-index:5}.page{padding:26px;max-width:1400px;margin:auto}.title{font-size:27px;font-weight:850;letter-spacing:-.5px}.sub{color:var(--muted);font-size:14px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:15px}.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:20px;box-shadow:var(--shadow)}.metric{font-size:31px;font-weight:850;margin-top:7px}.status{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:999px;font-size:13px;font-weight:750}.status:before{content:'●';font-size:10px}.ok{background:#dcfce7;color:var(--ok)}.warn{background:#fef3c7;color:var(--warn)}.bad{background:#fee2e2;color:var(--bad)}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{border:0;border-radius:11px;padding:10px 14px;background:var(--brand);color:#fff;font-weight:750;cursor:pointer;text-decoration:none;display:inline-block}.btn:hover{background:var(--brand2)}.btn.secondary{background:var(--panel2);border:1px solid var(--line);color:var(--ink)}.btn.danger{background:#fee2e2;color:var(--bad)}input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;margin:6px 0 14px;background:var(--panel);color:var(--ink)}label{font-size:14px;font-weight:700}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line)}th{color:var(--muted)}h2{margin:0 0 14px}h3{margin:0 0 10px}.notice{padding:13px 15px;border-radius:12px;background:#ecfeff;color:#155e75;margin-bottom:16px}.code{font-family:ui-monospace,monospace;background:#111827;color:#f9fafb;padding:12px;border-radius:10px;overflow:auto}.login{max-width:450px;margin:7vh auto;padding:18px}.login .card{padding:30px}.masked{font-family:ui-monospace,monospace;letter-spacing:.5px;background:var(--panel2);padding:11px;border-radius:10px;border:1px solid var(--line)}.section-gap{height:16px}.mobile-menu{display:none}.health-list{display:grid;gap:10px}.health-row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}
+@media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{display:none}.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}.mobile-menu{display:block}.page{padding:16px}.topbar{padding:0 16px}}
+@media(max-width:540px){.grid{grid-template-columns:1fr}.topbar{height:auto;padding:13px 16px;gap:10px}.title{font-size:22px}}
 </style>
 """
 
-def layout(title: str, body: str):
-    return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{escape(title)}</title>{CSS}</head><body>{body}</body></html>")
+def layout(title: str, body: str, request: Request | None = None, active: str = ""):
+    if request is not None and logged_in(request):
+        nav = [("dashboard","Dashboard","/dashboard"),("employees","Employees","/employees"),("pending","Approvals","/pending"),("settings","Settings","/settings")]
+        links = "".join(f"<a class='{"active" if active==k else ""}' href='{u}'>{label}</a>" for k,label,u in nav)
+        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ Smart Attendance</div><div class='side-sub'>Secure Workforce Control Center</div><nav class='side-nav'>{links}<a href='/export/attendance.csv'>Export Attendance</a><a href='/logout'>Logout</a></nav></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div><div class='sub'>Face AI • GPS • WhatsApp</div></div><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></header><div class='page'>{body}</div></main></div>"
+    script = """<script>(function(){const root=document.documentElement;const saved=localStorage.getItem('buraq-theme');if(saved)root.dataset.theme=saved;document.getElementById('themeToggle')?.addEventListener('click',()=>{const next=root.dataset.theme==='dark'?'light':'dark';root.dataset.theme=next;localStorage.setItem('buraq-theme',next);});})();</script>"""
+    return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{escape(title)}</title>{CSS}</head><body>{body}{script}</body></html>")
 
 def hash_password(password: str, salt: str | None = None):
     salt = salt or secrets.token_hex(16)
@@ -57,6 +65,7 @@ def base_url(request: Request): return str(request.base_url).rstrip("/")
 @app.on_event("startup")
 def startup():
     init_db()
+    import_environment_defaults()
     imported = import_employees()
     logger.info("Employee master synced: %s", imported)
 
@@ -66,7 +75,7 @@ def health():
     # dashboard explains any optional database/configuration warning.
     return {
         "ok": True,
-        "version": "6.0.0",
+        "version": "7.0.0",
         "database": database_kind(),
         "database_connected": database_ok(),
         "whatsapp_configured": configured(),
@@ -87,18 +96,19 @@ def home(request: Request):
 
 @app.get("/setup", response_class=HTMLResponse)
 def setup_page(request: Request):
-    if get_setting("admin_password_hash") and not logged_in(request): return RedirectResponse("/login", 302)
-    token = get_setting("whatsapp_verify_token") or secrets.token_urlsafe(24)
-    body=f"<div class='wrap login'><div class='card'><div class='brand'>BURAQ Smart Attendance</div><p class='sub'>One-time Easy Setup</p><form method='post'><label>Admin password</label><input type='password' name='password' minlength='6' required><label>WhatsApp Access Token</label><input name='access_token' value='{escape(get_setting('whatsapp_access_token'))}' required><label>Phone Number ID</label><input name='phone_id' value='{escape(get_setting('whatsapp_phone_number_id'))}' required><label>Verify Token</label><input name='verify_token' value='{escape(token)}' required><button class='btn' type='submit'>Save & Open Dashboard</button></form><p class='sub'>এই তথ্য একবারই দিতে হবে। পরে Dashboard থেকে পরিবর্তন করা যাবে।</p></div></div>"
-    return layout("Easy Setup", body)
+    if get_setting("admin_password_hash"):
+        return RedirectResponse("/dashboard" if logged_in(request) else "/login", 302)
+    cfg_note = "<div class='notice'>Railway Variables থেকে WhatsApp configuration পাওয়া গেছে। শুধু Admin password তৈরি করুন।</div>" if configured() else "<div class='notice' style='background:#fef3c7;color:#92400e'>WhatsApp credentials পরে Dashboard → Settings থেকে যোগ করতে পারবেন।</div>"
+    body=f"<div class='login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>প্রথমবারের নিরাপদ Admin setup</p>{cfg_note}<form method='post'><label>নতুন Admin password</label><input type='password' name='password' minlength='6' required><label>Confirm password</label><input type='password' name='confirm_password' minlength='6' required><button class='btn' type='submit'>Create Admin & Open Dashboard</button></form><p class='sub'>WhatsApp Token, Phone Number ID এবং Verify Token এই page-এ আর চাইবে না।</p></div></div>"
+    return layout("Initial Setup", body)
 
 @app.post("/setup")
-def save_setup(request: Request, password: str = Form(...), access_token: str = Form(...), phone_id: str = Form(...), verify_token: str = Form(...)):
-    if get_setting("admin_password_hash") and not logged_in(request): raise HTTPException(403)
+def save_setup(request: Request, password: str = Form(...), confirm_password: str = Form(...)):
+    if get_setting("admin_password_hash"):
+        raise HTTPException(403)
+    if password != confirm_password or len(password) < 6:
+        raise HTTPException(400, "Passwords do not match or are too short")
     set_setting("admin_password_hash", hash_password(password))
-    set_setting("whatsapp_access_token", access_token.strip())
-    set_setting("whatsapp_phone_number_id", phone_id.strip())
-    set_setting("whatsapp_verify_token", verify_token.strip())
     request.session["admin"] = True
     return RedirectResponse("/dashboard", 303)
 
@@ -127,11 +137,13 @@ def dashboard(request: Request):
         registered = c.execute("SELECT COUNT(*) c FROM employees WHERE registration_status='approved'").fetchone()["c"]
         pending = c.execute("SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"]
         present = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_in IS NOT NULL", (today,)).fetchone()["c"]
+        checked_out = c.execute("SELECT COUNT(*) c FROM attendance WHERE work_date=? AND check_out IS NOT NULL", (today,)).fetchone()["c"]
         recent = c.execute("SELECT a.work_date,a.check_in,a.check_out,a.late_minutes,a.overtime_minutes,e.staff_id,e.name FROM attendance a JOIN employees e ON e.id=a.employee_id ORDER BY a.id DESC LIMIT 12").fetchall()
-    cfg = configured(); db = database_ok(); db_kind = database_kind(); warning = database_warning(); webhook=f"{base_url(request)}/webhook/whatsapp"
-    rows=''.join(f"<tr><td>{escape(str(r['work_date']))}</td><td>{escape(r['staff_id'])}</td><td>{escape(r['name'])}</td><td>{escape((r['check_in'] or '-')[11:16] if r['check_in'] else '-')}</td><td>{escape((r['check_out'] or '-')[11:16] if r['check_out'] else '-')}</td><td>{r['late_minutes']}m</td><td>{r['overtime_minutes']}m</td></tr>" for r in recent) or "<tr><td colspan='7'>এখনো attendance নেই</td></tr>"
-    body=f"<div class='wrap'><div class='top'><div><div class='brand'>BURAQ Smart Attendance</div><div class='sub'>Face AI Security Control Center</div></div><a class='btn secondary' href='/logout'>Logout</a></div><div class='nav'><a class='btn' href='/dashboard'>Dashboard</a><a class='btn secondary' href='/employees'>Employees</a><a class='btn secondary' href='/pending'>Approvals</a><a class='btn secondary' href='/settings'>Settings</a><a class='btn secondary' href='/export/attendance.csv'>Export CSV</a></div><div class='grid'><div class='card'><div class='sub'>Total Employees</div><div class='metric'>{employees}</div></div><div class='card'><div class='sub'>Registered</div><div class='metric'>{registered}</div></div><div class='card'><div class='sub'>Present Today</div><div class='metric'>{present}</div></div><div class='card'><div class='sub'>Pending Approval</div><div class='metric'>{pending}</div></div></div><div style='height:16px'></div><div class='two'><div class='card'><h3>System Status</h3><p><span class='status {'ok' if db else 'bad'}'>Database {'Connected' if db else 'Error'} ({escape(db_kind)})</span></p>{f"<div class='notice' style='background:#fef3c7;color:#92400e'>{escape(warning)}</div>" if warning else ''}<p><span class='status {'ok' if cfg else 'warn'}'>WhatsApp {'Ready' if cfg else 'Setup needed'}</span></p><div class='sub'>Webhook URL</div><div class='code'>{escape(webhook)}</div><p class='sub'>Meta-তে এই URL একবার বসালেই হবে। এরপর Mac বন্ধ থাকলেও Railway-এ চলবে।</p></div><div class='card'><h3>Quick Test</h3><form method='post' action='/test-message'><label>WhatsApp number (country codeসহ)</label><input name='phone' placeholder='8801XXXXXXXXX' required><label>Message</label><input name='message' value='BURAQ Attendance connected ✅'><button class='btn'>Send Test Message</button></form></div></div><div style='height:16px'></div><div class='card'><h2>Recent Attendance</h2><div style='overflow:auto'><table><thead><tr><th>Date</th><th>Staff ID</th><th>Name</th><th>In</th><th>Out</th><th>Late</th><th>OT</th></tr></thead><tbody>{rows}</tbody></table></div></div></div>"
-    return layout("BURAQ Dashboard", body)
+    cfg, db = configured(), database_ok()
+    warning = database_warning(); webhook=f"{base_url(request)}/webhook/whatsapp"
+    rows=''.join(f"<tr><td>{escape(str(r['work_date']))}</td><td><b>{escape(r['staff_id'])}</b></td><td>{escape(r['name'])}</td><td>{escape((r['check_in'] or '-')[11:16] if r['check_in'] else '-')}</td><td>{escape((r['check_out'] or '-')[11:16] if r['check_out'] else '-')}</td><td>{r['late_minutes']}m</td><td>{r['overtime_minutes']}m</td></tr>" for r in recent) or "<tr><td colspan='7'>এখনো attendance নেই</td></tr>"
+    body=f"<div class='grid'><div class='card'><div class='sub'>Total Employees</div><div class='metric'>{employees}</div></div><div class='card'><div class='sub'>Registered</div><div class='metric'>{registered}</div></div><div class='card'><div class='sub'>Present Today</div><div class='metric'>{present}</div></div><div class='card'><div class='sub'>Checked Out</div><div class='metric'>{checked_out}</div></div></div><div class='section-gap'></div><div class='two'><div class='card'><h3>System Health</h3><div class='health-list'><div class='health-row'><span>Database</span><span class='status {'ok' if db else 'bad'}'>{escape(database_kind())}</span></div><div class='health-row'><span>WhatsApp</span><span class='status {'ok' if cfg else 'warn'}'>{'Connected' if cfg else 'Setup needed'}</span></div><div class='health-row'><span>Webhook</span><span class='status ok'>Active</span></div><div class='health-row'><span>Face AI</span><span class='status ok'>Ready</span></div></div>{f"<div class='notice' style='background:#fef3c7;color:#92400e'>{escape(warning)}</div>" if warning else ''}<div class='sub'>Webhook URL</div><div class='code'>{escape(webhook)}</div></div><div class='card'><h3>Quick WhatsApp Test</h3><form method='post' action='/test-message'><label>WhatsApp number</label><input name='phone' placeholder='8801XXXXXXXXX' required><label>Message</label><input name='message' value='BURAQ Attendance connected ✅'><button class='btn'>Send Test Message</button></form><p class='sub'>Pending approvals: <b>{pending}</b></p></div></div><div class='section-gap'></div><div class='card'><div class='actions' style='justify-content:space-between;align-items:center'><h2>Recent Attendance</h2><a class='btn secondary' href='/export/attendance.csv'>Download CSV</a></div><div style='overflow:auto'><table><thead><tr><th>Date</th><th>Staff ID</th><th>Name</th><th>In</th><th>Out</th><th>Late</th><th>OT</th></tr></thead><tbody>{rows}</tbody></table></div></div>"
+    return layout("Dashboard", body, request, "dashboard")
 
 @app.post("/test-message")
 async def test_message(request: Request, phone: str = Form(...), message: str = Form(...)):
@@ -139,19 +151,61 @@ async def test_message(request: Request, phone: str = Form(...), message: str = 
     result = await send_text(phone.strip(), message.strip())
     return RedirectResponse("/dashboard" if result.get("sent") else "/settings?error=send", 303)
 
+def mask_secret(value: str, visible: int = 4) -> str:
+    if not value: return "Not configured"
+    if len(value) <= visible * 2: return "•" * len(value)
+    return value[:visible] + "•" * 12 + value[-visible:]
+
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request, error: str = ""):
+def settings_page(request: Request, saved: str = "", error: str = ""):
     require_login(request)
-    notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Test message পাঠানো যায়নি। Token ও Phone Number ID পরীক্ষা করুন।</div>" if error else ""
+    access=get_setting("whatsapp_access_token"); phone=get_setting("whatsapp_phone_number_id"); verify=get_setting("whatsapp_verify_token")
+    notice = "<div class='notice'>Settings সফলভাবে save হয়েছে।</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Action ব্যর্থ হয়েছে। তথ্য পরীক্ষা করুন।</div>" if error else "")
     webhook=f"{base_url(request)}/webhook/whatsapp"
-    body=f"<div class='wrap'><div class='top'><div><div class='brand'>Settings</div><div class='sub'>সব গুরুত্বপূর্ণ সেটিং এক জায়গায়</div></div><a class='btn secondary' href='/dashboard'>Dashboard</a></div>{notice}<div class='two'><div class='card'><h2>WhatsApp Connection</h2><form method='post'><label>Access Token</label><input type='password' name='access_token' value='{escape(get_setting('whatsapp_access_token'))}' required><label>Phone Number ID</label><input name='phone_id' value='{escape(get_setting('whatsapp_phone_number_id'))}' required><label>Verify Token</label><input name='verify_token' value='{escape(get_setting('whatsapp_verify_token'))}' required><button class='btn'>Save Settings</button></form></div><div class='card'><h2>Meta Webhook</h2><div class='sub'>Callback URL</div><div class='code'>{escape(webhook)}</div><br><div class='sub'>Verify Token</div><div class='code'>{escape(get_setting('whatsapp_verify_token'))}</div><p class='sub'>Meta Webhooks-এ messages field Subscribe করুন। এই কাজ শুধু একবার।</p></div></div></div>"
-    return layout("Settings", body)
+    body=f"{notice}<div class='two'><div class='card'><h2>WhatsApp Connection</h2><p><span class='status {'ok' if configured() else 'warn'}'>{'Connected' if configured() else 'Setup needed'}</span></p><div class='sub'>Access Token</div><div class='masked'>{escape(mask_secret(access))}</div><br><div class='sub'>Phone Number ID</div><div class='masked'>{escape(mask_secret(phone))}</div><br><div class='sub'>Verify Token</div><div class='masked'>{escape(mask_secret(verify))}</div><br><details><summary class='btn secondary'>Edit credentials</summary><form method='post' style='margin-top:15px'><label>New Access Token</label><input type='password' name='access_token' placeholder='খালি রাখলে আগেরটি থাকবে'><label>New Phone Number ID</label><input name='phone_id' placeholder='খালি রাখলে আগেরটি থাকবে'><label>New Verify Token</label><input type='password' name='verify_token' placeholder='খালি রাখলে আগেরটি থাকবে'><button class='btn'>Save securely</button></form></details></div><div class='card'><h2>Connection & Webhook</h2><div class='sub'>Callback URL</div><div class='code'>{escape(webhook)}</div><br><div class='actions'><form method='post' action='/test-message'><input type='hidden' name='phone' value=''><input type='hidden' name='message' value='BURAQ test'><a class='btn secondary' href='/dashboard'>Open Test Panel</a></form><a class='btn secondary' href='/settings/backup'>Export Config Backup</a></div><p class='sub'>Credentials database-এ encrypted অবস্থায় রাখা হয়। Railway Variables থাকলে প্রথম startup-এ automatic import হবে।</p></div></div><div class='section-gap'></div><div class='two'><div class='card'><h2>Change Admin Password</h2><form method='post' action='/settings/password'><label>Current password</label><input type='password' name='current_password' required><label>New password</label><input type='password' name='new_password' minlength='6' required><button class='btn'>Update Password</button></form></div><div class='card'><h2>Restore Config Backup</h2><form method='post' action='/settings/restore' enctype='multipart/form-data'><label>Backup JSON file</label><input type='file' name='backup_file' accept='.json,application/json' required><button class='btn secondary'>Restore Backup</button></form><p class='sub'>Restore করলে বর্তমান WhatsApp credentials প্রতিস্থাপিত হবে।</p></div></div>"
+    return layout("Settings", body, request, "settings")
 
 @app.post("/settings")
-def save_settings(request: Request, access_token: str = Form(...), phone_id: str = Form(...), verify_token: str = Form(...)):
+def save_settings(request: Request, access_token: str = Form(""), phone_id: str = Form(""), verify_token: str = Form("")):
     require_login(request)
-    set_setting("whatsapp_access_token", access_token.strip()); set_setting("whatsapp_phone_number_id", phone_id.strip()); set_setting("whatsapp_verify_token", verify_token.strip())
-    return RedirectResponse("/dashboard", 303)
+    if access_token.strip(): set_setting("whatsapp_access_token", access_token.strip())
+    if phone_id.strip(): set_setting("whatsapp_phone_number_id", phone_id.strip())
+    if verify_token.strip(): set_setting("whatsapp_verify_token", verify_token.strip())
+    return RedirectResponse("/settings?saved=1", 303)
+
+@app.post("/settings/password")
+def change_password(request: Request, current_password: str = Form(...), new_password: str = Form(...)):
+    require_login(request)
+    if not verify_password(current_password, get_setting("admin_password_hash")) or len(new_password) < 6:
+        return RedirectResponse("/settings?error=password", 303)
+    set_setting("admin_password_hash", hash_password(new_password))
+    return RedirectResponse("/settings?saved=password", 303)
+
+@app.get("/settings/backup")
+def backup_settings(request: Request):
+    require_login(request)
+    payload={"version":1,"encrypted":True,"created_at":datetime.now(ZoneInfo(settings.timezone)).isoformat(),"settings":{key:get_stored_setting(key) for key in ("whatsapp_access_token","whatsapp_phone_number_id","whatsapp_verify_token")},"plain_settings":{"meta_api_version":get_setting("meta_api_version","v23.0")}}
+    data=json.dumps(payload,ensure_ascii=False,indent=2).encode("utf-8")
+    return StreamingResponse(io.BytesIO(data),media_type="application/json",headers={"Content-Disposition":"attachment; filename=BURAQ-Config-Backup.json"})
+
+@app.post("/settings/restore")
+async def restore_settings(request: Request):
+    require_login(request)
+    form=await request.form(); upload=form.get("backup_file")
+    try:
+        data=json.loads((await upload.read()).decode("utf-8"))
+        values=data.get("settings",{})
+        if data.get("encrypted"):
+            for key in ("whatsapp_access_token","whatsapp_phone_number_id","whatsapp_verify_token"):
+                if values.get(key): restore_stored_setting(key,str(values[key]))
+            plain=data.get("plain_settings",{})
+            if plain.get("meta_api_version"): set_setting("meta_api_version",str(plain["meta_api_version"]))
+        else:
+            for key in ("whatsapp_access_token","whatsapp_phone_number_id","whatsapp_verify_token","meta_api_version"):
+                if values.get(key): set_setting(key,str(values[key]))
+    except Exception:
+        return RedirectResponse("/settings?error=restore",303)
+    return RedirectResponse("/settings?saved=restore",303)
 
 @app.get("/employees", response_class=HTMLResponse)
 def employees_page(request: Request):
@@ -159,7 +213,7 @@ def employees_page(request: Request):
     with get_db() as c: rows=c.execute("SELECT e.*,(SELECT COUNT(*) FROM face_samples f WHERE f.employee_id=e.id) face_count FROM employees e ORDER BY staff_id").fetchall()
     trs=''.join(f"<tr><td><b>{escape(r['staff_id'])}</b></td><td>{escape(r['name'])}</td><td>{escape(r['phone'] or '')}</td><td>{escape(r['department'] or '')}</td><td>{escape(r['shift'])}</td><td><span class='status {'ok' if r['registration_status']=='approved' else 'warn'}'>{escape(r['registration_status'])}</span></td><td><span class='status {'ok' if r['face_count']>=3 else 'bad'}'>{r['face_count']}/3</span></td><td><form method='post' action='/employees/{r['id']}/reset-face'><button class='btn danger'>Reset Face</button></form></td></tr>" for r in rows) or "<tr><td colspan='8'>কোনো employee নেই</td></tr>"
     body=f"<div class='wrap'><div class='top'><div><div class='brand'>Employees</div><div class='sub'>Add and manage staff</div></div><a class='btn secondary' href='/dashboard'>Dashboard</a></div><div class='two'><div class='card'><h2>Add Employee</h2><form method='post'><label>Staff ID</label><input name='staff_id' required><label>Name</label><input name='name' required><label>Phone</label><input name='phone' placeholder='8801XXXXXXXXX'><label>Department</label><input name='department'><label>Shift</label><select name='shift'><option value='morning'>Morning 8AM–4PM</option><option value='evening'>Evening 4PM–10PM</option></select><button class='btn'>Add Employee</button></form></div><div class='card'><h2>Employee List</h2><div style='overflow:auto'><table><thead><tr><th>ID</th><th>Name</th><th>Phone</th><th>Dept.</th><th>Shift</th><th>Status</th><th>Face AI</th><th>Action</th></tr></thead><tbody>{trs}</tbody></table></div></div></div></div>"
-    return layout("Employees", body)
+    return layout("Employees", body, request, "employees")
 
 @app.post("/employees")
 def add_employee(request: Request, staff_id: str = Form(...), name: str = Form(...), phone: str = Form(""), department: str = Form(""), shift: str = Form("morning")):
@@ -188,7 +242,7 @@ def pending_page(request: Request):
     require_login(request)
     with get_db() as c: rows=c.execute("SELECT p.id,p.whatsapp_phone,p.created_at,e.staff_id,e.name FROM pending_registrations p JOIN employees e ON e.id=p.employee_id WHERE p.status='pending' ORDER BY p.id DESC").fetchall()
     trs=''.join(f"<tr><td>{escape(r['staff_id'])}</td><td>{escape(r['name'])}</td><td>{escape(r['whatsapp_phone'])}</td><td><form method='post' action='/pending/{r['id']}/approve'><button class='btn'>Approve</button></form></td><td><form method='post' action='/pending/{r['id']}/reject'><button class='btn danger'>Reject</button></form></td></tr>" for r in rows) or "<tr><td colspan='5'>কোনো pending registration নেই</td></tr>"
-    return layout("Approvals", f"<div class='wrap'><div class='top'><div><div class='brand'>Registration Approvals</div><div class='sub'>One-click approval</div></div><a class='btn secondary' href='/dashboard'>Dashboard</a></div><div class='card'><table><thead><tr><th>Staff ID</th><th>Name</th><th>WhatsApp</th><th></th><th></th></tr></thead><tbody>{trs}</tbody></table></div></div>")
+    return layout("Approvals", f"<div class='card'><table><thead><tr><th>Staff ID</th><th>Name</th><th>WhatsApp</th><th></th><th></th></tr></thead><tbody>{trs}</tbody></table></div>", request, "pending")
 
 @app.post("/pending/{pending_id}/approve")
 def approve_pending(request: Request, pending_id: int, background_tasks: BackgroundTasks):
