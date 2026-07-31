@@ -29,7 +29,7 @@ from app.backups import payroll_backup_worker
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.12.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.13.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -61,9 +61,10 @@ a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px
 .profile-hero{display:grid;grid-template-columns:110px 1fr auto;gap:20px;align-items:center}.profile-photo{width:104px;height:104px;border-radius:24px;object-fit:cover;background:var(--panel2);border:1px solid var(--line);display:grid;place-items:center;font-size:35px;font-weight:900;color:var(--brand)}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.fact{padding:13px;background:var(--panel2);border:1px solid var(--line);border-radius:12px}.fact b{display:block;margin-top:4px}.calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:7px}.cal-day{min-height:76px;border:1px solid var(--line);border-radius:11px;padding:8px;background:var(--panel2)}.cal-day.empty{opacity:.35}.cal-day.present{border-left:4px solid #15803d}.cal-day.late{border-left:4px solid #b45309}.cal-day.leave{border-left:4px solid #2563eb}.cal-day.absent{border-left:4px solid #b91c1c}.searchbar{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:10px;align-items:end}.checkbox{width:auto;margin:0}.table-actions{display:flex;gap:6px;flex-wrap:wrap}.tag{display:inline-flex;padding:4px 8px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);font-size:11px;font-weight:750}
 .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}.tab{padding:9px 13px;border:1px solid var(--line);border-radius:10px;text-decoration:none;background:var(--panel)}.summary-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.rating{font-size:22px;font-weight:850}.stars{color:#b7791f;letter-spacing:2px}
 .payroll-panel{background:linear-gradient(135deg,#0d3b2e,#087f5b);color:#fff;border:0}.payroll-panel .sub{color:#c8e6dc}.payroll-amount{font-size:34px;font-weight:900;letter-spacing:-1px}.money-card{position:relative;overflow:hidden}.money-card:after{content:'৳';position:absolute;right:14px;top:4px;font-size:64px;font-weight:900;color:rgba(8,127,91,.07)}.salary-breakdown{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.salary-part{padding:14px;border-radius:13px;background:var(--panel2);border:1px solid var(--line)}.salary-part b{display:block;font-size:18px;margin-top:5px}.confidential{display:inline-flex;gap:7px;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.14);font-size:11px;font-weight:800}
-.sidebar{display:flex;flex-direction:column;overflow-y:auto}.side-nav{flex:0 0 auto}.side-account{margin-top:auto;padding:12px;border-radius:12px;background:rgba(255,255,255,.08);flex:0 0 auto}.side-account .side-sub{margin:3px 0 0}
+.sidebar{display:flex;flex-direction:column;overflow-y:auto}.side-nav{flex:0 0 auto}.side-account{margin-top:auto;padding:12px;border-radius:12px;background:rgba(255,255,255,.08);flex:0 0 auto}.side-account .side-sub{margin:3px 0 0}.mobile-panel{position:absolute;right:16px;top:62px;min-width:210px;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:8px;box-shadow:var(--shadow);display:grid;z-index:20}.mobile-panel a{padding:11px;text-decoration:none;border-radius:9px}.mobile-panel a.active{background:var(--panel2);color:var(--brand);font-weight:800}.mobile-menu summary{list-style:none}
+.control-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.control-card{display:block;text-decoration:none;min-height:150px;transition:.18s ease}.control-card:hover{transform:translateY(-3px);border-color:var(--brand)}.control-icon{font-size:30px;margin-bottom:16px}.control-card h3{font-size:18px}.control-card .sub{line-height:1.5}
 @media(max-width:900px){.summary-strip{grid-template-columns:1fr 1fr}.shell{grid-template-columns:1fr}.sidebar{display:none}.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}.mobile-menu{display:block}.page{padding:16px}.topbar{padding:0 16px}}
-@media(max-width:700px){.profile-hero{grid-template-columns:1fr}.facts{grid-template-columns:1fr 1fr}.salary-breakdown{grid-template-columns:1fr 1fr}.searchbar{grid-template-columns:1fr}.calendar{gap:4px}.cal-day{min-height:58px;padding:5px}}
+@media(max-width:700px){.control-grid{grid-template-columns:1fr}.profile-hero{grid-template-columns:1fr}.facts{grid-template-columns:1fr 1fr}.salary-breakdown{grid-template-columns:1fr 1fr}.searchbar{grid-template-columns:1fr}.calendar{gap:4px}.cal-day{min-height:58px;padding:5px}}
 @media(max-width:540px){.grid{grid-template-columns:1fr}.topbar{height:auto;padding:13px 16px;gap:10px}.title{font-size:22px}}
 </style>
 """
@@ -71,25 +72,12 @@ a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px
 def layout(title: str, body: str, request: Request | None = None, active: str = ""):
     if request is not None and logged_in(request):
         role = request.session.get("role", "super_admin")
-        nav = [
-            ("dashboard","Dashboard","/dashboard","dashboard_view"),
-            ("employees","Employees","/employees","employees_view"),
-            ("performance","Performance","/performance","performance_view"),
-            ("pending","Approvals","/pending","approvals_view"),
-            ("duplicates","Duplicate Analysis","/duplicates","approvals_view"),
-            ("reports","Reports","/reports","reports_view"),
-            ("payroll","Payroll","/payroll","payroll_view"),
-            ("operations","HR Operations","/hr-operations","leave_view"),
-            ("duty","Duty Scheduler","/duty-schedules","duty_view"),
-            ("hr","User Accounts","/hr-accounts","user_accounts_view"),
-            ("audit","Activity Logs","/audit-logs","audit_view"),
-            ("settings","Settings","/settings","settings_view"),
-        ]
-        nav = [item for item in nav if has_permission(request, item[3])]
-        links = "".join(f"<a class='{"active" if active==k else ""}' href='{u}'>{label}</a>" for k,label,u,_ in nav)
+        group={"performance":"employees","pending":"admin","duplicates":"admin","reports":"attendance","operations":"attendance","duty":"attendance","hr":"admin","audit":"admin","settings":"admin"}.get(active,active)
+        nav=[("dashboard","Dashboard","/dashboard",has_permission(request,"dashboard_view")),("employees","Employees","/employees",has_permission(request,"employees_view") or has_permission(request,"performance_view")),("attendance","Attendance","/attendance",any(has_permission(request,p) for p in ("reports_view","duty_view","leave_view","attendance_edit"))),("payroll","Payroll","/payroll",has_permission(request,"payroll_view")),("admin","Admin","/admin",any(has_permission(request,p) for p in ("approvals_view","user_accounts_view","audit_view","settings_view","shift_manage","department_manage")))]
+        links = "".join(f"<a class='{"active" if group==k else ""}' href='{u}'>{label}</a>" for k,label,u,visible in nav if visible)
         user_name = escape(str(request.session.get("user_name", "Admin")))
         role_label = escape(role.replace("_", " ").title())
-        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ Smart Attendance</div><div class='side-sub'>Enterprise Workforce Control Center</div><nav class='side-nav'>{links}{"<a href='/export/attendance.csv'>Export Attendance</a>" if has_permission(request, 'reports_export') else ''}<a href='/logout'>Logout</a></nav><div class='side-account'><b>{user_name}</b><div class='side-sub'>{role_label}</div></div></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div><div class='sub'>Face AI • GPS • WhatsApp • HR Control</div></div><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></header><div class='page'>{body}</div></main></div>"
+        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ Smart Attendance</div><div class='side-sub'>Simple Workforce Control Center</div><nav class='side-nav'>{links}<a href='/logout'>Logout</a></nav><div class='side-account'><b>{user_name}</b><div class='side-sub'>{role_label}</div></div></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div><div class='sub'>Everything organized in five simple sections</div></div><div class='actions'><details class='mobile-menu'><summary class='btn secondary'>☰ Menu</summary><div class='mobile-panel'>{links}<a href='/logout'>Logout</a></div></details><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></div></header><div class='page'>{body}</div></main></div>"
     script = """<script>(function(){const root=document.documentElement;const saved=localStorage.getItem('buraq-theme');if(saved)root.dataset.theme=saved;document.getElementById('themeToggle')?.addEventListener('click',()=>{const next=root.dataset.theme==='dark'?'light':'dark';root.dataset.theme=next;localStorage.setItem('buraq-theme',next);});})();</script>"""
     return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{escape(title)}</title>{CSS}</head><body>{body}{script}</body></html>")
 
@@ -226,7 +214,7 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9.12 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.13 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
@@ -244,7 +232,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.12.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.13.0"}
 
 
 @app.get("/ready")
@@ -256,7 +244,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.12.0",
+        "version": "9.13.0",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -372,7 +360,7 @@ def dashboard(request: Request):
     quick=[]
     if has_permission(request,'employees_view'): quick.append("<a class='quick-link' href='/employees'>👥 Employee Directory</a>")
     if can_approvals: quick.append(f"<a class='quick-link' href='/pending'>✅ Registration Approvals <span class='pill'>{pending_registration}</span></a>")
-    if can_operations: quick.append(f"<a class='quick-link' href='/hr-operations'>🗂 HR Operations <span class='pill'>{pending_leave+pending_correction}</span></a>")
+    if can_operations: quick.append(f"<a class='quick-link' href='/attendance'>🗂 Attendance Center <span class='pill'>{pending_leave+pending_correction}</span></a>")
     if has_permission(request,'reports_view'): quick.append("<a class='quick-link' href='/reports'>📊 Open Reports</a>")
     if has_permission(request,'user_accounts_view'): quick.append("<a class='quick-link' href='/hr-accounts'>🔐 User & Permissions</a>")
     if has_permission(request,'settings_view'): quick.append("<a class='quick-link' href='/settings'>⚙️ System Settings</a>")
@@ -402,6 +390,43 @@ def dashboard(request: Request):
     <div class='card'><div class='card-head'><div><h3>System Health</h3><div class='sub'>Production services and integrations</div></div><span class='status {'ok' if db and cfg else 'warn'}'>{'Healthy' if db and cfg else 'Attention'}</span></div>{system_note}<div class='grid'><div><span class='health-dot'></span> <b>Database</b><div class='sub'>{escape(database_kind())}</div></div><div><span class='health-dot' style='background:{'#15803d' if cfg else '#b45309'}'></span> <b>WhatsApp</b><div class='sub'>{'Connected' if cfg else 'Setup needed'}</div></div><div><span class='health-dot'></span> <b>Webhook</b><div class='sub'>Active</div></div><div><span class='health-dot'></span> <b>Face AI</b><div class='sub'>Ready</div></div></div></div>
     """
     return layout("Control Center", body, request, "dashboard")
+
+@app.get("/attendance", response_class=HTMLResponse)
+def attendance_center(request: Request):
+    require_login(request)
+    cards=[]
+    if has_permission(request,"reports_view"): cards.append(("📊","Attendance Reports","Daily records, late, overtime and employee attendance history.","/reports"))
+    if has_permission(request,"duty_view"): cards.append(("🗓","Duty Schedule","Regular, custom, Friday and night duty with reminder status.","/duty-schedules"))
+    if has_permission(request,"leave_view"): cards.append(("🏖","Leave & Corrections","Leave approval, attendance correction, shifts and departments.","/hr-operations"))
+    if has_permission(request,"reports_export"): cards.append(("📥","Reports & Export","Download filtered attendance as Excel, PDF or CSV.","/reports"))
+    if not cards: raise HTTPException(403,"Permission denied")
+    content=''.join(f"<a class='card control-card' href='{url}'><div class='control-icon'>{icon}</div><h3>{title}</h3><div class='sub'>{description}</div></a>" for icon,title,description,url in cards)
+    body=f"<div class='hero'><div><div class='eyebrow'>One Simple Workspace</div><h2>Attendance Center</h2><div class='sub'>Attendance, duty, leave, corrections and exports are organized here.</div></div></div><div class='control-grid'>{content}</div>"
+    return layout("Attendance",body,request,"attendance")
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_center(request: Request):
+    require_login(request)
+    cards=[]
+    if has_permission(request,"approvals_view"):
+        cards.extend([("✅","All Approvals","Registration, leave, correction and duplicate review in one place.","/approvals"),("🔎","Duplicate Review","Open duplicate attendance evidence directly.","/duplicates")])
+    if has_permission(request,"user_accounts_view"): cards.append(("👤","Users & Permissions","Manage HR accounts, roles and access permissions.","/hr-accounts"))
+    if has_permission(request,"audit_view"): cards.append(("🧾","Activity Logs","See who changed attendance, payroll or system data.","/audit-logs"))
+    if has_permission(request,"settings_view"): cards.append(("⚙️","Settings & Backup","WhatsApp connection, webhook, password and backups.","/settings"))
+    if has_permission(request,"shift_manage") or has_permission(request,"department_manage"): cards.append(("🏢","Office Setup","Manage shifts and departments from HR Operations.","/hr-operations"))
+    if not cards: raise HTTPException(403,"Permission denied")
+    content=''.join(f"<a class='card control-card' href='{url}'><div class='control-icon'>{icon}</div><h3>{title}</h3><div class='sub'>{description}</div></a>" for icon,title,description,url in cards)
+    body=f"<div class='hero'><div><div class='eyebrow'>Restricted Control</div><h2>Admin Center</h2><div class='sub'>Approvals, security, accounts, logs and settings in one place.</div></div></div><div class='control-grid'>{content}</div>"
+    return layout("Admin",body,request,"admin")
+
+@app.get("/approvals", response_class=HTMLResponse)
+def approvals_center(request: Request):
+    require_permission(request,"approvals_view")
+    cards=[("👤","Registration","Approve or reject new employee WhatsApp registrations.","/pending"),("🔎","Duplicate Attendance","Review duplicate evidence and Accept/Pending/Reject decisions.","/duplicates")]
+    if has_permission(request,"leave_view"): cards.append(("🏖","Leave & Corrections","Review leave and attendance correction requests.","/hr-operations"))
+    content=''.join(f"<a class='card control-card' href='{url}'><div class='control-icon'>{icon}</div><h3>{title}</h3><div class='sub'>{description}</div></a>" for icon,title,description,url in cards)
+    body=f"<div class='hero'><div><div class='eyebrow'>Review Queue</div><h2>All Approvals</h2><div class='sub'>Choose the approval type instead of searching separate menus.</div></div></div><div class='control-grid'>{content}</div>"
+    return layout("Approvals",body,request,"admin")
 
 @app.post("/test-message")
 async def test_message(request: Request, phone: str = Form(...), message: str = Form(...)):

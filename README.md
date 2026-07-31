@@ -202,3 +202,12 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Finalization blocks records with incomplete checkout dates, and Super Admin can download a full payroll JSON backup.
 - Daily payroll backups are written to `BACKUP_DIR` (default `/data/backups`); mount a Railway persistent volume at `/data`.
 - Joining and resignation date proration are intentionally not included.
+
+## v9.13 Simple Control Center
+
+- Sidebar is reduced to Dashboard, Employees, Attendance, Payroll and Admin.
+- Attendance Center combines reports, exports, duty schedules, leave and attendance corrections.
+- Admin Center combines approvals, duplicate review, users, permissions, activity logs, office setup and settings.
+- Performance remains inside each Employee Profile, avoiding a duplicate top-level menu.
+- Existing feature URLs remain available, while active navigation highlights their new parent section.
+- Responsive mobile navigation exposes the same five simple sections.
