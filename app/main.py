@@ -27,7 +27,7 @@ from app.reminders import reminder_worker
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.11.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.11.1", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -240,7 +240,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.11.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.11.1"}
 
 
 @app.get("/ready")
@@ -252,7 +252,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.11.0",
+        "version": "9.11.1",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -1034,13 +1034,15 @@ def payroll_pdf(request: Request, month: str):
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.styles import getSampleStyleSheet
-    rows=_salary_sheet_rows(month); out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    month_label=datetime.strptime(month,"%Y-%m").strftime("%B %Y")
+    rows=_salary_sheet_rows(month); out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font; styles['Normal'].alignment=1; styles['Normal'].textColor=colors.HexColor("#64748B"); styles['Heading1'].fontName=font; styles['Heading1'].fontSize=22; styles['Heading1'].leading=26; styles['Heading1'].alignment=1; styles['Heading1'].textColor=colors.HexColor("#087F5B")
     data=[["Staff ID","Employee","Duty","Absent","Fixed","Total Ded.","Net","Status"]]+[[str(r['staff_id']),str(r['name']),f"{r['worked']}/{r['scheduled']}",str(r['absent']),_money(r['fixed_salary']),_money(r['absent_deduction']+float(r['deduction'] or 0)),_money(r['net_salary']),str(r['payment_status'] or 'not prepared').title()] for r in rows]
     data.append(["","TOTAL","","","","",_money(sum(float(r['net_salary']) for r in rows)),""])
     doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=24,rightMargin=24,topMargin=24,bottomMargin=24); table=Table(data,repeatRows=1,colWidths=[65,155,75,70,70,75,80,60])
     table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),font),("FONTNAME",(0,-1),(-1,-1),font),("FONTNAME",(0,-1),(-1,-1),font),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#B7C8C2")),("ROWBACKGROUNDS",(0,1),(-1,-2),[colors.white,colors.HexColor("#F4F7F6")]),("ALIGN",(2,1),(-2,-1),"RIGHT"),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
-    doc.build([Paragraph("BURAQ Private Payroll Report",styles['Title']),Paragraph(f"Salary month: {month} | HR/Admin confidential",styles['Normal']),Spacer(1,12),table]); out.seek(0)
-    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payroll-{month}.pdf"})
+    doc.build([Paragraph("BURAQ Payment Sheet",styles['Title']),Spacer(1,4),Paragraph(month_label,styles['Heading1']),Paragraph("HR/Admin confidential",styles['Normal']),Spacer(1,14),table]); out.seek(0)
+    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payment-Sheet-{month}.pdf"})
 
 @app.get("/payroll/{payroll_id}/payslip.pdf")
 def payroll_payslip(request: Request, payroll_id: int):

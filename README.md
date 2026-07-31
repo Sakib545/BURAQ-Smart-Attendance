@@ -187,3 +187,4 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - The monthly Excel workbook includes every active employee in one file, with Summary and Salary Sheet tabs.
 - Salary Sheet shows scheduled, worked, leave and absent days alongside fixed salary, deductions, overtime, bonus, gross and net salary.
 - Payroll management and exports remain private to authorized HR/Admin users.
+- v9.11.1 renames the monthly PDF to BURAQ Payment Sheet and displays the selected month prominently.
