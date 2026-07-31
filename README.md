@@ -170,3 +170,4 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Employee `My Duty` button shows the next seven days without typing.
 - Database-backed reminder logs prevent repeated messages and provide an Admin audit view.
 - v9.9.1 adds one-day Custom Duty assignments; a custom date/time/office overrides that employee's weekly duty and reminder for the selected date.
+- v9.9.2 fixes sidebar account-card overlap when the navigation menu is taller than the viewport.
