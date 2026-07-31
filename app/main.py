@@ -31,7 +31,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.15.1", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.15.2", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -209,6 +209,8 @@ def startup():
     issues = settings.production_issues()
     if issues:
         raise RuntimeError("Production configuration invalid: " + "; ".join(issues))
+    for warning in settings.production_warnings():
+        logger.warning("Optional configuration warning: %s", warning)
     init_db()
     import_environment_defaults()
     if not get_setting("admin_email"):
@@ -216,7 +218,7 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9.15.1 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.15.2 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
@@ -234,7 +236,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.15.1"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.15.2"}
 
 
 @app.get("/ready")
@@ -246,7 +248,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.15.1",
+        "version": "9.15.2",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 

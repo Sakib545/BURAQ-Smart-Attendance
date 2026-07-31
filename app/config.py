@@ -54,14 +54,19 @@ class Settings:
                     issues.append(f"{key} must be at least 32 characters")
         if self.environment == "production" and not os.getenv("DATABASE_URL", "").strip():
             issues.append("DATABASE_URL is required in production")
+        return issues
+
+    def production_warnings(self) -> list[str]:
+        """Non-critical integrations must never prevent attendance startup."""
+        warnings: list[str] = []
         backup_key = os.getenv("BACKUP_ENCRYPTION_KEY", "").strip()
         if backup_key and len(backup_key) < 32:
-            issues.append("BACKUP_ENCRYPTION_KEY must be at least 32 characters")
+            warnings.append("BACKUP_ENCRYPTION_KEY is short; CONFIG_ENCRYPTION_KEY fallback will be used")
         if os.getenv("BACKUP_S3_BUCKET", "").strip():
-            for key in ("BACKUP_S3_ACCESS_KEY_ID", "BACKUP_S3_SECRET_ACCESS_KEY"):
-                if not os.getenv(key, "").strip():
-                    issues.append(f"{key} is required when BACKUP_S3_BUCKET is set")
-        return issues
+            missing = [key for key in ("BACKUP_S3_ACCESS_KEY_ID", "BACKUP_S3_SECRET_ACCESS_KEY") if not os.getenv(key, "").strip()]
+            if missing:
+                warnings.append("Off-site backup disabled; missing " + ", ".join(missing))
+        return warnings
 
     def validate(self) -> list[str]:
         missing = []

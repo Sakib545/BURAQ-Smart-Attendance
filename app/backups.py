@@ -68,7 +68,9 @@ def _metadata() -> MetaData:
 
 
 def _fernet() -> Fernet | None:
-    secret = (os.getenv("BACKUP_ENCRYPTION_KEY") or os.getenv("CONFIG_ENCRYPTION_KEY") or "").strip()
+    backup_secret = os.getenv("BACKUP_ENCRYPTION_KEY", "").strip()
+    # A bad optional backup variable must not weaken encryption or crash the app.
+    secret = backup_secret if len(backup_secret) >= 32 else os.getenv("CONFIG_ENCRYPTION_KEY", "").strip()
     if not secret:
         return None
     key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
@@ -98,7 +100,8 @@ def backup_status() -> dict:
         "local_count": len(files),
         "latest_file": files[0].name if files else "",
         "latest_size": files[0].stat().st_size if files else 0,
-        "offsite_configured": bool(os.getenv("BACKUP_S3_BUCKET", "").strip()),
+        "offsite_configured": all(os.getenv(key, "").strip() for key in
+                                  ("BACKUP_S3_BUCKET", "BACKUP_S3_ACCESS_KEY_ID", "BACKUP_S3_SECRET_ACCESS_KEY")),
         "encrypted": _fernet() is not None,
     })
     return status
@@ -145,7 +148,7 @@ def create_full_backup(target: Path | None = None) -> Path:
         "format": FORMAT,
         "version": VERSION,
         "created_at": now.isoformat(),
-        "app_version": "9.15.1",
+        "app_version": "9.15.2",
         "source_database": database.database_kind(),
         "table_counts": counts,
         "tables": tables,
@@ -246,15 +249,17 @@ def _prune_local_backups() -> None:
 def upload_offsite(path: Path) -> bool:
     """Upload to AWS S3, Cloudflare R2, Backblaze B2 or MinIO when configured."""
     bucket = os.getenv("BACKUP_S3_BUCKET", "").strip()
-    if not bucket:
+    access_key = os.getenv("BACKUP_S3_ACCESS_KEY_ID", "").strip()
+    secret_key = os.getenv("BACKUP_S3_SECRET_ACCESS_KEY", "").strip()
+    if not bucket or not access_key or not secret_key:
         return False
     import boto3
     client = boto3.client(
         "s3",
         endpoint_url=os.getenv("BACKUP_S3_ENDPOINT") or None,
         region_name=os.getenv("BACKUP_S3_REGION", "auto"),
-        aws_access_key_id=os.getenv("BACKUP_S3_ACCESS_KEY_ID") or None,
-        aws_secret_access_key=os.getenv("BACKUP_S3_SECRET_ACCESS_KEY") or None,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
     )
     prefix = os.getenv("BACKUP_S3_PREFIX", "buraq-attendance").strip("/")
     key = f"{prefix}/{path.name}"

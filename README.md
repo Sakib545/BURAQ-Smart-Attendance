@@ -274,3 +274,10 @@ python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
 - Message-এ Check-in/Check-out action, review score এবং পরবর্তী করণীয় থাকে।
 - Notification background-এ যায়; temporary send failure হলে সর্বোচ্চ তিনবার retry হয়।
 - WhatsApp number না থাকলে approval action বন্ধ হয় না এবং server log-এ কারণ লেখা হয়।
+
+### v9.15.2 Startup fail-safe
+
+- Optional backup/S3 variable ভুল বা অসম্পূর্ণ হলেও attendance app আর health-check failure দিয়ে বন্ধ হবে না।
+- ছোট `BACKUP_ENCRYPTION_KEY` উপেক্ষা করে নিরাপদ `CONFIG_ENCRYPTION_KEY` fallback ব্যবহার হয়।
+- অসম্পূর্ণ S3 credentials থাকলে শুধু off-site upload বন্ধ থাকে; database, webhook এবং dashboard সচল থাকে।
+- Configuration সমস্যা Deploy Logs-এ warning হিসেবে দেখা যায়, fatal startup error হিসেবে নয়।
