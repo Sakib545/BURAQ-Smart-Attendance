@@ -46,7 +46,8 @@ def _make_engine(url: str) -> Engine:
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
     else:
-        kwargs.update({"pool_size": 5, "max_overflow": 10, "pool_recycle": 300})
+        kwargs.update({"pool_size": 5, "max_overflow": 10, "pool_recycle": 300,
+                       "pool_timeout": 15, "connect_args": {"connect_timeout": 10}})
     return create_engine(url, **kwargs)
 
 

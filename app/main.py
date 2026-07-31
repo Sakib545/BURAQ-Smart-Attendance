@@ -27,11 +27,11 @@ from app.employee_seed import import_employees
 from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_text
 from app.reminders import reminder_worker
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
-from app.backups import create_full_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
+from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.14.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.15.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -216,7 +216,7 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9.14 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.15 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
@@ -234,7 +234,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.14.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.15.0"}
 
 
 @app.get("/ready")
@@ -246,7 +246,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.14.0",
+        "version": "9.15.0",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -452,13 +452,23 @@ def settings_page(request: Request, saved: str = "", error: str = ""):
     else:
         body=f"{notice}<div class='card'><h2>General Settings</h2><div class='notice'>আপনার account-এ WhatsApp Settings permission নেই। Token, Phone Number ID, Verify Token এবং Webhook URL গোপন রাখা হয়েছে।</div></div>"
     if request.session.get("role") == "super_admin":
-        offsite = bool(os.getenv("BACKUP_S3_BUCKET", "").strip())
+        recovery=backup_status(); offsite=recovery["offsite_configured"]
+        latest=escape(recovery.get("latest_file") or "No backup yet")
+        local_success=escape(recovery.get("last_local_success") or "Waiting for first backup")
+        remote_success=escape(recovery.get("last_offsite_success") or ("Waiting for first upload" if offsite else "Not configured"))
+        recovery_error=escape(recovery.get("last_error") or "None")
         body += f"""<div class='card' style='margin-top:18px'><h2>Disaster Recovery</h2>
-        <p><span class='status {'ok' if offsite else 'warn'}'>{'Off-site backup active' if offsite else 'Local backup only'}</span></p>
+        <p><span class='status {'ok' if recovery.get('verified') else 'warn'}'>{'Latest backup verified' if recovery.get('verified') else 'Verification pending'}</span>
+        <span class='status {'ok' if offsite else 'warn'}'>{'Off-site active' if offsite else 'Local only'}</span>
+        <span class='status {'ok' if recovery.get('encrypted') else 'bad'}'>{'Encrypted' if recovery.get('encrypted') else 'Encryption missing'}</span></p>
+        <div class='two'><div><div class='sub'>Latest local backup</div><b>{latest}</b><p class='sub'>{local_success} · {recovery.get('local_count',0)} retained</p></div>
+        <div><div class='sub'>Latest off-site copy</div><b>{remote_success}</b><p class='sub'>Last error: {recovery_error}</p></div></div>
         <p class='sub'>Full backup-এ employee, face embedding, attendance, duty, payroll, approval, user, settings ও audit history থাকে। প্রতিদিন automatic backup হয়।</p>
         <div class='table-actions'><a class='btn' href='/settings/full-backup'>Download Full Backup</a>
         <form method='post' action='/settings/full-backup/offsite'><button class='btn secondary'>Backup Now</button></form></div>
         <hr style='border:0;border-top:1px solid var(--line);margin:20px 0'>
+        <details><summary class='btn secondary'>Verify a backup</summary><form method='post' action='/settings/full-backup/inspect' enctype='multipart/form-data' style='margin-top:14px'>
+        <input type='file' name='backup_file' accept='.buraq,.gz' required><button class='btn secondary'>Check Without Restoring</button></form></details>
         <details><summary class='btn danger'>Restore on this server</summary>
         <div class='notice' style='background:#fee2e2;color:#991b1b;margin-top:14px'>Restore বর্তমান database replace করবে। Restore-এর আগে automatic safety backup রাখা হবে।</div>
         <form method='post' action='/settings/full-restore' enctype='multipart/form-data'>
@@ -532,10 +542,31 @@ def full_backup_offsite(request: Request):
     try:
         path=create_full_backup(); uploaded=upload_offsite(path)
         audit(request,"full_backup_created","system","database",f"file={path.name}; offsite={uploaded}")
-        return RedirectResponse("/settings?saved=backup" if uploaded else "/settings?error=offsite-not-configured",303)
+        return RedirectResponse("/settings?saved=backup" if uploaded else "/settings?saved=backup-local",303)
     except Exception:
         logger.exception("Manual full backup failed")
         return RedirectResponse("/settings?error=backup",303)
+
+@app.post("/settings/full-backup/inspect", response_class=HTMLResponse)
+async def full_backup_inspect(request: Request):
+    require_super_admin(request)
+    form=await request.form(); upload=form.get("backup_file")
+    temporary=Path(tempfile.gettempdir())/f"buraq-inspect-{uuid.uuid4().hex}.buraq"
+    try:
+        content=await upload.read()
+        if len(content) > 250 * 1024 * 1024: raise ValueError("Backup is too large")
+        temporary.write_bytes(content); info=inspect_backup(temporary)
+        body=f"""<div class='card'><h2>Backup Verification Passed</h2><p><span class='status ok'>Valid & readable</span></p>
+        <div class='two'><div><div class='sub'>Created</div><b>{escape(str(info['created_at']))}</b><br><div class='sub'>Source</div><b>{escape(str(info['source_database']))}</b></div>
+        <div><div class='sub'>App version</div><b>{escape(str(info['app_version']))}</b><br><div class='sub'>Contents</div><b>{info['tables']} tables · {info['rows']} rows</b></div></div>
+        <p class='sub'>কোনো data restore বা পরিবর্তন করা হয়নি।</p><a class='btn' href='/settings'>Back to Settings</a></div>"""
+        return layout("Backup Verification",body,request,"settings")
+    except Exception as exc:
+        logger.warning("Backup inspection failed: %s",exc)
+        body=f"<div class='card'><h2>Backup Verification Failed</h2><div class='notice' style='background:#fee2e2;color:#991b1b'>{escape(str(exc))}</div><a class='btn' href='/settings'>Back to Settings</a></div>"
+        return layout("Backup Verification",body,request,"settings")
+    finally:
+        temporary.unlink(missing_ok=True)
 
 @app.post("/settings/full-restore")
 async def full_backup_restore(request: Request):

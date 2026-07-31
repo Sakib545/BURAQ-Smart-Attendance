@@ -5,4 +5,5 @@ exec uvicorn app.main:app \
   --port "${PORT:-8000}" \
   --proxy-headers \
   --forwarded-allow-ips="*" \
-  --timeout-keep-alive 30
+  --timeout-keep-alive 30 \
+  --timeout-graceful-shutdown 30

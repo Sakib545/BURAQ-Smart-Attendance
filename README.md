@@ -255,3 +255,15 @@ If the dashboard is unavailable, restore from the command line:
 ```bash
 python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
 ```
+
+## v9.15 Production Safety Edition
+
+- Every generated backup is immediately decrypted, parsed and row-count verified before it is marked successful.
+- Backup creation uses a repeatable-read PostgreSQL transaction for a consistent multi-table snapshot.
+- Off-site uploads retry three times and verify the remote object size before reporting success.
+- Settings shows encryption, verification, local retention, last local/off-site success and the latest error.
+- Super Admin can inspect any `.buraq` file without restoring or changing live data.
+- Restore validates required tables and row counts before replacement, then verifies all committed table counts afterward.
+- Production validation blocks incomplete S3 credentials or a short backup encryption key.
+- PostgreSQL connection and pool timeouts prevent long hangs, while Docker health checks and graceful shutdown improve crash recovery.
+- `.env.example` provides one portable variable checklist for Railway or another host.

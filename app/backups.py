@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import hashlib
+import time as time_module
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 FORMAT = "buraq_full_backup"
 VERSION = 1
 MAGIC = b"BURAQBACKUP1\n"
+REQUIRED_TABLES = {"employees", "attendance", "system_settings"}
 
 
 def _backup_dir() -> Path:
@@ -73,6 +75,55 @@ def _fernet() -> Fernet | None:
     return Fernet(key)
 
 
+def _status_path() -> Path:
+    return _backup_dir() / "backup-status.json"
+
+
+def _write_status(**values) -> None:
+    status = backup_status()
+    status.update(values)
+    status["updated_at"] = datetime.now(ZoneInfo(settings.timezone)).isoformat()
+    target = _status_path(); temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(status, ensure_ascii=False, default=str), encoding="utf-8")
+    temporary.replace(target)
+
+
+def backup_status() -> dict:
+    try:
+        status = json.loads(_status_path().read_text(encoding="utf-8"))
+    except Exception:
+        status = {}
+    files = sorted(_backup_dir().glob("buraq-full-*.buraq"), key=lambda p: p.stat().st_mtime, reverse=True)
+    status.update({
+        "local_count": len(files),
+        "latest_file": files[0].name if files else "",
+        "latest_size": files[0].stat().st_size if files else 0,
+        "offsite_configured": bool(os.getenv("BACKUP_S3_BUCKET", "").strip()),
+        "encrypted": _fernet() is not None,
+    })
+    return status
+
+
+def validate_payload(payload: dict, known_tables: set[str] | None = None) -> dict:
+    if payload.get("format") != FORMAT or payload.get("version") != VERSION:
+        raise ValueError("Unsupported or invalid BURAQ full backup")
+    tables = payload.get("tables")
+    if not isinstance(tables, dict):
+        raise ValueError("Backup has no database tables")
+    missing = REQUIRED_TABLES - set(tables)
+    if missing:
+        raise ValueError("Backup is incomplete; missing: " + ", ".join(sorted(missing)))
+    if known_tables is not None:
+        unknown = set(tables) - known_tables
+        if unknown:
+            raise ValueError("Backup contains unknown tables: " + ", ".join(sorted(unknown)))
+    expected = payload.get("table_counts", {})
+    for name, rows in tables.items():
+        if not isinstance(rows, list) or int(expected.get(name, -1)) != len(rows):
+            raise ValueError(f"Backup row-count verification failed: {name}")
+    return {"tables": len(tables), "rows": sum(len(rows) for rows in tables.values())}
+
+
 def create_full_backup(target: Path | None = None) -> Path:
     """Create an atomic compressed dump of every application table."""
     now = datetime.now(ZoneInfo(settings.timezone))
@@ -80,7 +131,9 @@ def create_full_backup(target: Path | None = None) -> Path:
     metadata = _metadata()
     tables = {}
     counts = {}
-    with database.engine.connect() as conn:
+    with database.engine.begin() as conn:
+        if database.database_kind() == "postgresql":
+            conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
         for table in metadata.sorted_tables:
             rows = [
                 {key: _encode(value) for key, value in row.items()}
@@ -92,7 +145,7 @@ def create_full_backup(target: Path | None = None) -> Path:
         "format": FORMAT,
         "version": VERSION,
         "created_at": now.isoformat(),
-        "app_version": "9.14.0",
+        "app_version": "9.15.0",
         "source_database": database.database_kind(),
         "table_counts": counts,
         "tables": tables,
@@ -106,7 +159,11 @@ def create_full_backup(target: Path | None = None) -> Path:
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_bytes(content)
     temporary.replace(target)
+    verified = read_backup(target)
+    totals = validate_payload(verified, {table.name for table in metadata.sorted_tables})
     _prune_local_backups()
+    _write_status(last_local_success=now.isoformat(), last_error="", verified=True,
+                  latest_rows=totals["rows"], latest_tables=totals["tables"])
     return target
 
 
@@ -124,11 +181,20 @@ def read_backup(path: Path) -> dict:
         payload = json.loads(gzip.decompress(content).decode("utf-8"))
     except Exception as exc:
         raise ValueError("Backup file is damaged or invalid") from exc
-    if payload.get("format") != FORMAT or payload.get("version") != VERSION:
-        raise ValueError("Unsupported or invalid BURAQ full backup")
-    if not isinstance(payload.get("tables"), dict):
-        raise ValueError("Backup has no database tables")
+    validate_payload(payload)
     return payload
+
+
+def inspect_backup(path: Path) -> dict:
+    payload = read_backup(path)
+    totals = validate_payload(payload)
+    return {
+        "valid": True,
+        "created_at": payload.get("created_at"),
+        "app_version": payload.get("app_version"),
+        "source_database": payload.get("source_database"),
+        **totals,
+    }
 
 
 def restore_full_backup(path: Path) -> dict:
@@ -136,9 +202,7 @@ def restore_full_backup(path: Path) -> dict:
     payload = read_backup(path)
     metadata = _metadata()
     known = {table.name: table for table in metadata.sorted_tables}
-    unknown = set(payload["tables"]) - set(known)
-    if unknown:
-        raise ValueError("Backup contains unknown tables: " + ", ".join(sorted(unknown)))
+    validate_payload(payload, set(known))
 
     # A failed or mistaken restore remains recoverable.
     safety = create_full_backup(_backup_dir() / f"before-restore-{datetime.now():%Y%m%d-%H%M%S}.buraq")
@@ -161,6 +225,14 @@ def restore_full_backup(path: Path) -> dict:
                         "COALESCE((SELECT MAX(\"" + pk[0].name + "\") FROM \"" + table.name + "\"),1), "
                         "EXISTS(SELECT 1 FROM \"" + table.name + "\"))"
                     ), {"table": table.name, "column": pk[0].name})
+    # Verify committed row counts using a fresh connection.
+    with database.engine.connect() as conn:
+        for table in metadata.sorted_tables:
+            actual = conn.execute(text(f'SELECT COUNT(*) FROM "{table.name}"')).scalar_one()
+            if actual != restored[table.name]:
+                raise RuntimeError(f"Post-restore verification failed: {table.name}")
+    _write_status(last_restore_success=datetime.now(ZoneInfo(settings.timezone)).isoformat(),
+                  last_restore_source=payload.get("created_at"), last_error="")
     return {"restored": restored, "safety_backup": str(safety), "created_at": payload.get("created_at")}
 
 
@@ -185,8 +257,24 @@ def upload_offsite(path: Path) -> bool:
         aws_secret_access_key=os.getenv("BACKUP_S3_SECRET_ACCESS_KEY") or None,
     )
     prefix = os.getenv("BACKUP_S3_PREFIX", "buraq-attendance").strip("/")
-    client.upload_file(str(path), bucket, f"{prefix}/{path.name}")
-    return True
+    key = f"{prefix}/{path.name}"
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            client.upload_file(str(path), bucket, key)
+            remote = client.head_object(Bucket=bucket, Key=key)
+            if int(remote.get("ContentLength", -1)) != path.stat().st_size:
+                raise RuntimeError("Remote backup size verification failed")
+            _write_status(last_offsite_success=datetime.now(ZoneInfo(settings.timezone)).isoformat(),
+                          last_offsite_key=key, last_error="")
+            return True
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Off-site backup attempt %s/3 failed: %s", attempt, exc)
+            if attempt < 3:
+                time_module.sleep(attempt * 2)
+    _write_status(last_error=f"Off-site upload failed: {last_error}")
+    raise RuntimeError(f"Off-site backup failed after 3 attempts: {last_error}") from last_error
 
 
 async def backup_worker():
@@ -201,7 +289,9 @@ async def backup_worker():
                 logger.info("Daily full backup saved path=%s offsite=%s", path, offsite)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            try: _write_status(last_error=str(exc), last_failure=datetime.now(ZoneInfo(settings.timezone)).isoformat())
+            except Exception: pass
             logger.exception("Daily full backup failed")
         await asyncio.sleep(3600)
 

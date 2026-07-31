@@ -54,6 +54,13 @@ class Settings:
                     issues.append(f"{key} must be at least 32 characters")
         if self.environment == "production" and not os.getenv("DATABASE_URL", "").strip():
             issues.append("DATABASE_URL is required in production")
+        backup_key = os.getenv("BACKUP_ENCRYPTION_KEY", "").strip()
+        if backup_key and len(backup_key) < 32:
+            issues.append("BACKUP_ENCRYPTION_KEY must be at least 32 characters")
+        if os.getenv("BACKUP_S3_BUCKET", "").strip():
+            for key in ("BACKUP_S3_ACCESS_KEY_ID", "BACKUP_S3_SECRET_ACCESS_KEY"):
+                if not os.getenv(key, "").strip():
+                    issues.append(f"{key} is required when BACKUP_S3_BUCKET is set")
         return issues
 
     def validate(self) -> list[str]:
