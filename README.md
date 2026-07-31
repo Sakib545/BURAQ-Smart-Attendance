@@ -160,3 +160,12 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Duplicate detection checks indexed exact hashes plus a bounded recent comparison set.
 - New indexes accelerate face samples, attendance, approvals, leave, corrections, performance and duplicate fingerprints.
 - Existing data, permissions, attendance behavior and payroll calculations remain unchanged.
+
+## v9.9 Zero-Touch Duty & Registration
+
+- Known employee numbers receive the interactive attendance menu immediately after `Hi`.
+- Unknown numbers are asked only for Staff ID; mismatched numbers go directly to Admin Pending Approval without YES/CANCEL typing.
+- HR/Admin weekly duty roster with employee, weekday, start/end time and office.
+- Automatic WhatsApp utility-template reminders 30 minutes before duty, 10 minutes after a missed check-in and 10 minutes before checkout.
+- Employee `My Duty` button shows the next seven days without typing.
+- Database-backed reminder logs prevent repeated messages and provide an Admin audit view.

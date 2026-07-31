@@ -1,4 +1,5 @@
 import csv
+import asyncio
 import hashlib
 import hmac
 import io
@@ -22,10 +23,11 @@ from app.database import database_kind, database_ok, database_warning, get_db, i
 from app.runtime import configured, get_setting, set_setting, import_environment_defaults, get_stored_setting, restore_stored_setting
 from app.employee_seed import import_employees
 from app.whatsapp import handle, send_approval_flow, send_text
+from app.reminders import reminder_worker
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.8.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.9.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -75,6 +77,7 @@ def layout(title: str, body: str, request: Request | None = None, active: str = 
             ("reports","Reports","/reports","reports_view"),
             ("payroll","Payroll","/payroll","payroll_view"),
             ("operations","HR Operations","/hr-operations","leave_view"),
+            ("duty","Duty Scheduler","/duty-schedules","duty_view"),
             ("hr","User Accounts","/hr-accounts","user_accounts_view"),
             ("audit","Activity Logs","/audit-logs","audit_view"),
             ("settings","Settings","/settings","settings_view"),
@@ -115,6 +118,8 @@ PERMISSION_CATALOG = {
     "payroll_view": ("Payroll: View", "Private salary records দেখবে"),
     "payroll_manage": ("Payroll: Manage", "Salary, overtime, bonus ও payment status পরিবর্তন করবে"),
     "payroll_export": ("Payroll: Export", "Private payslip ও monthly Excel/PDF export করবে"),
+    "duty_view": ("Duty: View", "Employee duty roster ও reminder status দেখবে"),
+    "duty_manage": ("Duty: Manage", "Duty schedule তৈরি ও পরিবর্তন করবে"),
     "leave_view": ("Leave: View", "Leave এবং correction request দেখবে"),
     "leave_manage": ("Leave: Approve/Reject", "Leave ও correction approve/reject করবে"),
     "attendance_edit": ("Attendance: Correct", "Attendance correction request করবে"),
@@ -127,8 +132,8 @@ PERMISSION_CATALOG = {
     "user_accounts_manage": ("User Accounts: Manage", "Admin/HR account create, disable বা delete করবে"),
 }
 DEFAULT_ROLE_PERMISSIONS = {
-    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
-    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
     "hr_executive": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit"},
     "hr_officer": {"dashboard_view","employees_view","performance_view","reports_view","leave_view"},
     "viewer": {"dashboard_view","reports_view"},
@@ -218,11 +223,23 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9.2 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.9 started database=%s employees_synced=%s", database_kind(), imported)
+
+@app.on_event("startup")
+async def start_reminders():
+    app.state.reminder_task=asyncio.create_task(reminder_worker())
+
+@app.on_event("shutdown")
+async def stop_reminders():
+    task=getattr(app.state,"reminder_task",None)
+    if task:
+        task.cancel()
+        try: await task
+        except asyncio.CancelledError: pass
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.4.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.9.0"}
 
 
 @app.get("/ready")
@@ -634,7 +651,7 @@ def pending_page(request: Request):
 
 @app.post("/pending/{pending_id}/approve")
 def approve_pending(request: Request, pending_id: int, background_tasks: BackgroundTasks):
-    require_login(request)
+    require_permission(request,"approvals_manage")
     notify = None
     with get_db() as c:
         row=c.execute("SELECT p.*,e.name,e.staff_id FROM pending_registrations p JOIN employees e ON e.id=p.employee_id WHERE p.id=? AND p.status='pending'", (pending_id,)).fetchone()
@@ -1028,6 +1045,44 @@ def save_department(request: Request, name: str=Form(...)):
     require_permission(request,"department_manage")
     with get_db() as c: c.execute("INSERT INTO departments(name) VALUES(?) ON CONFLICT(name) DO NOTHING",(name.strip(),))
     audit(request,"save","department",name,""); return RedirectResponse("/hr-operations?saved=1",303)
+
+@app.get("/duty-schedules", response_class=HTMLResponse)
+def duty_schedules_page(request: Request, saved: str=""):
+    require_permission(request,"duty_view"); can_manage=has_permission(request,"duty_manage")
+    with get_db() as c:
+        employees=c.execute("SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id").fetchall()
+        rows=c.execute("SELECT d.*,e.staff_id,e.name FROM duty_schedules d JOIN employees e ON e.id=d.employee_id ORDER BY e.staff_id,d.weekday").fetchall()
+        logs=c.execute("SELECT l.*,e.staff_id,e.name FROM duty_reminder_logs l JOIN employees e ON e.id=l.employee_id ORDER BY l.id DESC LIMIT 50").fetchall()
+    days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']; options=''.join(f"<option value='{e['id']}'>{escape(e['staff_id'])} - {escape(e['name'])}</option>" for e in employees)
+    form=''
+    if can_manage:
+        day_options=''.join(f"<option value='{i}'>{d}</option>" for i,d in enumerate(days))
+        form=f"""<div class='card'><h2>Assign Weekly Duty</h2><p class='sub'>একই employee ও weekday আবার save করলে schedule update হবে।</p><form method='post'><label>Employee</label><select name='employee_id'>{options}</select><label>Weekday</label><select name='weekday'>{day_options}</select><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Office</label><input name='office_name' value='BURAQ Office'><button class='btn'>Save Duty</button></form></div>"""
+    roster=[]
+    for r in rows:
+        action=f"<form method='post' action='/duty-schedules/{r['id']}/delete' onsubmit=\"return confirm('Delete this duty?')\"><button class='btn danger'>Delete</button></form>" if can_manage else ''
+        roster.append(f"<tr><td><b>{escape(r['staff_id'])}</b><div class='sub'>{escape(r['name'])}</div></td><td>{days[int(r['weekday'])]}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td><span class='status {'ok' if r['is_active'] else 'bad'}'>{'Active' if r['is_active'] else 'Off'}</span></td><td>{action}</td></tr>")
+    log_rows=''.join(f"<tr><td>{escape(str(x['created_at']))}</td><td>{escape(x['staff_id'])} - {escape(x['name'])}</td><td>{escape(x['duty_date'])}</td><td>{escape(x['reminder_type'])}</td><td><span class='status ok'>{escape(x['status'])}</span></td></tr>" for x in logs) or '<tr><td colspan=5>No reminders sent yet.</td></tr>'
+    notice="<div class='notice'>Duty schedule saved.</div>" if saved else ''
+    body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Zero-Touch Workforce</div><h2>Duty Scheduler & Reminders</h2><div class='sub'>Automatic duty, late and checkout WhatsApp reminders.</div></div><span class='pill'>{len(rows)} weekly duties</span></div><div class='two'>{form}<div class='card'><h2>Reminder Timing</h2><div class='salary-part'><span class='sub'>Before duty</span><b>30 minutes</b></div><div class='salary-part'><span class='sub'>Late alert</span><b>10 minutes after start</b></div><div class='salary-part'><span class='sub'>Checkout</span><b>10 minutes before end</b></div><p class='sub'>Approved Bengali utility templates: duty_reminder, late_reminder, checkout_reminder.</p></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Weekly Roster</h2><table><thead><tr><th>Employee</th><th>Day</th><th>Duty</th><th>Office</th><th>Status</th><th></th></tr></thead><tbody>{''.join(roster) or '<tr><td colspan=6>No duty assigned.</td></tr>'}</tbody></table></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Recent Reminder Log</h2><table><thead><tr><th>Sent</th><th>Employee</th><th>Duty Date</th><th>Type</th><th>Status</th></tr></thead><tbody>{log_rows}</tbody></table></div>"""
+    return layout("Duty Scheduler",body,request,"duty")
+
+@app.post("/duty-schedules")
+def save_duty_schedule(request: Request, employee_id: int=Form(...), weekday: int=Form(...), start_time: str=Form(...), end_time: str=Form(...), office_name: str=Form("BURAQ Office")):
+    require_permission(request,"duty_manage")
+    if weekday not in range(7) or not re.fullmatch(r"\d{2}:\d{2}",start_time) or not re.fullmatch(r"\d{2}:\d{2}",end_time): raise HTTPException(400,"Invalid duty schedule")
+    actor=str(request.session.get('hr_id') or 'super_admin')
+    with get_db() as c:
+        c.execute("INSERT INTO duty_schedules(employee_id,weekday,start_time,end_time,office_name,created_by) VALUES(?,?,?,?,?,?) ON CONFLICT(employee_id,weekday) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time,office_name=excluded.office_name,is_active=excluded.is_active,updated_at=CURRENT_TIMESTAMP",(employee_id,weekday,start_time,end_time,office_name.strip() or 'BURAQ Office',actor))
+        audit(request,'save','duty_schedule',f'{employee_id}:{weekday}',f'{start_time}-{end_time}',db=c)
+    return RedirectResponse('/duty-schedules?saved=1',303)
+
+@app.post("/duty-schedules/{schedule_id}/delete")
+def delete_duty_schedule(request: Request, schedule_id: int):
+    require_permission(request,"duty_manage")
+    with get_db() as c:
+        c.execute("DELETE FROM duty_schedules WHERE id=?",(schedule_id,)); audit(request,'delete','duty_schedule',str(schedule_id),db=c)
+    return RedirectResponse('/duty-schedules',303)
 
 @app.get("/duplicates")
 def duplicate_analysis(request: Request, decision: str="", review: str=""):

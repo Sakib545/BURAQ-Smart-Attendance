@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from math import asin, cos, radians, sin, sqrt
 import re
@@ -72,6 +72,23 @@ def employee_by_phone(phone):
             return employee
     return None
 
+def employee_by_known_phone(phone):
+    target = normalize_phone(phone)
+    with get_db() as c:
+        rows = c.execute("SELECT * FROM employees WHERE is_active").fetchall()
+    for employee in rows:
+        if phones_match(employee["whatsapp_phone"], target) or phones_match(employee["phone"], target):
+            return employee
+    return None
+
+def activate_known_phone(phone):
+    employee=employee_by_known_phone(phone)
+    if not employee: return None
+    normalized=normalize_phone(phone)
+    with get_db() as c:
+        c.execute("UPDATE employees SET whatsapp_phone=?,registration_status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?",(normalized,employee['id']))
+    return employee_by_phone(normalized)
+
 
 def employee_by_staff_id(staff_id):
     with get_db() as c:
@@ -101,8 +118,17 @@ def begin_registration(staff_id, phone):
     if not employee:
         set_state(phone, "awaiting_staff_id")
         return "❌ Staff ID পাওয়া যায়নি। আবার সঠিক Staff ID পাঠান।"
-    set_state(phone, f"confirm_registration:{employee['id']}")
-    return registration_preview(employee)
+    return confirm_registration(employee['id'], phone)
+
+def duty_report(employee):
+    today=now_local().date(); days=[]
+    with get_db() as c:
+        rows=c.execute("SELECT * FROM duty_schedules WHERE employee_id=? AND is_active ORDER BY weekday",(employee['id'],)).fetchall()
+    by_day={int(r['weekday']):r for r in rows}
+    for offset in range(7):
+        day=today+timedelta(days=offset); duty=by_day.get(day.weekday())
+        if duty: days.append(f"📅 {day.strftime('%a, %d %b')}: {duty['start_time']} - {duty['end_time']} ({duty['office_name'] or 'BURAQ Office'})")
+    return "🗓️ আপনার Duty Schedule\n\n"+("\n".join(days) if days else "আগামী ৭ দিনে কোনো duty schedule নেই।")
 
 
 def confirm_registration(employee_id, phone):
@@ -331,6 +357,7 @@ def process(phone, text):
     employee=employee_by_phone(phone)
     if not employee: return "❌ আগে Register করুন। শুধু লিখুন: Register"
     if command in {"my attendance","my_attendance","attendance","report","4"}: return report(employee)
+    if command in {"my duty","my_duty","duty","5"}: return duty_report(employee)
     return "বুঝতে পারিনি। Menu দেখতে লিখুন: Menu"
 
 

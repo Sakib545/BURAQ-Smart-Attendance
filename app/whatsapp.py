@@ -1,7 +1,7 @@
 import logging
 import httpx
 from app.runtime import get_setting
-from app.services import log, process, employee_by_phone, receive_location, receive_image
+from app.services import log, process, employee_by_phone, activate_known_phone, set_state, receive_location, receive_image
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,9 @@ async def download_media(media_id: str):
 async def send_text(to: str, text: str):
     return await _send(to, {"type": "text", "text": {"preview_url": False, "body": text}})
 
+async def send_template(to: str, template_name: str, values: list[str]):
+    return await _send(to,{"type":"template","template":{"name":template_name,"language":{"code":"bn"},"components":[{"type":"body","parameters":[{"type":"text","text":str(v)} for v in values]}]}})
+
 
 async def send_location_request(to: str, body_text: str = "📍 Attendance-এর জন্য আপনার বর্তমান Location পাঠান।"):
     return await _send(to, {
@@ -83,6 +86,7 @@ async def send_menu(to: str, name: str | None = None):
                     {"id": "check_in", "title": "Check In", "description": "GPS ও Face AI দিয়ে উপস্থিতি"},
                     {"id": "check_out", "title": "Check Out", "description": "GPS ও Face AI দিয়ে ছুটি"},
                     {"id": "my_attendance", "title": "My Attendance", "description": "সাম্প্রতিক ৭ দিনের রিপোর্ট"},
+                    {"id": "my_duty", "title": "My Duty", "description": "আগামী duty schedule দেখুন"},
                 ]}]
             }
         }
@@ -125,7 +129,12 @@ async def handle(payload: dict):
                 normalized = " ".join(text.strip().lower().split())
                 if normalized in {"hi", "hello", "menu", "start"}:
                     employee = employee_by_phone(phone)
-                    await send_menu(phone, employee["name"] if employee else None)
+                    if not employee: employee=activate_known_phone(phone)
+                    if employee:
+                        await send_menu(phone, employee["name"])
+                    else:
+                        set_state(phone,"awaiting_staff_id")
+                        await send_text(phone,"👋 BURAQ Smart Attendance-এ স্বাগতম।\n\nআপনার WhatsApp নম্বর employee profile-এর সঙ্গে মেলেনি। শুধু Staff ID পাঠান।")
                 elif typ in {"text", "interactive"}:
                     await send_guided_response(phone, process(phone, text))
                 elif typ == "location":

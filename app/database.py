@@ -337,6 +337,30 @@ def apply_feature_migrations() -> None:
         "CREATE INDEX IF NOT EXISTS ix_fingerprints_phash ON attendance_fingerprints(phash)",
         "CREATE INDEX IF NOT EXISTS ix_fingerprints_ahash ON attendance_fingerprints(ahash)",
         "CREATE INDEX IF NOT EXISTS ix_fingerprints_dhash ON attendance_fingerprints(dhash)",
+        """CREATE TABLE IF NOT EXISTS duty_schedules(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, weekday INTEGER NOT NULL,
+            start_time TEXT NOT NULL, end_time TEXT NOT NULL, office_name TEXT, is_active INTEGER NOT NULL DEFAULT 1,
+            created_by TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_id,weekday), FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS duty_schedules(
+            id BIGSERIAL PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+            weekday INTEGER NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, office_name TEXT,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE, created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_id,weekday)
+        )""",
+        """CREATE TABLE IF NOT EXISTS duty_reminder_logs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, duty_date TEXT NOT NULL,
+            reminder_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'sent', details TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(employee_id,duty_date,reminder_type),
+            FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS duty_reminder_logs(
+            id BIGSERIAL PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+            duty_date TEXT NOT NULL, reminder_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'sent', details TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(employee_id,duty_date,reminder_type)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_duty_schedules_weekday_active ON duty_schedules(weekday,is_active)",
+        "CREATE INDEX IF NOT EXISTS ix_duty_reminders_date ON duty_reminder_logs(duty_date)",
     ]
     with engine.begin() as conn:
         for statement in statements:
@@ -344,6 +368,7 @@ def apply_feature_migrations() -> None:
     mark_migration("v9.5-attendance-fingerprints")
     mark_migration("v9.6-private-payroll")
     mark_migration("v9.8-performance-optimization")
+    mark_migration("v9.9-zero-touch-duty-reminders")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.
