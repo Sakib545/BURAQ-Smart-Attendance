@@ -11,6 +11,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN python -c "from app.face_ai import ensure_models; ensure_models()"
 RUN mkdir -p /app/data /app/exports && chmod +x /app/start.sh
 
 EXPOSE 8000

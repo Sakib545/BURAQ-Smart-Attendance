@@ -2,6 +2,9 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 from math import asin, cos, radians, sin, sqrt
 import re
+import json
+
+from app.face_ai import FaceAIError, extract_embedding, best_match
 
 from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
 from app.database import get_db
@@ -50,9 +53,13 @@ def employee_by_staff_id(staff_id):
         return c.execute("SELECT * FROM employees WHERE LOWER(staff_id)=LOWER(?)", ((staff_id or "").strip(),)).fetchone()
 
 
-def has_face(employee_id):
+def face_sample_count(employee_id):
     with get_db() as c:
-        return c.execute("SELECT id FROM face_profiles WHERE employee_id=?", (employee_id,)).fetchone() is not None
+        return c.execute("SELECT COUNT(*) c FROM face_samples WHERE employee_id=?", (employee_id,)).fetchone()["c"]
+
+
+def has_face(employee_id):
+    return face_sample_count(employee_id) >= 3
 
 
 def menu(name=None):
@@ -83,7 +90,7 @@ def confirm_registration(employee_id, phone):
             c.execute("UPDATE employees SET whatsapp_phone=?,registration_status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?", (phone, employee["id"]))
             c.execute("UPDATE pending_registrations SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE employee_id=? AND status='pending'", (employee["id"],))
             c.execute("INSERT INTO conversation_states(phone,state) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET state=excluded.state,updated_at=CURRENT_TIMESTAMP", (phone, "awaiting_face_registration"))
-            return f"✅ Registration সফল হয়েছে\nনাম: {employee['name']}\nStaff ID: {employee['staff_id']}\n\n📸 এখন সামনে তাকিয়ে একটি পরিষ্কার selfie পাঠান।"
+            return f"✅ Registration সফল হয়েছে\nনাম: {employee['name']}\nStaff ID: {employee['staff_id']}\n\n📸 এখন সামনে তাকিয়ে ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।"
         c.execute("UPDATE pending_registrations SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE employee_id=? AND status='pending'", (employee["id"],))
         c.execute("INSERT INTO pending_registrations(employee_id,whatsapp_phone) VALUES(?,?)", (employee["id"], phone))
         c.execute("UPDATE employees SET registration_status='pending',updated_at=CURRENT_TIMESTAMP WHERE id=?", (employee["id"],))
@@ -91,15 +98,29 @@ def confirm_registration(employee_id, phone):
     return "⏳ WhatsApp নম্বর employee record-এর সঙ্গে মেলেনি। Admin approval-এর জন্য পাঠানো হয়েছে। Approve হলে পরের ধাপ নিজে থেকেই আসবে।"
 
 
-def save_face_reference(employee, media_id):
+def save_face_reference(employee, media_id, image_bytes):
+    try:
+        embedding, quality = extract_embedding(image_bytes)
+    except FaceAIError as exc:
+        return f"❌ Face Registration হয়নি।\n{exc}"
     with get_db() as c:
+        rows = c.execute("SELECT embedding FROM face_samples WHERE employee_id=?", (employee["id"],)).fetchall()
+        if rows:
+            score = best_match(embedding, [json.loads(r["embedding"]) for r in rows])
+            if score < 0.42:
+                return "❌ আগের selfie-এর সঙ্গে এই মুখ মিলছে না। একই employee নিজের selfie দিন।"
+        c.execute("INSERT INTO face_samples(employee_id,media_id,embedding,quality) VALUES(?,?,?,?)", (employee["id"], media_id, json.dumps(embedding), quality))
+        count = c.execute("SELECT COUNT(*) c FROM face_samples WHERE employee_id=?", (employee["id"],)).fetchone()["c"]
         existing = c.execute("SELECT id FROM face_profiles WHERE employee_id=?", (employee["id"],)).fetchone()
         if existing:
             c.execute("UPDATE face_profiles SET reference_media_id=?,updated_at=CURRENT_TIMESTAMP WHERE employee_id=?", (media_id, employee["id"]))
         else:
             c.execute("INSERT INTO face_profiles(employee_id,reference_media_id) VALUES(?,?)", (employee["id"], media_id))
+    if count < 3:
+        set_state(employee["whatsapp_phone"] or employee["phone"], "awaiting_face_registration")
+        return f"✅ Selfie {count}/3 গ্রহণ করা হয়েছে।\n\nআরও {3-count}টি selfie পাঠান—মুখ সামান্য বাম/ডান করে, ভালো আলোতে।"
     clear_state(employee["whatsapp_phone"] or employee["phone"])
-    return f"✅ Face Registration সম্পন্ন হয়েছে।\n\n👤 {employee['name']}\n🆔 {employee['staff_id']}\n\nএখন নিচের Attendance Menu ব্যবহার করুন।"
+    return f"✅ Face Registration সম্পন্ন হয়েছে।\n\n👤 {employee['name']}\n🆔 {employee['staff_id']}\n🔐 ৩টি Face AI sample সংরক্ষিত\n\nএখন Attendance Menu ব্যবহার করুন।"
 
 
 def shift_times(shift):
@@ -162,7 +183,7 @@ def begin_attendance_action(phone, action):
     if not employee: return "❌ আগে Register করুন। শুধু লিখুন: Register"
     if not has_face(employee["id"]):
         set_state(phone, "awaiting_face_registration")
-        return "📸 Attendance দেওয়ার আগে Face Registration সম্পন্ন করুন। এখন একটি পরিষ্কার selfie পাঠান।"
+        return "📸 Attendance দেওয়ার আগে Face Registration সম্পন্ন করুন। এখন ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।"
     set_state(phone, f"{action}_location")
     return "__REQUEST_LOCATION__"
 
@@ -180,15 +201,27 @@ def receive_location(phone, latitude, longitude):
     return "✅ Location গ্রহণ করা হয়েছে।\n\n📸 এখন সামনে তাকিয়ে একটি বর্তমান selfie পাঠান।"
 
 
-def receive_image(phone, media_id):
+def receive_image(phone, media_id, image_bytes=None):
     employee = employee_by_phone(phone)
     current = state(phone)
+    if image_bytes is None:
+        return "❌ WhatsApp থেকে ছবিটি download করা যায়নি। আবার selfie পাঠান।"
     if current and current["state"] == "awaiting_face_registration":
         if not employee: return "❌ Registration approval পাওয়া যায়নি।"
-        return save_face_reference(employee, media_id)
+        return save_face_reference(employee, media_id, image_bytes)
     if not employee: return "❌ আগে Register করুন।"
     if not current or not current["state"].startswith(("checkin_selfie:", "checkout_selfie:")):
         return "ℹ️ এই মুহূর্তে selfie প্রয়োজন নেই। Menu থেকে Check In বা Check Out নির্বাচন করুন।"
+    try:
+        candidate, quality = extract_embedding(image_bytes)
+    except FaceAIError as exc:
+        return f"❌ Face Verification Failed\n{exc}"
+    with get_db() as c:
+        rows = c.execute("SELECT embedding FROM face_samples WHERE employee_id=? ORDER BY id", (employee["id"],)).fetchall()
+    score = best_match(candidate, [json.loads(r["embedding"]) for r in rows])
+    threshold = 0.46
+    if score < threshold:
+        return f"🚫 Face Verification Failed\n\nনিবন্ধিত মুখের সঙ্গে মিল পাওয়া যায়নি।\nMatch score: {score*100:.1f}%\n\nশুধু নিজের বর্তমান selfie পাঠান।"
     parts = current["state"].split(":")
     action = "check_in" if parts[0] == "checkin_selfie" else "check_out"
     lat, lon = float(parts[1]), float(parts[2]); dist = float(parts[3]) if len(parts) > 3 and parts[3] else None
@@ -196,7 +229,7 @@ def receive_image(phone, media_id):
     with get_db() as c:
         c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)", (employee["id"], action, lat, lon, dist, media_id, 1))
     clear_state(phone)
-    return result + "\n✅ Location ও selfie সংরক্ষণ হয়েছে।"
+    return result + f"\n✅ Location Verified\n😊 Face Verified: {score*100:.1f}%"
 
 
 def process(phone, text):
@@ -212,7 +245,7 @@ def process(phone, text):
             if command in {"no", "n", "না"}: clear_state(phone); return "Registration বাতিল হয়েছে। আবার Register লিখুন।"
             return "তথ্য সঠিক হলে YES লিখুন, অথবা বাতিল করতে CANCEL লিখুন।"
         if value == "waiting_for_approval": return "⏳ আপনার registration এখনো Admin approval-এর অপেক্ষায় আছে।"
-        if value == "awaiting_face_registration": return "📸 এখন একটি পরিষ্কার selfie পাঠান।"
+        if value == "awaiting_face_registration": return "📸 এখন ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।"
         if value.endswith("_location"): return "📍 নিচের Send Location বাটন ব্যবহার করে বর্তমান Location পাঠান।"
         if value.startswith(("checkin_selfie:", "checkout_selfie:")): return "📸 এখন একটি বর্তমান selfie পাঠান।"
     if command in {"hi","hello","menu","start"}:

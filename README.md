@@ -1,34 +1,27 @@
-# BURAQ Smart Attendance v5.2 — Guided Flow
+# BURAQ Smart Attendance v6.0 — Face AI
 
-Railway-ready WhatsApp attendance update.
+## নতুন কী আছে
+- ৩টি registration selfie থেকে employee-specific Face AI profile
+- Attendance selfie-এর মুখ registered employee-এর মুখের সঙ্গে মিলিয়ে দেখা
+- অন্য ব্যক্তির selfie হলে attendance reject
+- একাধিক মুখ, মুখ না পাওয়া, খুব দূরের/low-resolution ছবি reject
+- WhatsApp image Graph API থেকে securely download করে processing
+- GPS office-radius verification আগের মতো চালু
+- Professional dashboard refresh এবং Employee page-এ Face AI 0/3–3/3 status
+- Admin-এর জন্য Reset Face button
 
-## New flow
+## Railway Update
+পুরোনো repository-এর files replace করে deploy করুন। PostgreSQL data delete হবে না। প্রথম build-এ OpenCV face models download হবে, তাই build কিছুটা বেশি সময় নিতে পারে।
 
-1. Register → Staff ID → Confirm
-2. Admin approval হলে employee-কে automatic WhatsApp message
-3. Employee selfie পাঠালে face reference media ID save
-4. Bot automatic Attendance Menu দেখায়
-5. Check In/Out → Send Location button → selfie → attendance save → menu
-6. মাঝপথে বন্ধ হলে conversation state database-এ থাকে
+Variables:
+```
+OFFICE_LATITUDE=25.18892481916644
+OFFICE_LONGITUDE=89.87014577946071
+OFFICE_RADIUS_METERS=100
+```
 
-## Railway update
+## গুরুত্বপূর্ণ migration note
+v5.2-এর পুরোনো single selfie শুধু media ID ছিল; biometric embedding ছিল না। তাই existing employees প্রথম Check In-এ ৩টি নতুন selfie দিয়ে Face Registration সম্পন্ন করবে। Admin চাইলে Employees page থেকে `Reset Face` চাপতে পারবেন।
 
-পুরোনো repository files replace করে commit/push করুন। Railway নিজে redeploy করবে। PostgreSQL data delete হবে না; নতুন tables startup-এ auto-create হবে।
-
-Recommended commit:
-
-`Add guided location and selfie attendance flow`
-
-## Railway Variables
-
-Strict office radius check চালু করতে Railway Variables-এ দিন:
-
-- `OFFICE_LATITUDE`
-- `OFFICE_LONGITUDE`
-- `OFFICE_RADIUS_METERS=150`
-
-Latitude/longitude না দিলে location step গ্রহণ হবে, কিন্তু radius enforcement হবে না।
-
-## Important limitation
-
-এই version selfie media ID evidence হিসেবে save করে এবং registration reference রাখে। বাস্তব biometric face matching/liveness এখনো যোগ করা হয়নি; সেটি পরের Face AI module।
+## Security note
+Face matching এখন বাস্তব AI embedding comparison করে। এটি অন্য মানুষের selfie আটকায়। তবে একটি স্থির printed/photo-screen attack শতভাগ আটকাতে active liveness challenge প্রয়োজন; সেটি আলাদা camera/video challenge feature।

@@ -32,6 +32,26 @@ async def _send(to: str, payload: dict):
         return {"sent": False, "error": str(exc)}
 
 
+async def download_media(media_id: str):
+    token, _, api_version = _credentials()
+    if not token or not media_id:
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+            meta = await client.get(f"https://graph.facebook.com/{api_version}/{media_id}", headers=headers)
+            meta.raise_for_status()
+            media_url = meta.json().get("url")
+            if not media_url:
+                return None
+            data = await client.get(media_url, headers=headers)
+            data.raise_for_status()
+            return data.content
+    except Exception:
+        logger.exception("Could not download WhatsApp media %s", media_id)
+        return None
+
+
 async def send_text(to: str, text: str):
     return await _send(to, {"type": "text", "text": {"preview_url": False, "body": text}})
 
@@ -55,13 +75,13 @@ async def send_menu(to: str, name: str | None = None):
             "type": "list",
             "header": {"type": "text", "text": "BURAQ Attendance"},
             "body": {"text": f"👋 {greeting}\nনিচের Menu থেকে কাজ নির্বাচন করুন।"},
-            "footer": {"text": "সহজ • দ্রুত • নিরাপদ"},
+            "footer": {"text": "Face AI • GPS • Secure"},
             "action": {
                 "button": "Menu খুলুন",
                 "sections": [{"title": "Attendance Menu", "rows": [
                     {"id": "register", "title": "Register", "description": "Staff ID দিয়ে নিবন্ধন"},
-                    {"id": "check_in", "title": "Check In", "description": "Location ও selfie দিয়ে উপস্থিতি"},
-                    {"id": "check_out", "title": "Check Out", "description": "Location ও selfie দিয়ে ছুটি"},
+                    {"id": "check_in", "title": "Check In", "description": "GPS ও Face AI দিয়ে উপস্থিতি"},
+                    {"id": "check_out", "title": "Check Out", "description": "GPS ও Face AI দিয়ে ছুটি"},
                     {"id": "my_attendance", "title": "My Attendance", "description": "সাম্প্রতিক ৭ দিনের রিপোর্ট"},
                 ]}]
             }
@@ -80,7 +100,7 @@ async def send_guided_response(phone: str, response: str):
 
 
 async def send_approval_flow(phone: str, name: str, staff_id: str):
-    await send_text(phone, f"✅ আপনার BURAQ Attendance registration Admin approve করেছেন।\n\nনাম: {name}\nStaff ID: {staff_id}\n\n📸 পরবর্তী ধাপ: সামনে তাকিয়ে একটি পরিষ্কার selfie পাঠান।")
+    await send_text(phone, f"✅ আপনার BURAQ Attendance registration Admin approve করেছেন।\n\nনাম: {name}\nStaff ID: {staff_id}\n\n📸 পরবর্তী ধাপ: সামনে তাকিয়ে ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।")
 
 
 async def handle(payload: dict):
@@ -114,7 +134,8 @@ async def handle(payload: dict):
                     await send_guided_response(phone, response)
                 elif typ == "image":
                     media_id = message.get("image", {}).get("id", "")
-                    await send_guided_response(phone, receive_image(phone, media_id))
+                    image_bytes = await download_media(media_id)
+                    await send_guided_response(phone, receive_image(phone, media_id, image_bytes))
                 else:
                     await send_text(phone, "এই message type এখনো supported নয়। Menu খুলতে লিখুন: Menu")
                 processed += 1
