@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import time
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, Engine, Result
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -283,7 +283,24 @@ def apply_feature_migrations() -> None:
         """CREATE TABLE IF NOT EXISTS attendance_corrections(id INTEGER PRIMARY KEY AUTOINCREMENT,employee_id INTEGER NOT NULL,work_date TEXT NOT NULL,requested_check_in TEXT,requested_check_out TEXT,reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',requested_by TEXT,decided_by TEXT,decided_at TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(employee_id) REFERENCES employees(id))""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS attendance_corrections(id BIGSERIAL PRIMARY KEY,employee_id BIGINT NOT NULL REFERENCES employees(id),work_date TEXT NOT NULL,requested_check_in TEXT,requested_check_out TEXT,reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',requested_by TEXT,decided_by TEXT,decided_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
         """CREATE TABLE IF NOT EXISTS shifts(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,start_time TEXT NOT NULL,end_time TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS shifts(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL UNIQUE,start_time TEXT NOT NULL,end_time TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
         """CREATE TABLE IF NOT EXISTS departments(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS departments(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL UNIQUE,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
+        """CREATE TABLE IF NOT EXISTS employee_notes(id INTEGER PRIMARY KEY AUTOINCREMENT,employee_id INTEGER NOT NULL,note_type TEXT NOT NULL DEFAULT 'general',note TEXT NOT NULL,created_by TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE)""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS employee_notes(id BIGSERIAL PRIMARY KEY,employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,note_type TEXT NOT NULL DEFAULT 'general',note TEXT NOT NULL,created_by TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
     ]
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
+
+    # v9.2 employee profile fields. Each ALTER is independent so existing databases
+    # upgrade safely and duplicate-column errors do not interrupt startup.
+    employee_columns = [
+        ("designation", "TEXT"), ("reporting_manager", "TEXT"),
+        ("office_name", "TEXT"), ("join_date", "TEXT"),
+        ("profile_photo_url", "TEXT"), ("emergency_name", "TEXT"),
+        ("emergency_relation", "TEXT"), ("emergency_phone", "TEXT"),
+        ("is_active", "INTEGER NOT NULL DEFAULT 1" if _active_url.startswith("sqlite") else "BOOLEAN NOT NULL DEFAULT TRUE"),
+    ]
+    existing_columns = {col["name"] for col in inspect(engine).get_columns("employees")}
+    for column, definition in employee_columns:
+        if column in existing_columns:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE employees ADD COLUMN {column} {definition}"))

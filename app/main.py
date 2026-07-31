@@ -24,7 +24,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.1.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.2.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -53,7 +53,9 @@ CSS = """
 a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px 1fr}.sidebar{background:#0d3b2e;color:#fff;padding:24px 18px;position:sticky;top:0;height:100vh}.logo{font-size:22px;font-weight:900;line-height:1.2;margin-bottom:6px}.logo:before{content:'◉';color:#59d4a9;margin-right:8px}.side-sub{font-size:12px;color:#b8d4ca;margin-bottom:28px}.side-nav{display:grid;gap:7px}.side-nav a{padding:11px 13px;border-radius:11px;text-decoration:none;color:#d8ebe4;font-weight:650}.side-nav a:hover,.side-nav a.active{background:rgba(255,255,255,.13);color:#fff}.main{min-width:0}.topbar{height:70px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 28px;position:sticky;top:0;z-index:5}.page{padding:26px;max-width:1400px;margin:auto}.title{font-size:27px;font-weight:850;letter-spacing:-.5px}.sub{color:var(--muted);font-size:14px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:15px}.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:20px;box-shadow:var(--shadow)}.metric{font-size:31px;font-weight:850;margin-top:7px}.status{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:999px;font-size:13px;font-weight:750}.status:before{content:'●';font-size:10px}.ok{background:#dcfce7;color:var(--ok)}.warn{background:#fef3c7;color:var(--warn)}.bad{background:#fee2e2;color:var(--bad)}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{border:0;border-radius:11px;padding:10px 14px;background:var(--brand);color:#fff;font-weight:750;cursor:pointer;text-decoration:none;display:inline-block}.btn:hover{background:var(--brand2)}.btn.secondary{background:var(--panel2);border:1px solid var(--line);color:var(--ink)}.btn.danger{background:#fee2e2;color:var(--bad)}input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;margin:6px 0 14px;background:var(--panel);color:var(--ink)}label{font-size:14px;font-weight:700}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line)}th{color:var(--muted)}h2{margin:0 0 14px}h3{margin:0 0 10px}.notice{padding:13px 15px;border-radius:12px;background:#ecfeff;color:#155e75;margin-bottom:16px}.code{font-family:ui-monospace,monospace;background:#111827;color:#f9fafb;padding:12px;border-radius:10px;overflow:auto}.login{max-width:450px;margin:7vh auto;padding:18px}.login .card{padding:30px}.masked{font-family:ui-monospace,monospace;letter-spacing:.5px;background:var(--panel2);padding:11px;border-radius:10px;border:1px solid var(--line)}.section-gap{height:16px}.mobile-menu{display:none}.health-list{display:grid;gap:10px}.health-row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}
 
 .hero{display:flex;justify-content:space-between;gap:20px;align-items:center;padding:24px;background:linear-gradient(135deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);margin-bottom:16px}.hero h2{font-size:25px;margin-bottom:6px}.eyebrow{text-transform:uppercase;letter-spacing:1.4px;font-size:11px;font-weight:850;color:var(--brand)}.metric-card{position:relative;overflow:hidden}.metric-card:after{content:'';position:absolute;right:-25px;top:-25px;width:85px;height:85px;border-radius:50%;background:rgba(8,127,91,.08)}.metric-label{font-size:13px;color:var(--muted);font-weight:700}.metric-foot{margin-top:10px;font-size:12px;color:var(--muted)}.kpi-icon{width:38px;height:38px;display:grid;place-items:center;border-radius:11px;background:var(--panel2);border:1px solid var(--line);font-size:18px}.card-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}.timeline{display:grid;gap:4px}.timeline-item{display:grid;grid-template-columns:42px 1fr auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.avatar{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:var(--panel2);font-weight:850;color:var(--brand);border:1px solid var(--line)}.pill{display:inline-flex;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:800;background:var(--panel2);border:1px solid var(--line)}.chart{height:210px;display:flex;gap:10px;align-items:flex-end;padding:18px 8px 4px}.bar-wrap{flex:1;min-width:0;text-align:center}.bar{min-height:5px;border-radius:8px 8px 3px 3px;background:linear-gradient(180deg,var(--brand),var(--brand2));position:relative}.bar-value{position:absolute;top:-22px;left:50%;transform:translateX(-50%);font-size:11px;font-weight:800}.bar-label{font-size:11px;color:var(--muted);margin-top:8px}.progress{height:8px;background:var(--panel2);border-radius:999px;overflow:hidden;border:1px solid var(--line)}.progress span{display:block;height:100%;background:var(--brand);border-radius:999px}.quick-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.quick-link{padding:14px;border:1px solid var(--line);border-radius:13px;text-decoration:none;background:var(--panel2);font-weight:750}.quick-link:hover{border-color:var(--brand);transform:translateY(-1px)}.health-dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--ok);box-shadow:0 0 0 4px rgba(21,128,61,.12)}
+.profile-hero{display:grid;grid-template-columns:110px 1fr auto;gap:20px;align-items:center}.profile-photo{width:104px;height:104px;border-radius:24px;object-fit:cover;background:var(--panel2);border:1px solid var(--line);display:grid;place-items:center;font-size:35px;font-weight:900;color:var(--brand)}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.fact{padding:13px;background:var(--panel2);border:1px solid var(--line);border-radius:12px}.fact b{display:block;margin-top:4px}.calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:7px}.cal-day{min-height:76px;border:1px solid var(--line);border-radius:11px;padding:8px;background:var(--panel2)}.cal-day.empty{opacity:.35}.cal-day.present{border-left:4px solid #15803d}.cal-day.late{border-left:4px solid #b45309}.cal-day.leave{border-left:4px solid #2563eb}.cal-day.absent{border-left:4px solid #b91c1c}.searchbar{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:10px;align-items:end}.checkbox{width:auto;margin:0}.table-actions{display:flex;gap:6px;flex-wrap:wrap}.tag{display:inline-flex;padding:4px 8px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);font-size:11px;font-weight:750}
 @media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{display:none}.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}.mobile-menu{display:block}.page{padding:16px}.topbar{padding:0 16px}}
+@media(max-width:700px){.profile-hero{grid-template-columns:1fr}.facts{grid-template-columns:1fr 1fr}.searchbar{grid-template-columns:1fr}.calendar{gap:4px}.cal-day{min-height:58px;padding:5px}}
 @media(max-width:540px){.grid{grid-template-columns:1fr}.topbar{height:auto;padding:13px 16px;gap:10px}.title{font-size:22px}}
 </style>
 """
@@ -195,7 +197,7 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9.1 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.2 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.get("/health")
 def health():
@@ -425,46 +427,124 @@ async def restore_settings(request: Request):
     return RedirectResponse("/settings?saved=restore",303)
 
 @app.get("/employees", response_class=HTMLResponse)
-def employees_page(request: Request):
+def employees_page(request: Request, q: str = "", department: str = "", shift: str = "", status: str = ""):
     require_permission(request, "employees_view")
+    clauses=["1=1"]; params=[]
+    if q.strip():
+        clauses.append("(LOWER(e.staff_id) LIKE ? OR LOWER(e.name) LIKE ? OR LOWER(COALESCE(e.phone,'')) LIKE ? OR LOWER(COALESCE(e.designation,'')) LIKE ?)")
+        term=f"%{q.strip().lower()}%"; params += [term,term,term,term]
+    if department: clauses.append("e.department=?"); params.append(department)
+    if shift: clauses.append("e.shift=?"); params.append(shift)
+    if status in {"active","inactive"}: clauses.append("e.is_active=?"); params.append(1 if status=="active" else 0)
     with get_db() as c:
-        rows=c.execute("SELECT e.*,(SELECT COUNT(*) FROM face_samples f WHERE f.employee_id=e.id) face_count FROM employees e ORDER BY staff_id").fetchall()
-    can_add=has_permission(request,"employees_add")
-    can_reset=has_permission(request,"face_reset")
-    tr_parts=[]
+        rows=c.execute("SELECT e.*,(SELECT COUNT(*) FROM face_samples f WHERE f.employee_id=e.id) face_count,(SELECT MAX(work_date) FROM attendance a WHERE a.employee_id=e.id) last_attendance FROM employees e WHERE "+" AND ".join(clauses)+" ORDER BY e.staff_id", tuple(params)).fetchall()
+        deps=c.execute("SELECT DISTINCT department FROM employees WHERE COALESCE(department,'')<>'' ORDER BY department").fetchall()
+    can_add=has_permission(request,"employees_add"); can_edit=has_permission(request,"employees_edit"); can_reset=has_permission(request,"face_reset")
+    tr=[]
     for r in rows:
-        reset_action = f"<form method='post' action='/employees/{r['id']}/reset-face'><button class='btn danger'>Reset Face</button></form>" if can_reset else "<span class='sub'>View only</span>"
-        status_class = 'ok' if r['registration_status']=='approved' else 'warn'
-        face_class = 'ok' if r['face_count']>=3 else 'bad'
-        tr_parts.append(f"<tr><td><b>{escape(r['staff_id'])}</b></td><td>{escape(r['name'])}</td><td>{escape(r['phone'] or '')}</td><td>{escape(r['department'] or '')}</td><td>{escape(r['shift'])}</td><td><span class='status {status_class}'>{escape(r['registration_status'])}</span></td><td><span class='status {face_class}'>{r['face_count']}/3</span></td><td>{reset_action}</td></tr>")
-    trs=''.join(tr_parts) or "<tr><td colspan='8'>কোনো employee নেই</td></tr>"
-    add_card=""
+        initials=''.join(x[:1] for x in (r['name'] or '?').split()[:2]).upper()
+        reg='ok' if r['registration_status']=='approved' else 'warn'; face='ok' if r['face_count']>=3 else 'bad'
+        actions=f"<a class='btn secondary' href='/employees/{r['id']}'>Profile</a>"
+        if can_reset: actions += f"<form method='post' action='/employees/{r['id']}/reset-face' style='display:inline'><button class='btn danger'>Reset Face</button></form>"
+        tr.append(f"<tr><td><input class='checkbox' type='checkbox' name='employee_ids' value='{r['id']}'></td><td><div style='display:flex;gap:9px;align-items:center'><span class='avatar'>{escape(initials)}</span><span><b>{escape(r['name'])}</b><br><span class='sub'>{escape(r['staff_id'])}</span></span></div></td><td>{escape(r['designation'] or '—')}</td><td>{escape(r['department'] or '—')}</td><td>{escape(r['shift'])}</td><td><span class='status {reg}'>{escape(r['registration_status'])}</span><br><span class='status {face}' style='margin-top:5px'>{r['face_count']}/3 Face</span></td><td>{escape(r['last_attendance'] or 'Never')}</td><td><div class='table-actions'>{actions}</div></td></tr>")
+    depopts=''.join(f"<option {'selected' if department==d['department'] else ''}>{escape(d['department'])}</option>" for d in deps)
+    add=''
     if can_add:
-        add_card="""<div class='card'><h2>Add Employee</h2><form method='post'><label>Staff ID</label><input name='staff_id' required><label>Name</label><input name='name' required><label>Phone</label><input name='phone' placeholder='8801XXXXXXXXX'><label>Department</label><input name='department'><label>Shift</label><select name='shift'><option value='morning'>Morning 8AM–4PM</option><option value='evening'>Evening 4PM–10PM</option></select><button class='btn'>Add Employee</button></form></div>"""
-    body=f"<div class='two'>{add_card}<div class='card'><h2>Employee List</h2><div style='overflow:auto'><table><thead><tr><th>ID</th><th>Name</th><th>Phone</th><th>Dept.</th><th>Shift</th><th>Status</th><th>Face AI</th><th>Action</th></tr></thead><tbody>{trs}</tbody></table></div></div></div>"
-    return layout("Employees", body, request, "employees")
+        add="""<details class='card'><summary style='cursor:pointer;font-weight:850'>＋ Add Employee</summary><form method='post' style='margin-top:16px'><div class='two'><div><label>Staff ID</label><input name='staff_id' required><label>Name</label><input name='name' required><label>Phone</label><input name='phone'></div><div><label>Department</label><input name='department'><label>Designation</label><input name='designation'><label>Shift</label><select name='shift'><option value='morning'>Morning</option><option value='evening'>Evening</option></select></div></div><button class='btn'>Add Employee</button></form></details><div class='section-gap'></div>"""
+    bulk=''
+    if can_edit:
+        bulk="""<div class='card' style='margin-bottom:15px'><b>Bulk Actions</b><div class='actions' style='margin-top:10px'><select name='bulk_action' style='width:auto;margin:0'><option value=''>Choose action</option><option value='activate'>Activate</option><option value='deactivate'>Deactivate</option><option value='shift'>Change shift</option><option value='department'>Change department</option></select><input name='bulk_value' placeholder='Shift/department value' style='width:220px;margin:0'><button class='btn'>Apply to selected</button></div></div>"""
+    body=f"""<div class='hero'><div><div class='eyebrow'>Employee Center</div><h2>Workforce Directory</h2><div class='sub'>360° profiles, advanced search and bulk workforce operations.</div></div><span class='pill'>{len(rows)} results</span></div>{add}<div class='card' style='margin-bottom:15px'><form method='get' class='searchbar'><div><label>Global search</label><input name='q' value='{escape(q)}' placeholder='Name, Staff ID, phone or designation'></div><div><label>Department</label><select name='department'><option value=''>All</option>{depopts}</select></div><div><label>Shift</label><select name='shift'><option value=''>All</option><option {'selected' if shift=='morning' else ''} value='morning'>Morning</option><option {'selected' if shift=='evening' else ''} value='evening'>Evening</option></select></div><div><label>Status</label><select name='status'><option value=''>All</option><option {'selected' if status=='active' else ''} value='active'>Active</option><option {'selected' if status=='inactive' else ''} value='inactive'>Inactive</option></select></div><button class='btn'>Search</button></form></div><form method='post' action='/employees/bulk'>{bulk}<div class='card'><div style='overflow:auto'><table><thead><tr><th></th><th>Employee</th><th>Designation</th><th>Department</th><th>Shift</th><th>Readiness</th><th>Last attendance</th><th>Action</th></tr></thead><tbody>{''.join(tr) or '<tr><td colspan=8>No employees found</td></tr>'}</tbody></table></div></div></form>"""
+    return layout("Employee Center", body, request, "employees")
 
 @app.post("/employees")
-def add_employee(request: Request, staff_id: str = Form(...), name: str = Form(...), phone: str = Form(""), department: str = Form(""), shift: str = Form("morning")):
+def add_employee(request: Request, staff_id: str = Form(...), name: str = Form(...), phone: str = Form(""), department: str = Form(""), designation: str = Form(""), shift: str = Form("morning")):
     require_permission(request, "employees_add")
     try:
-        with get_db() as c: c.execute("INSERT INTO employees(staff_id,name,phone,department,shift) VALUES(?,?,?,?,?)", (staff_id.strip(), name.strip(), phone.strip() or None, department.strip() or None, shift))
-    except Exception as exc:
-        logger.warning("Employee add failed: %s", exc)
-    return RedirectResponse("/employees", 303)
+        with get_db() as c:
+            c.execute("INSERT INTO employees(staff_id,name,phone,department,designation,shift) VALUES(?,?,?,?,?,?)", (staff_id.strip(),name.strip(),phone.strip() or None,department.strip() or None,designation.strip() or None,shift))
+            audit(request,"employee_created","employee",staff_id,db=c)
+    except Exception as exc: logger.warning("Employee add failed: %s",exc)
+    return RedirectResponse("/employees",303)
+
+@app.post("/employees/bulk")
+async def employee_bulk(request: Request):
+    require_permission(request,"employees_edit")
+    form=await request.form(); ids=[int(x) for x in form.getlist('employee_ids') if str(x).isdigit()]
+    action=str(form.get('bulk_action','')); value=str(form.get('bulk_value','')).strip()
+    if not ids or action not in {'activate','deactivate','shift','department'}: return RedirectResponse('/employees',303)
+    marks=','.join('?' for _ in ids)
+    with get_db() as c:
+        if action in {'activate','deactivate'}: c.execute(f"UPDATE employees SET is_active=?,updated_at=CURRENT_TIMESTAMP WHERE id IN ({marks})", tuple([1 if action=='activate' else 0]+ids))
+        elif action=='shift' and value: c.execute(f"UPDATE employees SET shift=?,updated_at=CURRENT_TIMESTAMP WHERE id IN ({marks})", tuple([value]+ids))
+        elif action=='department' and value: c.execute(f"UPDATE employees SET department=?,updated_at=CURRENT_TIMESTAMP WHERE id IN ({marks})", tuple([value]+ids))
+        audit(request,"employee_bulk_update","employee",','.join(map(str,ids)),f"{action}:{value}",db=c)
+    return RedirectResponse('/employees',303)
+
+@app.get("/employees/{employee_id}", response_class=HTMLResponse)
+def employee_profile(request: Request, employee_id: int, month: str = ""):
+    require_permission(request,"employees_view")
+    now=datetime.now(ZoneInfo(settings.timezone)); month=month or now.strftime('%Y-%m')
+    try: first=datetime.strptime(month+'-01','%Y-%m-%d')
+    except ValueError: first=datetime(now.year,now.month,1); month=first.strftime('%Y-%m')
+    next_month=(first.replace(day=28)+timedelta(days=4)).replace(day=1); last=next_month-timedelta(days=1)
+    with get_db() as c:
+        e=c.execute("SELECT e.*,(SELECT COUNT(*) FROM face_samples WHERE employee_id=e.id) face_count FROM employees e WHERE e.id=?",(employee_id,)).fetchone()
+        if not e: raise HTTPException(404,'Employee not found')
+        attendance=c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date>=? AND work_date<=? ORDER BY work_date",(employee_id,first.strftime('%Y-%m-%d'),last.strftime('%Y-%m-%d'))).fetchall()
+        leaves=c.execute("SELECT * FROM leave_requests WHERE employee_id=? AND status='approved' AND start_date<=? AND end_date>=?",(employee_id,last.strftime('%Y-%m-%d'),first.strftime('%Y-%m-%d'))).fetchall()
+        notes=c.execute("SELECT * FROM employee_notes WHERE employee_id=? ORDER BY id DESC LIMIT 50",(employee_id,)).fetchall()
+        recent=c.execute("SELECT * FROM attendance WHERE employee_id=? ORDER BY work_date DESC LIMIT 20",(employee_id,)).fetchall()
+    amap={a['work_date']:a for a in attendance}; leave_dates=set()
+    for l in leaves:
+        d=datetime.strptime(l['start_date'],'%Y-%m-%d'); end=datetime.strptime(l['end_date'],'%Y-%m-%d')
+        while d<=end: leave_dates.add(d.strftime('%Y-%m-%d')); d+=timedelta(days=1)
+    cells=['<div class="sub"><b>'+x+'</b></div>' for x in ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']]
+    cells += ['<div class="cal-day empty"></div>']*first.weekday()
+    today=now.strftime('%Y-%m-%d')
+    for day in range(1,last.day+1):
+        ds=f'{month}-{day:02d}'; a=amap.get(ds); cls=''; detail=''
+        if ds in leave_dates: cls='leave'; detail='Leave'
+        elif a: cls='late' if (a['late_minutes'] or 0)>0 else 'present'; detail=(a['check_in'] or '')[-5:]
+        elif ds<today and datetime.strptime(ds,'%Y-%m-%d').weekday()<5: cls='absent'; detail='Absent'
+        cells.append(f"<div class='cal-day {cls}'><b>{day}</b><div class='sub' style='margin-top:9px'>{escape(detail)}</div></div>")
+    timeline=''.join(f"<div class='timeline-item'><span class='avatar'>{escape(str(a['work_date'])[-2:])}</span><div><b>{escape(a['work_date'])}</b><div class='sub'>In {escape((a['check_in'] or '—')[-8:-3])} • Out {escape((a['check_out'] or '—')[-8:-3])}</div></div><span class='pill'>{a['late_minutes'] or 0}m late • {a['overtime_minutes'] or 0}m OT</span></div>" for a in recent) or '<div class="sub">No attendance history</div>'
+    notehtml=''.join(f"<div style='padding:12px 0;border-bottom:1px solid var(--line)'><span class='tag'>{escape(n['note_type'])}</span> <b>{escape(n['created_by'] or 'HR')}</b><div style='margin-top:6px'>{escape(n['note'])}</div><div class='sub'>{escape(str(n['created_at']))}</div></div>" for n in notes) or '<div class="sub">No HR notes</div>'
+    edit=''
+    if has_permission(request,'employees_edit'):
+        edit=f"""<div class='card'><h3>Edit profile</h3><form method='post' action='/employees/{employee_id}/profile'><div class='two'><div><label>Name</label><input name='name' value='{escape(e['name'])}'><label>Designation</label><input name='designation' value='{escape(e['designation'] or '')}'><label>Department</label><input name='department' value='{escape(e['department'] or '')}'><label>Shift</label><select name='shift'><option {'selected' if e['shift']=='morning' else ''} value='morning'>Morning</option><option {'selected' if e['shift']=='evening' else ''} value='evening'>Evening</option></select></div><div><label>Reporting manager</label><input name='reporting_manager' value='{escape(e['reporting_manager'] or '')}'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or '')}'><label>Join date</label><input type='date' name='join_date' value='{escape(e['join_date'] or '')}'><label>Phone</label><input name='phone' value='{escape(e['phone'] or '')}'></div></div><h3>Emergency contact</h3><div class='grid'><input name='emergency_name' placeholder='Name' value='{escape(e['emergency_name'] or '')}'><input name='emergency_relation' placeholder='Relation' value='{escape(e['emergency_relation'] or '')}'><input name='emergency_phone' placeholder='Phone' value='{escape(e['emergency_phone'] or '')}'><select name='is_active'><option value='1' {'selected' if e['is_active'] else ''}>Active</option><option value='0' {'selected' if not e['is_active'] else ''}>Inactive</option></select></div><button class='btn'>Save profile</button></form></div>"""
+    noteform=f"<form method='post' action='/employees/{employee_id}/notes'><div class='two'><select name='note_type'><option>general</option><option>performance</option><option>warning</option><option>promotion</option></select><input name='note' required placeholder='Write a private HR note'></div><button class='btn'>Add note</button></form>" if has_permission(request,'employees_edit') else ''
+    initials=''.join(x[:1] for x in e['name'].split()[:2]).upper()
+    body=f"""<div class='card profile-hero'><div class='profile-photo'>{escape(initials)}</div><div><div class='eyebrow'>Employee 360°</div><h2>{escape(e['name'])}</h2><div class='sub'>{escape(e['staff_id'])} • {escape(e['designation'] or 'No designation')} • {escape(e['department'] or 'No department')}</div><div class='actions' style='margin-top:10px'><span class='status {'ok' if e['is_active'] else 'bad'}'>{'Active' if e['is_active'] else 'Inactive'}</span><span class='status {'ok' if e['registration_status']=='approved' else 'warn'}'>WhatsApp {escape(e['registration_status'])}</span><span class='status {'ok' if e['face_count']>=3 else 'warn'}'>Face {e['face_count']}/3</span></div></div><a class='btn secondary' href='/employees'>Back</a></div><div class='section-gap'></div><div class='facts'><div class='fact'><span class='sub'>Shift</span><b>{escape(e['shift'])}</b></div><div class='fact'><span class='sub'>Manager</span><b>{escape(e['reporting_manager'] or '—')}</b></div><div class='fact'><span class='sub'>Office</span><b>{escape(e['office_name'] or 'BURAQ Office')}</b></div><div class='fact'><span class='sub'>Join date</span><b>{escape(e['join_date'] or '—')}</b></div><div class='fact'><span class='sub'>WhatsApp</span><b>{escape(e['whatsapp_phone'] or 'Not registered')}</b></div><div class='fact'><span class='sub'>Emergency</span><b>{escape(e['emergency_name'] or '—')} {escape(e['emergency_phone'] or '')}</b></div></div><div class='section-gap'></div><div class='two'><div class='card'><div class='card-head'><div><h3>Attendance Calendar</h3><div class='sub'>{escape(month)}</div></div><form method='get'><input type='month' name='month' value='{escape(month)}' style='margin:0' onchange='this.form.submit()'></form></div><div class='calendar'>{''.join(cells)}</div></div><div class='card'><h3>Recent timeline</h3><div class='timeline'>{timeline}</div></div></div><div class='section-gap'></div><div class='two'>{edit}<div class='card'><h3>HR Notes</h3>{noteform}<div class='section-gap'></div>{notehtml}</div></div>"""
+    return layout(e['name'],body,request,'employees')
+
+@app.post("/employees/{employee_id}/profile")
+def update_employee_profile(request: Request, employee_id: int, name: str=Form(...), phone: str=Form(""), designation: str=Form(""), department: str=Form(""), shift: str=Form("morning"), reporting_manager: str=Form(""), office_name: str=Form(""), join_date: str=Form(""), emergency_name: str=Form(""), emergency_relation: str=Form(""), emergency_phone: str=Form(""), is_active: int=Form(1)):
+    require_permission(request,'employees_edit')
+    with get_db() as c:
+        c.execute("UPDATE employees SET name=?,phone=?,designation=?,department=?,shift=?,reporting_manager=?,office_name=?,join_date=?,emergency_name=?,emergency_relation=?,emergency_phone=?,is_active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(name.strip(),phone.strip() or None,designation.strip() or None,department.strip() or None,shift,reporting_manager.strip() or None,office_name.strip() or None,join_date or None,emergency_name.strip() or None,emergency_relation.strip() or None,emergency_phone.strip() or None,1 if is_active else 0,employee_id))
+        audit(request,'employee_profile_updated','employee',str(employee_id),db=c)
+    return RedirectResponse(f'/employees/{employee_id}',303)
+
+@app.post("/employees/{employee_id}/notes")
+def add_employee_note(request: Request, employee_id: int, note_type: str=Form('general'), note: str=Form(...)):
+    require_permission(request,'employees_edit')
+    with get_db() as c:
+        c.execute("INSERT INTO employee_notes(employee_id,note_type,note,created_by) VALUES(?,?,?,?)",(employee_id,note_type[:30],note.strip(),request.session.get('user_name','Admin')))
+        audit(request,'employee_note_added','employee',str(employee_id),note_type,db=c)
+    return RedirectResponse(f'/employees/{employee_id}',303)
 
 @app.post("/employees/{employee_id}/reset-face")
 def reset_employee_face(request: Request, employee_id: int):
     require_permission(request, "face_reset")
     with get_db() as c:
         employee=c.execute("SELECT whatsapp_phone,phone FROM employees WHERE id=?",(employee_id,)).fetchone()
-        c.execute("DELETE FROM face_samples WHERE employee_id=?",(employee_id,))
-        c.execute("DELETE FROM face_profiles WHERE employee_id=?",(employee_id,))
+        c.execute("DELETE FROM face_samples WHERE employee_id=?",(employee_id,)); c.execute("DELETE FROM face_profiles WHERE employee_id=?",(employee_id,))
         if employee:
             phone=employee["whatsapp_phone"] or employee["phone"]
-            if phone:
-                c.execute("INSERT INTO conversation_states(phone,state) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET state=excluded.state,updated_at=CURRENT_TIMESTAMP",(phone,"awaiting_face_registration"))
-    return RedirectResponse("/employees",303)
+            if phone: c.execute("INSERT INTO conversation_states(phone,state) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET state=excluded.state,updated_at=CURRENT_TIMESTAMP",(phone,"awaiting_face_registration"))
+        audit(request,'face_reset','employee',str(employee_id),db=c)
+    return RedirectResponse(f"/employees/{employee_id}",303)
 
 @app.get("/pending", response_class=HTMLResponse)
 def pending_page(request: Request):
