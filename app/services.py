@@ -124,10 +124,12 @@ def duty_report(employee):
     today=now_local().date(); days=[]
     with get_db() as c:
         rows=c.execute("SELECT * FROM duty_schedules WHERE employee_id=? AND is_active ORDER BY weekday",(employee['id'],)).fetchall()
+        custom=c.execute("SELECT * FROM custom_duties WHERE employee_id=? AND duty_date>=? AND duty_date<=? AND is_active ORDER BY duty_date",(employee['id'],today.isoformat(),(today+timedelta(days=6)).isoformat())).fetchall()
     by_day={int(r['weekday']):r for r in rows}
+    by_date={r['duty_date']:r for r in custom}
     for offset in range(7):
-        day=today+timedelta(days=offset); duty=by_day.get(day.weekday())
-        if duty: days.append(f"📅 {day.strftime('%a, %d %b')}: {duty['start_time']} - {duty['end_time']} ({duty['office_name'] or 'BURAQ Office'})")
+        day=today+timedelta(days=offset); duty=by_date.get(day.isoformat()) or by_day.get(day.weekday())
+        if duty: days.append(f"{'⭐' if day.isoformat() in by_date else '📅'} {day.strftime('%a, %d %b')}: {duty['start_time']} - {duty['end_time']} ({duty['office_name'] or 'BURAQ Office'})")
     return "🗓️ আপনার Duty Schedule\n\n"+("\n".join(days) if days else "আগামী ৭ দিনে কোনো duty schedule নেই।")
 
 

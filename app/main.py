@@ -27,7 +27,7 @@ from app.reminders import reminder_worker
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.9.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.9.1", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -239,7 +239,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.9.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.9.1"}
 
 
 @app.get("/ready")
@@ -1052,19 +1052,26 @@ def duty_schedules_page(request: Request, saved: str=""):
     with get_db() as c:
         employees=c.execute("SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id").fetchall()
         rows=c.execute("SELECT d.*,e.staff_id,e.name FROM duty_schedules d JOIN employees e ON e.id=d.employee_id ORDER BY e.staff_id,d.weekday").fetchall()
+        custom=c.execute("SELECT d.*,e.staff_id,e.name FROM custom_duties d JOIN employees e ON e.id=d.employee_id WHERE d.duty_date>=? ORDER BY d.duty_date,e.staff_id",(datetime.now(ZoneInfo(settings.timezone)).date().isoformat(),)).fetchall()
         logs=c.execute("SELECT l.*,e.staff_id,e.name FROM duty_reminder_logs l JOIN employees e ON e.id=l.employee_id ORDER BY l.id DESC LIMIT 50").fetchall()
     days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']; options=''.join(f"<option value='{e['id']}'>{escape(e['staff_id'])} - {escape(e['name'])}</option>" for e in employees)
     form=''
     if can_manage:
         day_options=''.join(f"<option value='{i}'>{d}</option>" for i,d in enumerate(days))
         form=f"""<div class='card'><h2>Assign Weekly Duty</h2><p class='sub'>একই employee ও weekday আবার save করলে schedule update হবে।</p><form method='post'><label>Employee</label><select name='employee_id'>{options}</select><label>Weekday</label><select name='weekday'>{day_options}</select><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Office</label><input name='office_name' value='BURAQ Office'><button class='btn'>Save Duty</button></form></div>"""
+        custom_form=f"""<div class='card money-card'><div class='card-head'><div><div class='eyebrow'>Outside Weekly Roster</div><h2>Assign Custom Duty</h2></div><span class='tag'>One Day</span></div><p class='sub'>নির্দিষ্ট দিনের special duty weekly schedule-কে override করবে।</p><form method='post' action='/custom-duties'><label>Employee</label><select name='employee_id'>{options}</select><div class='two'><div><label>Duty Date</label><input type='date' name='duty_date' required></div><div><label>Office</label><input name='office_name' value='BURAQ Office'></div></div><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Note</label><input name='note' placeholder='Special duty reason (optional)'><button class='btn'>Save Custom Duty</button></form></div>"""
+    else: custom_form=''
     roster=[]
     for r in rows:
         action=f"<form method='post' action='/duty-schedules/{r['id']}/delete' onsubmit=\"return confirm('Delete this duty?')\"><button class='btn danger'>Delete</button></form>" if can_manage else ''
         roster.append(f"<tr><td><b>{escape(r['staff_id'])}</b><div class='sub'>{escape(r['name'])}</div></td><td>{days[int(r['weekday'])]}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td><span class='status {'ok' if r['is_active'] else 'bad'}'>{'Active' if r['is_active'] else 'Off'}</span></td><td>{action}</td></tr>")
     log_rows=''.join(f"<tr><td>{escape(str(x['created_at']))}</td><td>{escape(x['staff_id'])} - {escape(x['name'])}</td><td>{escape(x['duty_date'])}</td><td>{escape(x['reminder_type'])}</td><td><span class='status ok'>{escape(x['status'])}</span></td></tr>" for x in logs) or '<tr><td colspan=5>No reminders sent yet.</td></tr>'
+    custom_rows=[]
+    for r in custom:
+        action=f"<form method='post' action='/custom-duties/{r['id']}/delete' onsubmit=\"return confirm('Delete this custom duty?')\"><button class='btn danger'>Delete</button></form>" if can_manage else ''
+        custom_rows.append(f"<tr><td><b>{escape(r['duty_date'])}</b></td><td>{escape(r['staff_id'])} - {escape(r['name'])}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{escape(r['note'] or '—')}</td><td>{action}</td></tr>")
     notice="<div class='notice'>Duty schedule saved.</div>" if saved else ''
-    body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Zero-Touch Workforce</div><h2>Duty Scheduler & Reminders</h2><div class='sub'>Automatic duty, late and checkout WhatsApp reminders.</div></div><span class='pill'>{len(rows)} weekly duties</span></div><div class='two'>{form}<div class='card'><h2>Reminder Timing</h2><div class='salary-part'><span class='sub'>Before duty</span><b>30 minutes</b></div><div class='salary-part'><span class='sub'>Late alert</span><b>10 minutes after start</b></div><div class='salary-part'><span class='sub'>Checkout</span><b>10 minutes before end</b></div><p class='sub'>Approved Bengali utility templates: duty_reminder, late_reminder, checkout_reminder.</p></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Weekly Roster</h2><table><thead><tr><th>Employee</th><th>Day</th><th>Duty</th><th>Office</th><th>Status</th><th></th></tr></thead><tbody>{''.join(roster) or '<tr><td colspan=6>No duty assigned.</td></tr>'}</tbody></table></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Recent Reminder Log</h2><table><thead><tr><th>Sent</th><th>Employee</th><th>Duty Date</th><th>Type</th><th>Status</th></tr></thead><tbody>{log_rows}</tbody></table></div>"""
+    body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Zero-Touch Workforce</div><h2>Duty Scheduler & Reminders</h2><div class='sub'>Weekly roster plus one-day custom duty with automatic reminders.</div></div><div class='actions'><span class='pill'>{len(rows)} weekly</span><span class='pill'>{len(custom)} custom</span></div></div><div class='two'>{form}<div class='card'><h2>Reminder Timing</h2><div class='salary-part'><span class='sub'>Before duty</span><b>30 minutes</b></div><div class='salary-part'><span class='sub'>Late alert</span><b>10 minutes after start</b></div><div class='salary-part'><span class='sub'>Checkout</span><b>10 minutes before end</b></div><p class='sub'>Custom duty থাকলে ওই দিনের weekly duty ও reminder override হবে।</p></div></div><div class='section-gap'></div>{custom_form}<div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Upcoming Custom Duties</h2><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th><th></th></tr></thead><tbody>{''.join(custom_rows) or '<tr><td colspan=6>No upcoming custom duty.</td></tr>'}</tbody></table></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Weekly Roster</h2><table><thead><tr><th>Employee</th><th>Day</th><th>Duty</th><th>Office</th><th>Status</th><th></th></tr></thead><tbody>{''.join(roster) or '<tr><td colspan=6>No duty assigned.</td></tr>'}</tbody></table></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Recent Reminder Log</h2><table><thead><tr><th>Sent</th><th>Employee</th><th>Duty Date</th><th>Type</th><th>Status</th></tr></thead><tbody>{log_rows}</tbody></table></div>"""
     return layout("Duty Scheduler",body,request,"duty")
 
 @app.post("/duty-schedules")
@@ -1082,6 +1089,25 @@ def delete_duty_schedule(request: Request, schedule_id: int):
     require_permission(request,"duty_manage")
     with get_db() as c:
         c.execute("DELETE FROM duty_schedules WHERE id=?",(schedule_id,)); audit(request,'delete','duty_schedule',str(schedule_id),db=c)
+    return RedirectResponse('/duty-schedules',303)
+
+@app.post("/custom-duties")
+def save_custom_duty(request: Request, employee_id: int=Form(...), duty_date: str=Form(...), start_time: str=Form(...), end_time: str=Form(...), office_name: str=Form("BURAQ Office"), note: str=Form("")):
+    require_permission(request,"duty_manage")
+    try: datetime.strptime(duty_date,'%Y-%m-%d')
+    except ValueError: raise HTTPException(400,'Invalid duty date')
+    if not re.fullmatch(r"\d{2}:\d{2}",start_time) or not re.fullmatch(r"\d{2}:\d{2}",end_time): raise HTTPException(400,'Invalid duty time')
+    actor=str(request.session.get('hr_id') or 'super_admin')
+    with get_db() as c:
+        c.execute("INSERT INTO custom_duties(employee_id,duty_date,start_time,end_time,office_name,note,created_by) VALUES(?,?,?,?,?,?,?) ON CONFLICT(employee_id,duty_date) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time,office_name=excluded.office_name,note=excluded.note,is_active=excluded.is_active,updated_at=CURRENT_TIMESTAMP",(employee_id,duty_date,start_time,end_time,office_name.strip() or 'BURAQ Office',note.strip() or None,actor))
+        c.execute("DELETE FROM duty_reminder_logs WHERE employee_id=? AND duty_date=?",(employee_id,duty_date))
+        audit(request,'save','custom_duty',f'{employee_id}:{duty_date}',f'{start_time}-{end_time}',db=c)
+    return RedirectResponse('/duty-schedules?saved=1',303)
+
+@app.post("/custom-duties/{duty_id}/delete")
+def delete_custom_duty(request: Request, duty_id: int):
+    require_permission(request,"duty_manage")
+    with get_db() as c: c.execute("DELETE FROM custom_duties WHERE id=?",(duty_id,)); audit(request,'delete','custom_duty',str(duty_id),db=c)
     return RedirectResponse('/duty-schedules',303)
 
 @app.get("/duplicates")

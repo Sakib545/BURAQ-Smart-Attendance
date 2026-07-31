@@ -169,3 +169,4 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Automatic WhatsApp utility-template reminders 30 minutes before duty, 10 minutes after a missed check-in and 10 minutes before checkout.
 - Employee `My Duty` button shows the next seven days without typing.
 - Database-backed reminder logs prevent repeated messages and provide an Admin audit view.
+- v9.9.1 adds one-day Custom Duty assignments; a custom date/time/office overrides that employee's weekly duty and reminder for the selected date.

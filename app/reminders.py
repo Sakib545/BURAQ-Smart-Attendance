@@ -24,11 +24,18 @@ def _minutes(now, value):
 async def run_reminder_cycle():
     now=datetime.now(ZoneInfo(settings.timezone)); duty_date=now.date().isoformat()
     with get_db() as c:
-        rows=c.execute("""SELECT d.*,e.name,e.whatsapp_phone,e.phone,
+        custom=c.execute("""SELECT d.*,e.name,e.whatsapp_phone,e.phone,
+            (SELECT check_in FROM attendance a WHERE a.employee_id=e.id AND a.work_date=?) check_in,
+            (SELECT check_out FROM attendance a WHERE a.employee_id=e.id AND a.work_date=?) check_out
+            FROM custom_duties d JOIN employees e ON e.id=d.employee_id
+            WHERE d.duty_date=? AND d.is_active AND e.is_active AND e.registration_status='approved'""",(duty_date,duty_date,duty_date)).fetchall()
+        weekly=c.execute("""SELECT d.*,e.name,e.whatsapp_phone,e.phone,
             (SELECT check_in FROM attendance a WHERE a.employee_id=e.id AND a.work_date=?) check_in,
             (SELECT check_out FROM attendance a WHERE a.employee_id=e.id AND a.work_date=?) check_out
             FROM duty_schedules d JOIN employees e ON e.id=d.employee_id
             WHERE d.weekday=? AND d.is_active AND e.is_active AND e.registration_status='approved'""",(duty_date,duty_date,now.weekday())).fetchall()
+        custom_employees={r['employee_id'] for r in custom}
+        rows=[*custom,*[r for r in weekly if r['employee_id'] not in custom_employees]]
     for row in rows:
         phone=row['whatsapp_phone'] or row['phone']
         if not phone: continue

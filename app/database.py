@@ -361,6 +361,20 @@ def apply_feature_migrations() -> None:
         )""",
         "CREATE INDEX IF NOT EXISTS ix_duty_schedules_weekday_active ON duty_schedules(weekday,is_active)",
         "CREATE INDEX IF NOT EXISTS ix_duty_reminders_date ON duty_reminder_logs(duty_date)",
+        """CREATE TABLE IF NOT EXISTS custom_duties(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, duty_date TEXT NOT NULL,
+            start_time TEXT NOT NULL, end_time TEXT NOT NULL, office_name TEXT, note TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1, created_by TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_id,duty_date), FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS custom_duties(
+            id BIGSERIAL PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+            duty_date TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, office_name TEXT, note TEXT,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE, created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_id,duty_date)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_custom_duties_date_active ON custom_duties(duty_date,is_active)",
     ]
     with engine.begin() as conn:
         for statement in statements:
@@ -369,6 +383,7 @@ def apply_feature_migrations() -> None:
     mark_migration("v9.6-private-payroll")
     mark_migration("v9.8-performance-optimization")
     mark_migration("v9.9-zero-touch-duty-reminders")
+    mark_migration("v9.9.1-custom-duty")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.
