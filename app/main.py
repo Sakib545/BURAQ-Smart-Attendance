@@ -31,7 +31,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.15.2", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.15.3", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -204,6 +204,25 @@ def audit(request: Request, action: str, target_type: str = "", target_id: str =
 
 def base_url(request: Request): return str(request.base_url).rstrip("/")
 
+def admin_setup_hash() -> str:
+    """Read setup state without converting a database outage into first-time setup."""
+    try:
+        with get_db() as c:
+            row=c.execute("SELECT value FROM system_settings WHERE key=?",("admin_password_hash",)).fetchone()
+        return str(row["value"]) if row and row["value"] else ""
+    except Exception as exc:
+        logger.exception("Could not read persistent Admin setup state")
+        raise HTTPException(503,"Database temporarily unavailable. Admin setup was not reset; please retry shortly.") from exc
+
+def admin_setup_completed() -> bool:
+    try:
+        with get_db() as c:
+            row=c.execute("SELECT value FROM system_settings WHERE key=?",("admin_setup_completed",)).fetchone()
+        return bool(row and str(row["value"]) == "1")
+    except Exception as exc:
+        logger.exception("Could not read persistent Admin setup marker")
+        raise HTTPException(503,"Database temporarily unavailable. Please retry shortly.") from exc
+
 @app.on_event("startup")
 def startup():
     issues = settings.production_issues()
@@ -217,8 +236,11 @@ def startup():
         set_setting("admin_email", os.getenv("SUPER_ADMIN_EMAIL", "admin@buraq.com").strip().lower())
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
+    # Upgrade existing installations to the permanent one-time setup marker.
+    if get_setting("admin_password_hash") and not get_setting("admin_setup_completed"):
+        set_setting("admin_setup_completed","1")
     imported = import_employees()
-    logger.info("BURAQ v9.15.2 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.15.3 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
@@ -236,46 +258,58 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.15.2"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.15.3"}
 
 
 @app.get("/ready")
 def ready():
     db_ok = database_ok()
     configured_ok = configured()
+    setup_ok=False
+    if db_ok:
+        try: setup_ok=bool(admin_setup_hash()) and admin_setup_completed()
+        except HTTPException: setup_ok=False
     payload = {
         "status": "ready" if db_ok else "not_ready",
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.15.2",
+        "admin_setup_complete": setup_ok,
+        "version": "9.15.3",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    if not get_setting("admin_password_hash"):
+    admin_hash=admin_setup_hash(); completed=admin_setup_completed()
+    if completed and not admin_hash:
+        raise HTTPException(503,"Admin setup is protected but credentials are unavailable. Restore the latest backup.")
+    if not admin_hash:
         return RedirectResponse("/setup", 302)
     if not logged_in(request): return RedirectResponse("/login", 302)
     return RedirectResponse("/dashboard", 302)
 
 @app.get("/setup", response_class=HTMLResponse)
 def setup_page(request: Request):
-    if get_setting("admin_password_hash"):
+    admin_hash=admin_setup_hash(); completed=admin_setup_completed()
+    if completed and not admin_hash:
+        raise HTTPException(503,"Admin setup is protected. Restore the latest backup instead of creating a new Admin.")
+    if admin_hash:
         return RedirectResponse("/dashboard" if logged_in(request) else "/login", 302)
     cfg_note = "<div class='notice'>Railway Variables থেকে WhatsApp configuration পাওয়া গেছে। শুধু Admin password তৈরি করুন।</div>" if configured() else "<div class='notice' style='background:#fef3c7;color:#92400e'>WhatsApp credentials পরে Dashboard → Settings থেকে যোগ করতে পারবেন।</div>"
-    body=f"<div class='login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>প্রথমবারের নিরাপদ Admin setup</p>{cfg_note}<form method='post'><label>Super Admin email</label><input type='email' name='email' value='admin@buraq.com' required><label>নতুন Admin password</label><input type='password' name='password' minlength='6' required><label>Confirm password</label><input type='password' name='confirm_password' minlength='6' required><button class='btn' type='submit'>Create Admin & Open Dashboard</button></form><p class='sub'>WhatsApp Token, Phone Number ID এবং Verify Token এই page-এ আর চাইবে না।</p></div></div>"
+    body=f"<div class='login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>প্রথমবারের নিরাপদ Admin setup</p>{cfg_note}<form method='post'><label>Super Admin email</label><input type='email' name='email' value='admin@buraq.com' required><label>নতুন Admin password</label><input type='password' name='password' minlength='8' required><label>Confirm password</label><input type='password' name='confirm_password' minlength='8' required><button class='btn' type='submit'>Create Admin & Open Dashboard</button></form><p class='sub'>এটি শুধু একবারই করতে হবে। পরে Settings থেকে email/password পরিবর্তন করা যাবে।</p></div></div>"
     return layout("Initial Setup", body)
 
 @app.post("/setup")
 def save_setup(request: Request, email: str = Form(...), password: str = Form(...), confirm_password: str = Form(...)):
-    if get_setting("admin_password_hash"):
+    if admin_setup_hash() or admin_setup_completed():
         raise HTTPException(403)
-    if password != confirm_password or len(password) < 6:
+    if password != confirm_password or len(password) < 8:
         raise HTTPException(400, "Passwords do not match or are too short")
-    set_setting("admin_email", email.strip().lower())
-    set_setting("admin_name", "Super Admin")
-    set_setting("admin_password_hash", hash_password(password))
+    values={"admin_email":email.strip().lower(),"admin_name":"Super Admin","admin_password_hash":hash_password(password),"admin_setup_completed":"1"}
+    with get_db() as c:
+        for key,value in values.items():
+            c.execute("INSERT INTO system_settings(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",(key,value))
     request.session["admin"] = True
     request.session["role"] = "super_admin"
     request.session["user_name"] = get_setting("admin_name", "Super Admin")
@@ -459,7 +493,14 @@ def settings_page(request: Request, saved: str = "", error: str = ""):
         local_success=escape(recovery.get("last_local_success") or "Waiting for first backup")
         remote_success=escape(recovery.get("last_offsite_success") or ("Waiting for first upload" if offsite else "Not configured"))
         recovery_error=escape(recovery.get("last_error") or "None")
-        body += f"""<div class='card' style='margin-top:18px'><h2>Disaster Recovery</h2>
+        admin_email=escape(get_setting("admin_email","admin@buraq.com"))
+        body += f"""<div class='card' style='margin-top:18px'><h2>Admin Login Settings</h2>
+        <p class='sub'>Initial Setup আবার করতে হবে না। এখান থেকে email ও password পরিবর্তন করুন।</p>
+        <form method='post' action='/settings/password'><label>Current password</label><input type='password' name='current_password' required autocomplete='current-password'>
+        <label>Admin email</label><input type='email' name='new_email' value='{admin_email}' required autocomplete='email'>
+        <label>New password</label><input type='password' name='new_password' minlength='8' required autocomplete='new-password'>
+        <label>Confirm new password</label><input type='password' name='confirm_password' minlength='8' required autocomplete='new-password'>
+        <button class='btn'>Update Password</button></form></div>""" + f"""<div class='card' style='margin-top:18px'><h2>Disaster Recovery</h2>
         <p><span class='status {'ok' if recovery.get('verified') else 'warn'}'>{'Latest backup verified' if recovery.get('verified') else 'Verification pending'}</span>
         <span class='status {'ok' if offsite else 'warn'}'>{'Off-site active' if offsite else 'Local only'}</span>
         <span class='status {'ok' if recovery.get('encrypted') else 'bad'}'>{'Encrypted' if recovery.get('encrypted') else 'Encryption missing'}</span></p>
@@ -488,11 +529,13 @@ def save_settings(request: Request, access_token: str = Form(""), phone_id: str 
     return RedirectResponse("/settings?saved=1", 303)
 
 @app.post("/settings/password")
-def change_password(request: Request, current_password: str = Form(...), new_password: str = Form(...)):
+def change_password(request: Request, current_password: str = Form(...), new_email: str = Form(...), new_password: str = Form(...), confirm_password: str = Form(...)):
     require_super_admin(request)
-    if not verify_password(current_password, get_setting("admin_password_hash")) or len(new_password) < 6:
+    if not verify_password(current_password, admin_setup_hash()) or len(new_password) < 8 or new_password != confirm_password:
         return RedirectResponse("/settings?error=password", 303)
     set_setting("admin_password_hash", hash_password(new_password))
+    set_setting("admin_email",new_email.strip().lower())
+    audit(request,"login_settings_changed","user_account","super_admin","Admin email/password changed")
     return RedirectResponse("/settings?saved=password", 303)
 
 @app.get("/settings/backup")

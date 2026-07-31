@@ -281,3 +281,12 @@ python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
 - ছোট `BACKUP_ENCRYPTION_KEY` উপেক্ষা করে নিরাপদ `CONFIG_ENCRYPTION_KEY` fallback ব্যবহার হয়।
 - অসম্পূর্ণ S3 credentials থাকলে শুধু off-site upload বন্ধ থাকে; database, webhook এবং dashboard সচল থাকে।
 - Configuration সমস্যা Deploy Logs-এ warning হিসেবে দেখা যায়, fatal startup error হিসেবে নয়।
+
+### v9.15.3 One-time Admin setup
+
+- Admin setup এখন password hash-এর পাশাপাশি permanent completion marker রাখে।
+- Existing installations startup-এর সময় automatic marker migration পায়।
+- Database সাময়িকভাবে unavailable হলে app আর ভুল করে Initial Setup page দেখায় না।
+- Setup marker থাকলেও credential missing হলে new Admin তৈরির বদলে protected recovery error দেখায়।
+- `/ready` response-এ `admin_setup_complete` status পাওয়া যায়।
+- Super Admin Settings থেকে current password যাচাই করে login email ও password পরিবর্তন করতে পারে।

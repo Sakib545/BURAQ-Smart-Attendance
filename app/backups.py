@@ -148,7 +148,7 @@ def create_full_backup(target: Path | None = None) -> Path:
         "format": FORMAT,
         "version": VERSION,
         "created_at": now.isoformat(),
-        "app_version": "9.15.2",
+        "app_version": "9.15.3",
         "source_database": database.database_kind(),
         "table_counts": counts,
         "tables": tables,
