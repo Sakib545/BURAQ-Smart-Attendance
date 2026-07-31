@@ -95,7 +95,28 @@ def _blur_score(image: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def extract_embedding(image_bytes: bytes):
+def _pose_from_face(face) -> tuple[str, float]:
+    """Estimate coarse head yaw from YuNet landmarks.
+
+    Returns (pose, yaw_score), where pose is straight/left/right and
+    yaw_score is the normalized horizontal nose displacement.
+    """
+    # YuNet landmarks: right eye, left eye, nose, right mouth, left mouth.
+    right_eye_x, right_eye_y = float(face[4]), float(face[5])
+    left_eye_x, left_eye_y = float(face[6]), float(face[7])
+    nose_x, nose_y = float(face[8]), float(face[9])
+    eye_mid_x = (right_eye_x + left_eye_x) / 2.0
+    eye_distance = max(abs(left_eye_x - right_eye_x), 1.0)
+    yaw = (nose_x - eye_mid_x) / eye_distance
+    # Thresholds intentionally moderate so employees do not need an extreme turn.
+    if yaw <= -0.18:
+        return "left", float(yaw)
+    if yaw >= 0.18:
+        return "right", float(yaw)
+    return "straight", float(yaw)
+
+
+def extract_embedding(image_bytes: bytes, required_pose: str | None = None):
     if not image_bytes:
         raise FaceAIError("খালি image পাওয়া গেছে। আবার selfie পাঠান।")
 
@@ -122,12 +143,21 @@ def extract_embedding(image_bytes: bytes):
         raise FaceAIError(f"ছবিতে {len(valid)}টি মুখ পাওয়া গেছে। শুধু নিজের একক selfie পাঠান।")
 
     face = max(valid, key=lambda item: float(item[-1]))
+    pose, yaw_score = _pose_from_face(face)
     x, y, bw, bh = [float(v) for v in face[:4]]
     ratio = (bw * bh) / float(w * h)
     confidence = float(face[-1])
 
     if ratio < 0.035:
         raise FaceAIError("মুখ অনেক দূরে। মুখ যেন ছবির অন্তত এক-চতুর্থাংশ জায়গা নেয় এমনভাবে selfie দিন।")
+
+    if required_pose and required_pose not in {"any", pose}:
+        pose_labels = {"straight": "সোজা সামনে", "left": "বাম দিকে", "right": "ডান দিকে"}
+        expected = pose_labels.get(required_pose, required_pose)
+        detected = pose_labels.get(pose, pose)
+        raise FaceAIError(
+            f"Liveness challenge মেলেনি।\nচাওয়া হয়েছিল: {expected} তাকাতে\nশনাক্ত হয়েছে: {detected}\n\nএখনই নতুন selfie তুলে আবার পাঠান।"
+        )
 
     aligned = recognizer.alignCrop(detected_image, face)
     if aligned is None or aligned.size == 0:
@@ -156,6 +186,8 @@ def extract_embedding(image_bytes: bytes):
         "confidence": round(confidence * 100.0, 1),
         "blur": round(blur, 1),
         "face_ratio": round(ratio * 100.0, 1),
+        "pose": pose,
+        "yaw_score": round(yaw_score, 3),
     }
     return feature.tolist(), quality, diagnostics
 

@@ -3,12 +3,37 @@ from zoneinfo import ZoneInfo
 from math import asin, cos, radians, sin, sqrt
 import re
 import json
+import random
+import time as time_module
 
 from app.face_ai import FaceAIError, extract_embedding, best_match
 
 from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
 from app.database import get_db
 
+
+
+
+LIVENESS_CHALLENGE_TTL_SECONDS = 120
+POSE_LABELS = {
+    "straight": "সোজা সামনে তাকান",
+    "left": "মাথা সামান্য বাম দিকে ঘুরিয়ে তাকান",
+    "right": "মাথা সামান্য ডান দিকে ঘুরিয়ে তাকান",
+}
+
+def new_liveness_challenge():
+    pose = random.choice(tuple(POSE_LABELS))
+    issued_at = int(time_module.time())
+    return pose, issued_at
+
+def liveness_prompt(pose):
+    return (
+        "🛡️ Live Selfie Challenge\n\n"
+        f"👉 {POSE_LABELS.get(pose, 'সোজা সামনে তাকান')}\n"
+        "📸 নির্দেশনাটি মেনে এখনই একটি নতুন selfie তুলে পাঠান।\n\n"
+        "⏳ সময়: ২ মিনিট\n"
+        "⚠️ পুরোনো/gallery ছবি ব্যবহার করবেন না।"
+    )
 
 def now_local():
     return datetime.now(ZoneInfo(settings.timezone))
@@ -197,8 +222,9 @@ def receive_location(phone, latitude, longitude):
         return f"❌ আপনি অনুমোদিত অফিস এলাকার বাইরে আছেন।\nদূরত্ব: {distance:.0f} মিটার\nঅনুমোদিত: {OFFICE_RADIUS_METERS:.0f} মিটার\n\nআবার সঠিক Location পাঠান।"
     action = "checkin" if current["state"].startswith("checkin") else "checkout"
     dist_value = "" if distance is None else str(distance)
-    set_state(phone, f"{action}_selfie:{latitude}:{longitude}:{dist_value}")
-    return "✅ Location গ্রহণ করা হয়েছে।\n\n📸 এখন সামনে তাকিয়ে একটি বর্তমান selfie পাঠান।"
+    pose, issued_at = new_liveness_challenge()
+    set_state(phone, f"{action}_selfie:{latitude}:{longitude}:{dist_value}:{pose}:{issued_at}")
+    return "✅ Location গ্রহণ করা হয়েছে।\n\n" + liveness_prompt(pose)
 
 
 def receive_image(phone, media_id, image_bytes=None):
@@ -212,24 +238,32 @@ def receive_image(phone, media_id, image_bytes=None):
     if not employee: return "❌ আগে Register করুন।"
     if not current or not current["state"].startswith(("checkin_selfie:", "checkout_selfie:")):
         return "ℹ️ এই মুহূর্তে selfie প্রয়োজন নেই। Menu থেকে Check In বা Check Out নির্বাচন করুন।"
+    parts = current["state"].split(":")
+    challenge_pose = parts[4] if len(parts) > 4 else "straight"
+    issued_at = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+    age_seconds = int(time_module.time()) - issued_at if issued_at else LIVENESS_CHALLENGE_TTL_SECONDS + 1
+    if age_seconds > LIVENESS_CHALLENGE_TTL_SECONDS:
+        pose, new_issued_at = new_liveness_challenge()
+        parts[4:] = [pose, str(new_issued_at)]
+        set_state(phone, ":".join(parts))
+        return "⌛ আগের selfie challenge-এর সময় শেষ হয়েছে।\n\n" + liveness_prompt(pose)
     try:
-        candidate, quality, diagnostics = extract_embedding(image_bytes)
+        candidate, quality, diagnostics = extract_embedding(image_bytes, required_pose=challenge_pose)
     except FaceAIError as exc:
-        return f"❌ Face Verification Failed\n{exc}"
+        return f"❌ Live Face Verification Failed\n{exc}\n\n⏳ Challenge শেষ হওয়ার আগে আবার চেষ্টা করুন।"
     with get_db() as c:
         rows = c.execute("SELECT embedding FROM face_samples WHERE employee_id=? ORDER BY id", (employee["id"],)).fetchall()
     score = best_match(candidate, [json.loads(r["embedding"]) for r in rows])
     threshold = 0.46
     if score < threshold:
         return f"🚫 Face Verification Failed\n\nনিবন্ধিত মুখের সঙ্গে মিল পাওয়া যায়নি।\nMatch score: {score*100:.1f}%\n\nশুধু নিজের বর্তমান selfie পাঠান।"
-    parts = current["state"].split(":")
     action = "check_in" if parts[0] == "checkin_selfie" else "check_out"
     lat, lon = float(parts[1]), float(parts[2]); dist = float(parts[3]) if len(parts) > 3 and parts[3] else None
     result = check_in(employee) if action == "check_in" else check_out(employee)
     with get_db() as c:
         c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)", (employee["id"], action, lat, lon, dist, media_id, 1))
     clear_state(phone)
-    return result + f"\n✅ Location Verified\n😊 Face Verified: {score*100:.1f}%"
+    return result + f"\n✅ Location Verified\n😊 Face Verified: {score*100:.1f}%\n🛡️ Live Challenge Verified: {POSE_LABELS.get(challenge_pose, challenge_pose)}"
 
 
 def process(phone, text):
@@ -247,7 +281,10 @@ def process(phone, text):
         if value == "waiting_for_approval": return "⏳ আপনার registration এখনো Admin approval-এর অপেক্ষায় আছে।"
         if value == "awaiting_face_registration": return "📸 এখন ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।"
         if value.endswith("_location"): return "📍 নিচের Send Location বাটন ব্যবহার করে বর্তমান Location পাঠান।"
-        if value.startswith(("checkin_selfie:", "checkout_selfie:")): return "📸 এখন একটি বর্তমান selfie পাঠান।"
+        if value.startswith(("checkin_selfie:", "checkout_selfie:")):
+            parts = value.split(":")
+            pose = parts[4] if len(parts) > 4 else "straight"
+            return liveness_prompt(pose)
     if command in {"hi","hello","menu","start"}:
         employee=employee_by_phone(phone); return menu(employee["name"] if employee else None)
     if command in {"register","1"}:

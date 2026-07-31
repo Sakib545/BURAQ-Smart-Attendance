@@ -1,26 +1,27 @@
-# BURAQ Smart Attendance v6.1 — Face Detection Hotfix
+# BURAQ Smart Attendance v6.2 — Live Selfie Challenge
 
-This build fixes WhatsApp selfie detection failures seen in v6.0.
+## নতুন নিরাপত্তা
 
-## Fixes
-- Applies phone-camera EXIF orientation before face detection.
-- Uses a lower, practical YuNet confidence threshold.
-- Retries detection after low-light enhancement.
-- Caps very large images to reduce Railway memory usage.
-- Rejects multiple faces, blurry images and very distant faces.
-- Shows useful face-quality progress during 3-selfie registration.
-- Gives diagnostic image dimensions and lighting guidance when detection fails.
-- Keeps Face AI matching, GPS verification, existing employees and attendance data.
+- Check In / Check Out location সফল হলে random live challenge দেয়:
+  - সোজা সামনে তাকান
+  - মাথা সামান্য বাম দিকে ঘুরান
+  - মাথা সামান্য ডান দিকে ঘুরান
+- Challenge ২ মিনিটের মধ্যে সম্পন্ন করতে হয়।
+- Face AI challenge pose, registered face এবং office location—তিনটি verify করে।
+- ভুল pose, অন্য মুখ, একাধিক মুখ, ঝাপসা ছবি বা expired challenge reject হয়।
+- Successful attendance message-এ Live Challenge Verified দেখায়।
 
-## Employee instructions
-Send each registration selfie as a separate WhatsApp image message. Do not send a collage. Use the WhatsApp camera, face the camera, and keep only one person in the frame.
+## গুরুত্বপূর্ণ সীমাবদ্ধতা
 
-## Railway
-Replace the old repository files with this build and redeploy. Existing persistent database data is not intentionally deleted.
+WhatsApp Cloud API নির্ভরযোগ্যভাবে জানায় না একটি image Camera থেকে এসেছে নাকি Gallery থেকে। তাই gallery upload সরাসরি ১০০% block করা সম্ভব নয়। এই build random pose + ২ মিনিট expiry ব্যবহার করে পুরোনো/static gallery photo দিয়ে attendance দেওয়া অনেক কঠিন করে। আরও শক্তিশালী security-এর জন্য পরবর্তী ধাপে short-video blink/head-turn liveness যোগ করা যাবে।
 
-Required variables include:
+## Railway deploy
 
-```
+পুরোনো repository-এর files এই project-এর files দিয়ে replace করে deploy করুন। Existing PostgreSQL data delete হবে না।
+
+Required variables:
+
+```text
 OFFICE_LATITUDE=25.18892481916644
 OFFICE_LONGITUDE=89.87014577946071
 OFFICE_RADIUS_METERS=100
