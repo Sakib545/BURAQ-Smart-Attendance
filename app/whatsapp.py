@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import httpx
 from app.runtime import get_setting
@@ -54,6 +55,36 @@ async def download_media(media_id: str):
 
 async def send_text(to: str, text: str):
     return await _send(to, {"type": "text", "text": {"preview_url": False, "body": text}})
+
+
+async def send_selfie_review_result(to: str, name: str, action: str, approved: bool, score: float):
+    """Notify an employee after HR resolves a pending duplicate-selfie review."""
+    duty_action = "Check-in" if action == "check_in" else "Check-out"
+    if approved:
+        message = (
+            f"✅ Selfie Review Approved\n\n{name}, আপনার {duty_action} selfie Admin approve করেছেন।\n"
+            f"Review score: {score * 100:.1f}%\n\n"
+            f"Attendance সম্পন্ন করতে WhatsApp menu থেকে আবার {duty_action} নির্বাচন করে নতুন live selfie দিন।"
+        )
+    else:
+        message = (
+            f"❌ Selfie Review Rejected\n\n{name}, আপনার {duty_action} selfie Admin reject করেছেন।\n"
+            f"Review score: {score * 100:.1f}%\n\n"
+            "একই/পুরোনো ছবি ব্যবহার করবেন না। WhatsApp menu থেকে আবার চেষ্টা করে নতুন live selfie তুলুন।"
+        )
+    result = {"sent": False, "reason": "not attempted"}
+    for attempt in range(1, 4):
+        result = await send_text(to, message)
+        if result.get("sent"):
+            return result
+        # Do not repeatedly retry permanent Meta/client errors.
+        status_code = int(result.get("status_code") or 0)
+        if 400 <= status_code < 500:
+            break
+        if attempt < 3:
+            await asyncio.sleep(attempt)
+    logger.error("Selfie review notification failed phone=%s action=%s approved=%s result=%s", to, action, approved, result)
+    return result
 
 async def send_template(to: str, template_name: str, values: list[str]):
     return await _send(to,{"type":"template","template":{"name":template_name,"language":{"code":"bn"},"components":[{"type":"body","parameters":[{"type":"text","text":str(v)} for v in values]}]}})

@@ -24,14 +24,14 @@ from app.config import settings
 from app.database import database_kind, database_ok, database_warning, get_db, init_db
 from app.runtime import configured, get_setting, set_setting, import_environment_defaults, get_stored_setting, restore_stored_setting
 from app.employee_seed import import_employees
-from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_text
+from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_selfie_review_result, send_text
 from app.reminders import reminder_worker
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.15.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.15.1", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -216,7 +216,7 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9.15 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.15.1 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
@@ -234,7 +234,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.15.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.15.1"}
 
 
 @app.get("/ready")
@@ -246,7 +246,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.15.0",
+        "version": "9.15.1",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -1507,16 +1507,26 @@ def duplicate_analysis(request: Request, decision: str="", review: str=""):
     return layout("Duplicate Analysis", body, request, "duplicates")
 
 @app.post("/duplicates/{fingerprint_id}/{action}")
-def review_duplicate(request: Request, fingerprint_id: int, action: str):
+def review_duplicate(request: Request, fingerprint_id: int, action: str, background_tasks: BackgroundTasks):
     require_permission(request,"approvals_manage")
     if action not in {"approve","reject"}: raise HTTPException(400,"Invalid action")
     status="approved" if action=="approve" else "rejected"
     actor=str(request.session.get("hr_id") or "super_admin")
+    notify=None
     with get_db() as c:
-        row=c.execute("SELECT id FROM attendance_fingerprints WHERE id=? AND review_status='pending'",(fingerprint_id,)).fetchone()
+        row=c.execute("""SELECT f.id,f.action,f.duplicate_score,e.name,
+            COALESCE(NULLIF(e.whatsapp_phone,''),NULLIF(e.phone,'')) notification_phone
+            FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id
+            WHERE f.id=? AND f.review_status='pending'""",(fingerprint_id,)).fetchone()
         if not row: raise HTTPException(404,"Pending fingerprint not found")
         c.execute("UPDATE attendance_fingerprints SET review_status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(status,actor,fingerprint_id))
+        if row["notification_phone"]:
+            notify=(row["notification_phone"],row["name"],row["action"],status=="approved",float(row["duplicate_score"] or 0))
     audit(request,action,"attendance_fingerprint",str(fingerprint_id),status)
+    if notify:
+        background_tasks.add_task(send_selfie_review_result,*notify)
+    else:
+        logger.warning("Selfie review notification skipped: employee phone missing fingerprint=%s",fingerprint_id)
     return RedirectResponse("/duplicates?review=pending",303)
 
 @app.get("/webhook/whatsapp", response_class=PlainTextResponse)

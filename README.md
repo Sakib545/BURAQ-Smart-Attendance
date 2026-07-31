@@ -267,3 +267,10 @@ python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
 - Production validation blocks incomplete S3 credentials or a short backup encryption key.
 - PostgreSQL connection and pool timeouts prevent long hangs, while Docker health checks and graceful shutdown improve crash recovery.
 - `.env.example` provides one portable variable checklist for Railway or another host.
+
+### v9.15.1 Selfie review notification
+
+- Admin Approve বা Reject করলে employee সঙ্গে সঙ্গে WhatsApp notification পায়।
+- Message-এ Check-in/Check-out action, review score এবং পরবর্তী করণীয় থাকে।
+- Notification background-এ যায়; temporary send failure হলে সর্বোচ্চ তিনবার retry হয়।
+- WhatsApp number না থাকলে approval action বন্ধ হয় না এবং server log-এ কারণ লেখা হয়।
