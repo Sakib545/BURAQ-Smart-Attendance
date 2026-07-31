@@ -32,10 +32,23 @@ class Settings:
     meta_api_version: str = os.getenv("META_API_VERSION", "v23.0")
     admin_api_key: str = os.getenv("ADMIN_API_KEY", "")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    allow_temp_db_fallback: bool = os.getenv("ALLOW_TEMP_DB_FALLBACK", "false").strip().lower() in {"1","true","yes","on"}
+    require_secure_secrets: bool = os.getenv("REQUIRE_SECURE_SECRETS", "true").strip().lower() in {"1","true","yes","on"}
 
     @property
     def is_postgres(self) -> bool:
         return self.database_url.startswith("postgresql+")
+
+    def production_issues(self) -> list[str]:
+        issues: list[str] = []
+        if self.environment == "production" and self.require_secure_secrets:
+            for key in ("SESSION_SECRET", "CONFIG_ENCRYPTION_KEY"):
+                value = os.getenv(key, "").strip()
+                if len(value) < 32:
+                    issues.append(f"{key} must be at least 32 characters")
+        if self.environment == "production" and not os.getenv("DATABASE_URL", "").strip():
+            issues.append("DATABASE_URL is required in production")
+        return issues
 
     def validate(self) -> list[str]:
         missing = []

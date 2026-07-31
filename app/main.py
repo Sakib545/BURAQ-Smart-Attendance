@@ -6,12 +6,14 @@ import json
 import logging
 import os
 import secrets
+import time
+import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from html import escape
 
 from fastapi import FastAPI, BackgroundTasks, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
@@ -22,8 +24,26 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="8.3.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.0.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("Unhandled request error request_id=%s method=%s path=%s", request_id, request.method, request.url.path)
+        return JSONResponse({"detail": "Internal server error", "request_id": request_id}, status_code=500)
+    duration_ms = round((time.perf_counter() - started) * 1000, 1)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Response-Time-ms"] = str(duration_ms)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    logger.info("request_id=%s method=%s path=%s status=%s duration_ms=%s", request_id, request.method, request.url.path, response.status_code, duration_ms)
+    return response
 
 CSS = """
 <style>
@@ -163,6 +183,9 @@ def base_url(request: Request): return str(request.base_url).rstrip("/")
 
 @app.on_event("startup")
 def startup():
+    issues = settings.production_issues()
+    if issues:
+        raise RuntimeError("Production configuration invalid: " + "; ".join(issues))
     init_db()
     import_environment_defaults()
     if not get_setting("admin_email"):
@@ -170,25 +193,25 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("Employee master synced: %s", imported)
+    logger.info("BURAQ v9 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.get("/health")
 def health():
-    # Railway healthcheck is a liveness check. It must stay 200 while the
-    # dashboard explains any optional database/configuration warning.
-    return {
-        "ok": True,
-        "version": "8.1.1",
-        "database": database_kind(),
-        "database_connected": database_ok(),
-        "whatsapp_configured": configured(),
-    }
+    return {"status": "ok", "service": settings.app_name, "version": "9.0.0"}
+
 
 @app.get("/ready")
 def ready():
-    if not database_ok():
-        raise HTTPException(503, "Database unavailable")
-    return {"ready": True, "database": database_kind()}
+    db_ok = database_ok()
+    configured_ok = configured()
+    payload = {
+        "status": "ready" if db_ok else "not_ready",
+        "database": database_kind(),
+        "database_ok": db_ok,
+        "whatsapp_configured": configured_ok,
+        "version": "9.0.0",
+    }
+    return JSONResponse(payload, status_code=200 if db_ok else 503)
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):

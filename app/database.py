@@ -145,6 +145,8 @@ def init_db(max_attempts: int = 5) -> None:
                 time.sleep(min(attempt * 2, 8))
     if _active_url.startswith("sqlite"):
         raise RuntimeError(f"Could not initialize SQLite database: {last_error}") from last_error
+    if not settings.allow_temp_db_fallback:
+        raise RuntimeError(f"Primary database unavailable and temporary fallback is disabled: {last_error}") from last_error
     _fallback_to_sqlite(last_error or RuntimeError("Unknown database error"))
 
 
@@ -169,6 +171,34 @@ def database_warning() -> str:
     if _startup_error:
         return "PostgreSQL পাওয়া যায়নি; app temporary storage-এ চলছে। Railway PostgreSQL যুক্ত করলে data স্থায়ী হবে।"
     return ""
+
+
+def ensure_migration_table() -> None:
+    statement = (
+        "CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        if _active_url.startswith("sqlite") else
+        "CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    with engine.begin() as conn:
+        conn.execute(text(statement))
+
+
+def migration_applied(version: str) -> bool:
+    ensure_migration_table()
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT 1 FROM schema_migrations WHERE version=:version"), {"version": version}).first()
+    return bool(row)
+
+
+def mark_migration(version: str) -> None:
+    ensure_migration_table()
+    sql = (
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES (:version)"
+        if _active_url.startswith("sqlite") else
+        "INSERT INTO schema_migrations(version) VALUES (:version) ON CONFLICT (version) DO NOTHING"
+    )
+    with engine.begin() as conn:
+        conn.execute(text(sql), {"version": version})
 
 
 def apply_feature_migrations() -> None:

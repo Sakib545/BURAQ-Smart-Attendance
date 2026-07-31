@@ -56,3 +56,35 @@ Granular permissions include dashboard, employee view/add/edit/delete, Face AI r
 
 ## v8.3
 Attendance reports (CSV/Excel/PDF), leave approvals, attendance corrections, shift and department management with dynamic permissions.
+
+## v9.0 Production Foundation
+
+This release hardens the existing v8.3 application without deleting existing employee, attendance, HR, permission, WhatsApp, GPS or Face AI data.
+
+### Added
+- Strict production configuration validation.
+- PostgreSQL failure now stops deployment instead of silently using temporary storage.
+- Temporary SQLite fallback is available only when `ALLOW_TEMP_DB_FALLBACK=true` is explicitly set.
+- Separate `/health` liveness and `/ready` database-readiness endpoints.
+- Request IDs, response timing, structured request logs and safe 500 responses.
+- Security response headers.
+- Schema migration bookkeeping through `schema_migrations`.
+- Automated smoke tests for startup, health, readiness and login page.
+
+### Required Railway variables
+```text
+ENVIRONMENT=production
+DATABASE_URL=<Railway PostgreSQL reference>
+SESSION_SECRET=<at least 32 random characters>
+CONFIG_ENCRYPTION_KEY=<at least 32 random characters>
+ALLOW_TEMP_DB_FALLBACK=false
+REQUIRE_SECURE_SECRETS=true
+```
+
+Keep the existing WhatsApp and office-location variables unchanged.
+
+### Test locally
+```bash
+pip install -r requirements-dev.txt
+ENVIRONMENT=development REQUIRE_SECURE_SECRETS=false pytest -q
+```
