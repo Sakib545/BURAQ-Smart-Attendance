@@ -215,6 +215,30 @@ def apply_feature_migrations() -> None:
             verified BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""",
+        """CREATE TABLE IF NOT EXISTS hr_accounts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'hr_officer',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            last_login_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS hr_accounts(
+            id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'hr_officer',
+            is_active BOOLEAN NOT NULL DEFAULT TRUE, last_login_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS ux_hr_accounts_email_lower ON hr_accounts(LOWER(email))""",
+        """CREATE TABLE IF NOT EXISTS audit_logs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, actor_type TEXT NOT NULL, actor_id TEXT,
+            actor_name TEXT, action TEXT NOT NULL, target_type TEXT, target_id TEXT,
+            details TEXT, ip_address TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS audit_logs(
+            id BIGSERIAL PRIMARY KEY, actor_type TEXT NOT NULL, actor_id TEXT, actor_name TEXT,
+            action TEXT NOT NULL, target_type TEXT, target_id TEXT, details TEXT, ip_address TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
     ]
     with engine.begin() as conn:
         for statement in statements:

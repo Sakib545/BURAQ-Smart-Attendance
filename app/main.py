@@ -22,7 +22,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="7.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="8.0.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 CSS = """
@@ -38,9 +38,14 @@ a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px
 
 def layout(title: str, body: str, request: Request | None = None, active: str = ""):
     if request is not None and logged_in(request):
-        nav = [("dashboard","Dashboard","/dashboard"),("employees","Employees","/employees"),("pending","Approvals","/pending"),("settings","Settings","/settings")]
+        role = request.session.get("role", "super_admin")
+        nav = [("dashboard","Dashboard","/dashboard"),("employees","Employees","/employees"),("pending","Approvals","/pending"),("hr","HR Accounts","/hr-accounts"),("audit","Activity Logs","/audit-logs"),("settings","Settings","/settings")]
+        if role not in ("super_admin", "hr_manager"):
+            nav = [item for item in nav if item[0] not in ("hr","audit","settings")]
         links = "".join(f"<a class='{"active" if active==k else ""}' href='{u}'>{label}</a>" for k,label,u in nav)
-        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ Smart Attendance</div><div class='side-sub'>Secure Workforce Control Center</div><nav class='side-nav'>{links}<a href='/export/attendance.csv'>Export Attendance</a><a href='/logout'>Logout</a></nav></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div><div class='sub'>Face AI • GPS • WhatsApp</div></div><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></header><div class='page'>{body}</div></main></div>"
+        user_name = escape(str(request.session.get("user_name", "Admin")))
+        role_label = escape(role.replace("_", " ").title())
+        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ Smart Attendance</div><div class='side-sub'>Enterprise Workforce Control Center</div><nav class='side-nav'>{links}<a href='/export/attendance.csv'>Export Attendance</a><a href='/logout'>Logout</a></nav><div style='position:absolute;bottom:22px;left:18px;right:18px;padding:12px;border-radius:12px;background:rgba(255,255,255,.08)'><b>{user_name}</b><div class='side-sub' style='margin:3px 0 0'>{role_label}</div></div></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div><div class='sub'>Face AI • GPS • WhatsApp • HR Control</div></div><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></header><div class='page'>{body}</div></main></div>"
     script = """<script>(function(){const root=document.documentElement;const saved=localStorage.getItem('buraq-theme');if(saved)root.dataset.theme=saved;document.getElementById('themeToggle')?.addEventListener('click',()=>{const next=root.dataset.theme==='dark'?'light':'dark';root.dataset.theme=next;localStorage.setItem('buraq-theme',next);});})();</script>"""
     return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{escape(title)}</title>{CSS}</head><body>{body}{script}</body></html>")
 
@@ -56,9 +61,32 @@ def verify_password(password: str, stored: str):
     except Exception:
         return False
 
-def logged_in(request: Request): return bool(request.session.get("admin"))
+ROLE_PERMISSIONS = {
+    "super_admin": {"*"},
+    "hr_manager": {"employees","approvals","reports","hr_accounts","audit"},
+    "hr_executive": {"employees","approvals","reports"},
+    "hr_officer": {"employees","reports"},
+    "viewer": {"reports"},
+}
+
+def logged_in(request: Request): return bool(request.session.get("admin") or request.session.get("hr_id"))
 def require_login(request: Request):
     if not logged_in(request): raise HTTPException(401, "Login required")
+
+def require_permission(request: Request, permission: str):
+    require_login(request)
+    role = request.session.get("role", "super_admin")
+    allowed = ROLE_PERMISSIONS.get(role, set())
+    if "*" not in allowed and permission not in allowed:
+        raise HTTPException(403, "Permission denied")
+
+def audit(request: Request, action: str, target_type: str = "", target_id: str = "", details: str = ""):
+    actor_type = "admin" if request.session.get("admin") else "hr"
+    actor_id = str(request.session.get("hr_id", "admin"))
+    actor_name = str(request.session.get("user_name", "Admin"))
+    ip = request.client.host if request.client else ""
+    with get_db() as c:
+        c.execute("INSERT INTO audit_logs(actor_type,actor_id,actor_name,action,target_type,target_id,details,ip_address) VALUES(?,?,?,?,?,?,?,?)", (actor_type,actor_id,actor_name,action,target_type,target_id,details,ip))
 
 def base_url(request: Request): return str(request.base_url).rstrip("/")
 
@@ -75,7 +103,7 @@ def health():
     # dashboard explains any optional database/configuration warning.
     return {
         "ok": True,
-        "version": "7.0.0",
+        "version": "8.0.0",
         "database": database_kind(),
         "database_connected": database_ok(),
         "whatsapp_configured": configured(),
@@ -110,18 +138,29 @@ def save_setup(request: Request, password: str = Form(...), confirm_password: st
         raise HTTPException(400, "Passwords do not match or are too short")
     set_setting("admin_password_hash", hash_password(password))
     request.session["admin"] = True
+    request.session["role"] = "super_admin"
+    request.session["user_name"] = "Admin"
     return RedirectResponse("/dashboard", 303)
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
     msg = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Password ভুল হয়েছে।</div>" if error else ""
-    return layout("Admin Login", f"<div class='wrap login'><div class='card'><div class='brand'>BURAQ Admin</div><p class='sub'>Professional Attendance Dashboard</p>{msg}<form method='post'><input type='password' name='password' placeholder='Admin password' required><button class='btn' type='submit'>Login</button></form></div></div>")
+    return layout("Admin Login", f"<div class='wrap login'><div class='card'><div class='brand'>BURAQ Admin</div><p class='sub'>Professional Attendance Dashboard</p>{msg}<form method='post'><label>Email (Admin হলে খালি রাখুন)</label><input type='email' name='email' placeholder='hr@buraq.com'><label>Password</label><input type='password' name='password' placeholder='Password' required><button class='btn' type='submit'>Login</button></form></div></div>")
 
 @app.post("/login")
-def login(request: Request, password: str = Form(...)):
-    if verify_password(password, get_setting("admin_password_hash")):
-        request.session["admin"] = True
+def login(request: Request, password: str = Form(...), email: str = Form("")):
+    if not email.strip() and verify_password(password, get_setting("admin_password_hash")):
+        request.session.clear(); request.session["admin"] = True; request.session["role"] = "super_admin"; request.session["user_name"] = "Admin"
+        audit(request, "login", "account", "admin", "Super Admin login")
         return RedirectResponse("/dashboard", 303)
+    if email.strip():
+        with get_db() as c:
+            row = c.execute("SELECT * FROM hr_accounts WHERE LOWER(email)=LOWER(?) AND is_active=?", (email.strip(), True)).fetchone()
+            if row and verify_password(password, row["password_hash"]):
+                request.session.clear(); request.session["hr_id"] = row["id"]; request.session["role"] = row["role"]; request.session["user_name"] = row["name"]
+                c.execute("UPDATE hr_accounts SET last_login_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+                audit(request, "login", "hr_account", str(row["id"]), "HR login")
+                return RedirectResponse("/dashboard", 303)
     return RedirectResponse("/login?error=1", 303)
 
 @app.get("/logout")
@@ -158,7 +197,7 @@ def mask_secret(value: str, visible: int = 4) -> str:
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, saved: str = "", error: str = ""):
-    require_login(request)
+    require_permission(request, "hr_accounts")
     access=get_setting("whatsapp_access_token"); phone=get_setting("whatsapp_phone_number_id"); verify=get_setting("whatsapp_verify_token")
     notice = "<div class='notice'>Settings সফলভাবে save হয়েছে।</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Action ব্যর্থ হয়েছে। তথ্য পরীক্ষা করুন।</div>" if error else "")
     webhook=f"{base_url(request)}/webhook/whatsapp"
@@ -209,7 +248,7 @@ async def restore_settings(request: Request):
 
 @app.get("/employees", response_class=HTMLResponse)
 def employees_page(request: Request):
-    require_login(request)
+    require_permission(request, "employees")
     with get_db() as c: rows=c.execute("SELECT e.*,(SELECT COUNT(*) FROM face_samples f WHERE f.employee_id=e.id) face_count FROM employees e ORDER BY staff_id").fetchall()
     trs=''.join(f"<tr><td><b>{escape(r['staff_id'])}</b></td><td>{escape(r['name'])}</td><td>{escape(r['phone'] or '')}</td><td>{escape(r['department'] or '')}</td><td>{escape(r['shift'])}</td><td><span class='status {'ok' if r['registration_status']=='approved' else 'warn'}'>{escape(r['registration_status'])}</span></td><td><span class='status {'ok' if r['face_count']>=3 else 'bad'}'>{r['face_count']}/3</span></td><td><form method='post' action='/employees/{r['id']}/reset-face'><button class='btn danger'>Reset Face</button></form></td></tr>" for r in rows) or "<tr><td colspan='8'>কোনো employee নেই</td></tr>"
     body=f"<div class='wrap'><div class='top'><div><div class='brand'>Employees</div><div class='sub'>Add and manage staff</div></div><a class='btn secondary' href='/dashboard'>Dashboard</a></div><div class='two'><div class='card'><h2>Add Employee</h2><form method='post'><label>Staff ID</label><input name='staff_id' required><label>Name</label><input name='name' required><label>Phone</label><input name='phone' placeholder='8801XXXXXXXXX'><label>Department</label><input name='department'><label>Shift</label><select name='shift'><option value='morning'>Morning 8AM–4PM</option><option value='evening'>Evening 4PM–10PM</option></select><button class='btn'>Add Employee</button></form></div><div class='card'><h2>Employee List</h2><div style='overflow:auto'><table><thead><tr><th>ID</th><th>Name</th><th>Phone</th><th>Dept.</th><th>Shift</th><th>Status</th><th>Face AI</th><th>Action</th></tr></thead><tbody>{trs}</tbody></table></div></div></div></div>"
@@ -239,7 +278,7 @@ def reset_employee_face(request: Request, employee_id: int):
 
 @app.get("/pending", response_class=HTMLResponse)
 def pending_page(request: Request):
-    require_login(request)
+    require_permission(request, "approvals")
     with get_db() as c: rows=c.execute("SELECT p.id,p.whatsapp_phone,p.created_at,e.staff_id,e.name FROM pending_registrations p JOIN employees e ON e.id=p.employee_id WHERE p.status='pending' ORDER BY p.id DESC").fetchall()
     trs=''.join(f"<tr><td>{escape(r['staff_id'])}</td><td>{escape(r['name'])}</td><td>{escape(r['whatsapp_phone'])}</td><td><form method='post' action='/pending/{r['id']}/approve'><button class='btn'>Approve</button></form></td><td><form method='post' action='/pending/{r['id']}/reject'><button class='btn danger'>Reject</button></form></td></tr>" for r in rows) or "<tr><td colspan='5'>কোনো pending registration নেই</td></tr>"
     return layout("Approvals", f"<div class='card'><table><thead><tr><th>Staff ID</th><th>Name</th><th>WhatsApp</th><th></th><th></th></tr></thead><tbody>{trs}</tbody></table></div>", request, "pending")
@@ -273,6 +312,58 @@ def export_attendance(request: Request):
     for r in rows: writer.writerow(list(r.values()))
     data=output.getvalue().encode("utf-8-sig")
     return StreamingResponse(io.BytesIO(data),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=BURAQ-Attendance.csv"})
+
+
+@app.get("/hr-accounts", response_class=HTMLResponse)
+def hr_accounts_page(request: Request, saved: str = "", error: str = ""):
+    require_permission(request, "hr_accounts")
+    with get_db() as c:
+        rows = c.execute("SELECT * FROM hr_accounts ORDER BY is_active DESC, name").fetchall()
+    notice = "<div class='notice'>HR account saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Action failed. Email may already exist or password is too short.</div>" if error else "")
+    trs = ''.join(f"<tr><td><b>{escape(r['name'])}</b><div class='sub'>{escape(r['email'])}</div></td><td>{escape(r['role'].replace('_',' ').title())}</td><td><span class='status {'ok' if r['is_active'] else 'bad'}'>{'Active' if r['is_active'] else 'Disabled'}</span></td><td>{escape(str(r['last_login_at'] or 'Never'))}</td><td><div class='actions'><form method='post' action='/hr-accounts/{r['id']}/toggle'><button class='btn secondary'>{'Disable' if r['is_active'] else 'Enable'}</button></form><form method='post' action='/hr-accounts/{r['id']}/delete' onsubmit=\"return confirm('Delete this HR account?')\"><button class='btn danger'>Delete</button></form></div></td></tr>" for r in rows) or "<tr><td colspan='5'>No HR accounts yet.</td></tr>"
+    body=f"{notice}<div class='two'><div class='card'><h2>Add HR Account</h2><form method='post'><label>Full Name</label><input name='name' required><label>Email</label><input type='email' name='email' required><label>Role</label><select name='role'><option value='hr_manager'>HR Manager</option><option value='hr_executive'>HR Executive</option><option value='hr_officer'>HR Officer</option><option value='viewer'>Viewer</option></select><label>Temporary Password</label><input type='password' name='password' minlength='8' required><button class='btn'>Create HR Account</button></form><p class='sub'>HR users can sign in from the normal login page using email and password.</p></div><div class='card'><h2>Role Access</h2><div class='health-list'><div class='health-row'><span>HR Manager</span><span>Employees, approvals, reports, HR accounts, audit</span></div><div class='health-row'><span>HR Executive</span><span>Employees, approvals, reports</span></div><div class='health-row'><span>HR Officer</span><span>Employees and reports</span></div><div class='health-row'><span>Viewer</span><span>Reports only</span></div></div></div></div><div class='section-gap'></div><div class='card'><h2>HR Accounts</h2><div style='overflow:auto'><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last Login</th><th>Action</th></tr></thead><tbody>{trs}</tbody></table></div></div>"
+    return layout("HR Accounts", body, request, "hr")
+
+@app.post("/hr-accounts")
+def add_hr_account(request: Request, name: str = Form(...), email: str = Form(...), role: str = Form(...), password: str = Form(...)):
+    require_permission(request, "hr_accounts")
+    if role not in ROLE_PERMISSIONS or role == "super_admin" or len(password) < 8:
+        return RedirectResponse("/hr-accounts?error=1",303)
+    try:
+        with get_db() as c:
+            c.execute("INSERT INTO hr_accounts(name,email,password_hash,role) VALUES(?,?,?,?)", (name.strip(), email.strip().lower(), hash_password(password), role))
+        audit(request,"create","hr_account",email.strip().lower(),f"Role: {role}")
+    except Exception as exc:
+        logger.warning("HR account create failed: %s", exc)
+        return RedirectResponse("/hr-accounts?error=1",303)
+    return RedirectResponse("/hr-accounts?saved=1",303)
+
+@app.post("/hr-accounts/{account_id}/toggle")
+def toggle_hr_account(request: Request, account_id: int):
+    require_permission(request, "hr_accounts")
+    with get_db() as c:
+        row=c.execute("SELECT is_active,email FROM hr_accounts WHERE id=?",(account_id,)).fetchone()
+        if row:
+            c.execute("UPDATE hr_accounts SET is_active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (not bool(row['is_active']), account_id))
+            audit(request,"toggle","hr_account",str(account_id),row['email'])
+    return RedirectResponse("/hr-accounts",303)
+
+@app.post("/hr-accounts/{account_id}/delete")
+def delete_hr_account(request: Request, account_id: int):
+    require_permission(request, "hr_accounts")
+    with get_db() as c:
+        row=c.execute("SELECT email FROM hr_accounts WHERE id=?",(account_id,)).fetchone()
+        c.execute("DELETE FROM hr_accounts WHERE id=?",(account_id,))
+    audit(request,"delete","hr_account",str(account_id),row['email'] if row else '')
+    return RedirectResponse("/hr-accounts",303)
+
+@app.get("/audit-logs", response_class=HTMLResponse)
+def audit_logs_page(request: Request):
+    require_permission(request, "audit")
+    with get_db() as c:
+        rows=c.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 300").fetchall()
+    trs=''.join(f"<tr><td>{escape(str(r['created_at']))}</td><td><b>{escape(r['actor_name'] or r['actor_type'])}</b><div class='sub'>{escape(r['actor_type'])}</div></td><td>{escape(r['action'])}</td><td>{escape((r['target_type'] or '')+' '+(r['target_id'] or ''))}</td><td>{escape(r['details'] or '')}</td><td>{escape(r['ip_address'] or '')}</td></tr>" for r in rows) or "<tr><td colspan='6'>No activity yet.</td></tr>"
+    return layout("Activity Logs",f"<div class='card'><h2>Security & Activity Audit</h2><div style='overflow:auto'><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th><th>IP</th></tr></thead><tbody>{trs}</tbody></table></div></div>",request,"audit")
 
 @app.get("/webhook/whatsapp", response_class=PlainTextResponse)
 def verify(hub_mode: str | None = Query(None, alias="hub.mode"), hub_verify_token: str | None = Query(None, alias="hub.verify_token"), hub_challenge: str | None = Query(None, alias="hub.challenge")):
