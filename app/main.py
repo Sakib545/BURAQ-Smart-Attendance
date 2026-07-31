@@ -22,7 +22,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="8.1.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="8.1.1", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 CSS = """
@@ -40,7 +40,7 @@ def layout(title: str, body: str, request: Request | None = None, active: str = 
     if request is not None and logged_in(request):
         role = request.session.get("role", "super_admin")
         nav = [("dashboard","Dashboard","/dashboard"),("employees","Employees","/employees"),("pending","Approvals","/pending"),("hr","HR Accounts","/hr-accounts"),("audit","Activity Logs","/audit-logs"),("settings","Settings","/settings")]
-        if role not in ("super_admin", "admin", "hr_manager"):
+        if role not in ("super_admin", "hr_manager"):
             nav = [item for item in nav if item[0] not in ("hr","audit","settings")]
         links = "".join(f"<a class='{"active" if active==k else ""}' href='{u}'>{label}</a>" for k,label,u in nav)
         user_name = escape(str(request.session.get("user_name", "Admin")))
@@ -63,7 +63,6 @@ def verify_password(password: str, stored: str):
 
 ROLE_PERMISSIONS = {
     "super_admin": {"*"},
-    "admin": {"employees","approvals","reports","hr_accounts","audit","settings"},
     "hr_manager": {"employees","approvals","reports","hr_accounts","audit"},
     "hr_executive": {"employees","approvals","reports"},
     "hr_officer": {"employees","reports"},
@@ -81,13 +80,27 @@ def require_permission(request: Request, permission: str):
     if "*" not in allowed and permission not in allowed:
         raise HTTPException(403, "Permission denied")
 
-def audit(request: Request, action: str, target_type: str = "", target_id: str = "", details: str = ""):
+def audit(request: Request, action: str, target_type: str = "", target_id: str = "", details: str = "", db=None):
+    """Write an audit event without allowing audit logging to break the main action.
+
+    When the caller already has an open write transaction, pass that connection as
+    ``db``. Opening a second SQLite write transaction used to wait for 30 seconds
+    and then raise ``database is locked`` during HR login.
+    """
     actor_type = "admin" if request.session.get("admin") else "hr"
     actor_id = str(request.session.get("hr_id", "admin"))
     actor_name = str(request.session.get("user_name", "Admin"))
     ip = request.client.host if request.client else ""
-    with get_db() as c:
-        c.execute("INSERT INTO audit_logs(actor_type,actor_id,actor_name,action,target_type,target_id,details,ip_address) VALUES(?,?,?,?,?,?,?,?)", (actor_type,actor_id,actor_name,action,target_type,target_id,details,ip))
+    params = (actor_type, actor_id, actor_name, action, target_type, target_id, details, ip)
+    sql = "INSERT INTO audit_logs(actor_type,actor_id,actor_name,action,target_type,target_id,details,ip_address) VALUES(?,?,?,?,?,?,?,?)"
+    try:
+        if db is not None:
+            db.execute(sql, params)
+        else:
+            with get_db() as c:
+                c.execute(sql, params)
+    except Exception:
+        logger.exception("Audit logging failed: action=%s target=%s:%s", action, target_type, target_id)
 
 def base_url(request: Request): return str(request.base_url).rstrip("/")
 
@@ -95,11 +108,11 @@ def base_url(request: Request): return str(request.base_url).rstrip("/")
 def startup():
     init_db()
     import_environment_defaults()
+    if not get_setting("admin_email"):
+        set_setting("admin_email", os.getenv("SUPER_ADMIN_EMAIL", "admin@buraq.com").strip().lower())
+    if not get_setting("admin_name"):
+        set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    if not get_setting("super_admin_email"):
-        set_setting("super_admin_email", os.getenv("SUPER_ADMIN_EMAIL", "admin@buraq.com").strip().lower())
-    if not get_setting("super_admin_name"):
-        set_setting("super_admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     logger.info("Employee master synced: %s", imported)
 
 @app.get("/health")
@@ -108,7 +121,7 @@ def health():
     # dashboard explains any optional database/configuration warning.
     return {
         "ok": True,
-        "version": "8.1.0",
+        "version": "8.1.1",
         "database": database_kind(),
         "database_connected": database_ok(),
         "whatsapp_configured": configured(),
@@ -131,44 +144,59 @@ def home(request: Request):
 def setup_page(request: Request):
     if get_setting("admin_password_hash"):
         return RedirectResponse("/dashboard" if logged_in(request) else "/login", 302)
-    cfg_note = "<div class='notice'>Railway Variables থেকে WhatsApp configuration পাওয়া গেছে। Super Admin account তৈরি করুন।</div>" if configured() else "<div class='notice' style='background:#fef3c7;color:#92400e'>WhatsApp credentials পরে Dashboard → Settings থেকে যোগ করতে পারবেন।</div>"
-    body=f"<div class='login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>প্রথমবারের নিরাপদ Super Admin setup</p>{cfg_note}<form method='post'><label>Full name</label><input name='name' value='Super Admin' required><label>Email</label><input type='email' name='email' value='admin@buraq.com' required><label>নতুন password</label><input type='password' name='password' minlength='8' required><label>Confirm password</label><input type='password' name='confirm_password' minlength='8' required><button class='btn' type='submit'>Create Super Admin & Open Dashboard</button></form><p class='sub'>পরবর্তীতে Super Admin, Admin ও HR সবাই একই login page ব্যবহার করবে।</p></div></div>"
+    cfg_note = "<div class='notice'>Railway Variables থেকে WhatsApp configuration পাওয়া গেছে। শুধু Admin password তৈরি করুন।</div>" if configured() else "<div class='notice' style='background:#fef3c7;color:#92400e'>WhatsApp credentials পরে Dashboard → Settings থেকে যোগ করতে পারবেন।</div>"
+    body=f"<div class='login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>প্রথমবারের নিরাপদ Admin setup</p>{cfg_note}<form method='post'><label>Super Admin email</label><input type='email' name='email' value='admin@buraq.com' required><label>নতুন Admin password</label><input type='password' name='password' minlength='6' required><label>Confirm password</label><input type='password' name='confirm_password' minlength='6' required><button class='btn' type='submit'>Create Admin & Open Dashboard</button></form><p class='sub'>WhatsApp Token, Phone Number ID এবং Verify Token এই page-এ আর চাইবে না।</p></div></div>"
     return layout("Initial Setup", body)
 
 @app.post("/setup")
-def save_setup(request: Request, name: str = Form(...), email: str = Form(...), password: str = Form(...), confirm_password: str = Form(...)):
+def save_setup(request: Request, email: str = Form(...), password: str = Form(...), confirm_password: str = Form(...)):
     if get_setting("admin_password_hash"):
         raise HTTPException(403)
-    if password != confirm_password or len(password) < 8 or "@" not in email:
-        raise HTTPException(400, "Email invalid, passwords do not match, or password is too short")
+    if password != confirm_password or len(password) < 6:
+        raise HTTPException(400, "Passwords do not match or are too short")
+    set_setting("admin_email", email.strip().lower())
+    set_setting("admin_name", "Super Admin")
     set_setting("admin_password_hash", hash_password(password))
-    set_setting("super_admin_email", email.strip().lower())
-    set_setting("super_admin_name", name.strip() or "Super Admin")
     request.session["admin"] = True
     request.session["role"] = "super_admin"
-    request.session["user_name"] = get_setting("super_admin_name", "Super Admin")
+    request.session["user_name"] = get_setting("admin_name", "Super Admin")
     return RedirectResponse("/dashboard", 303)
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
-    msg = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Email অথবা password সঠিক নয়, কিংবা account disabled।</div>" if error else ""
-    return layout("Secure Login", f"<div class='wrap login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>Super Admin, Admin এবং HR-এর জন্য একটি নিরাপদ login</p>{msg}<form method='post'><label>Email</label><input type='email' name='email' placeholder='name@buraq.com' autocomplete='username' required><label>Password</label><input type='password' name='password' placeholder='Password' autocomplete='current-password' required><button class='btn' type='submit'>Sign In</button></form></div></div>")
+    msg = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Email অথবা Password সঠিক নয়।</div>" if error else ""
+    body = f"""<div class='login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>Super Admin, Admin এবং HR-এর জন্য একটি নিরাপদ login</p>{msg}<form method='post'><label>Email</label><input type='email' name='email' placeholder='name@buraq.com' autocomplete='username' required><label>Password</label><input type='password' name='password' placeholder='Password' autocomplete='current-password' required><button class='btn' type='submit'>Sign In</button></form></div></div>"""
+    return layout("Unified Login", body)
 
 @app.post("/login")
 def login(request: Request, password: str = Form(...), email: str = Form(...)):
     normalized_email = email.strip().lower()
-    super_email = get_setting("super_admin_email", os.getenv("SUPER_ADMIN_EMAIL", "admin@buraq.com")).strip().lower()
-    if normalized_email == super_email and verify_password(password, get_setting("admin_password_hash")):
-        request.session.clear(); request.session["admin"] = True; request.session["role"] = "super_admin"; request.session["user_name"] = get_setting("super_admin_name", "Super Admin")
-        audit(request, "login", "account", "super_admin", "Super Admin login")
+    admin_email = get_setting("admin_email", "admin@buraq.com").strip().lower()
+    admin_hash = get_setting("admin_password_hash")
+
+    if normalized_email == admin_email and verify_password(password, admin_hash):
+        request.session.clear()
+        request.session["admin"] = True
+        request.session["role"] = "super_admin"
+        request.session["user_name"] = get_setting("admin_name", "Super Admin")
+        audit(request, "login", "user_account", "super_admin", "super_admin login")
         return RedirectResponse("/dashboard", 303)
+
     with get_db() as c:
-        row = c.execute("SELECT * FROM hr_accounts WHERE LOWER(email)=LOWER(?) AND is_active=?", (normalized_email, True)).fetchone()
+        row = c.execute(
+            "SELECT * FROM hr_accounts WHERE LOWER(email)=LOWER(?) AND is_active=?",
+            (normalized_email, True),
+        ).fetchone()
         if row and verify_password(password, row["password_hash"]):
-            request.session.clear(); request.session["hr_id"] = row["id"]; request.session["role"] = row["role"]; request.session["user_name"] = row["name"]
+            request.session.clear()
+            request.session["hr_id"] = row["id"]
+            request.session["role"] = row["role"]
+            request.session["user_name"] = row["name"]
             c.execute("UPDATE hr_accounts SET last_login_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
-            audit(request, "login", "user_account", str(row["id"]), f"{row['role']} login")
+            # Use the same transaction to avoid SQLite's nested-write lock.
+            audit(request, "login", "user_account", str(row["id"]), f"{row['role']} login", db=c)
             return RedirectResponse("/dashboard", 303)
+
     return RedirectResponse("/login?error=1", 303)
 
 @app.get("/logout")
@@ -209,10 +237,7 @@ def settings_page(request: Request, saved: str = "", error: str = ""):
     access=get_setting("whatsapp_access_token"); phone=get_setting("whatsapp_phone_number_id"); verify=get_setting("whatsapp_verify_token")
     notice = "<div class='notice'>Settings সফলভাবে save হয়েছে।</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Action ব্যর্থ হয়েছে। তথ্য পরীক্ষা করুন।</div>" if error else "")
     webhook=f"{base_url(request)}/webhook/whatsapp"
-    super_email=escape(get_setting('super_admin_email','admin@buraq.com'))
-    super_name=escape(get_setting('super_admin_name','Super Admin'))
-    account_card = f"<div class='card'><h2>Super Admin Account</h2><form method='post' action='/settings/super-admin'><label>Full name</label><input name='name' value='{super_name}' required><label>Email</label><input type='email' name='email' value='{super_email}' required><button class='btn'>Update identity</button></form></div>" if request.session.get('role') == 'super_admin' else ""
-    body=f"{notice}<div class='two'><div class='card'><h2>WhatsApp Connection</h2><p><span class='status {'ok' if configured() else 'warn'}'>{'Connected' if configured() else 'Setup needed'}</span></p><div class='sub'>Access Token</div><div class='masked'>{escape(mask_secret(access))}</div><br><div class='sub'>Phone Number ID</div><div class='masked'>{escape(mask_secret(phone))}</div><br><div class='sub'>Verify Token</div><div class='masked'>{escape(mask_secret(verify))}</div><br><details><summary class='btn secondary'>Edit credentials</summary><form method='post' style='margin-top:15px'><label>New Access Token</label><input type='password' name='access_token' placeholder='খালি রাখলে আগেরটি থাকবে'><label>New Phone Number ID</label><input name='phone_id' placeholder='খালি রাখলে আগেরটি থাকবে'><label>New Verify Token</label><input type='password' name='verify_token' placeholder='খালি রাখলে আগেরটি থাকবে'><button class='btn'>Save securely</button></form></details></div><div class='card'><h2>Connection & Webhook</h2><div class='sub'>Callback URL</div><div class='code'>{escape(webhook)}</div><br><div class='actions'><form method='post' action='/test-message'><input type='hidden' name='phone' value=''><input type='hidden' name='message' value='BURAQ test'><a class='btn secondary' href='/dashboard'>Open Test Panel</a></form><a class='btn secondary' href='/settings/backup'>Export Config Backup</a></div><p class='sub'>Credentials database-এ encrypted অবস্থায় রাখা হয়। Railway Variables থাকলে প্রথম startup-এ automatic import হবে।</p></div></div><div class='section-gap'></div><div class='two'>{account_card}<div class='card'><h2>Change Super Admin Password</h2><form method='post' action='/settings/password'><label>Current password</label><input type='password' name='current_password' required><label>New password</label><input type='password' name='new_password' minlength='6' required><button class='btn'>Update Password</button></form></div><div class='card'><h2>Restore Config Backup</h2><form method='post' action='/settings/restore' enctype='multipart/form-data'><label>Backup JSON file</label><input type='file' name='backup_file' accept='.json,application/json' required><button class='btn secondary'>Restore Backup</button></form><p class='sub'>Restore করলে বর্তমান WhatsApp credentials প্রতিস্থাপিত হবে।</p></div></div>"
+    body=f"{notice}<div class='two'><div class='card'><h2>WhatsApp Connection</h2><p><span class='status {'ok' if configured() else 'warn'}'>{'Connected' if configured() else 'Setup needed'}</span></p><div class='sub'>Access Token</div><div class='masked'>{escape(mask_secret(access))}</div><br><div class='sub'>Phone Number ID</div><div class='masked'>{escape(mask_secret(phone))}</div><br><div class='sub'>Verify Token</div><div class='masked'>{escape(mask_secret(verify))}</div><br><details><summary class='btn secondary'>Edit credentials</summary><form method='post' style='margin-top:15px'><label>New Access Token</label><input type='password' name='access_token' placeholder='খালি রাখলে আগেরটি থাকবে'><label>New Phone Number ID</label><input name='phone_id' placeholder='খালি রাখলে আগেরটি থাকবে'><label>New Verify Token</label><input type='password' name='verify_token' placeholder='খালি রাখলে আগেরটি থাকবে'><button class='btn'>Save securely</button></form></details></div><div class='card'><h2>Connection & Webhook</h2><div class='sub'>Callback URL</div><div class='code'>{escape(webhook)}</div><br><div class='actions'><form method='post' action='/test-message'><input type='hidden' name='phone' value=''><input type='hidden' name='message' value='BURAQ test'><a class='btn secondary' href='/dashboard'>Open Test Panel</a></form><a class='btn secondary' href='/settings/backup'>Export Config Backup</a></div><p class='sub'>Credentials database-এ encrypted অবস্থায় রাখা হয়। Railway Variables থাকলে প্রথম startup-এ automatic import হবে।</p></div></div><div class='section-gap'></div><div class='two'><div class='card'><h2>Change Admin Password</h2><form method='post' action='/settings/password'><label>Current password</label><input type='password' name='current_password' required><label>New password</label><input type='password' name='new_password' minlength='6' required><button class='btn'>Update Password</button></form></div><div class='card'><h2>Restore Config Backup</h2><form method='post' action='/settings/restore' enctype='multipart/form-data'><label>Backup JSON file</label><input type='file' name='backup_file' accept='.json,application/json' required><button class='btn secondary'>Restore Backup</button></form><p class='sub'>Restore করলে বর্তমান WhatsApp credentials প্রতিস্থাপিত হবে।</p></div></div>"
     return layout("Settings", body, request, "settings")
 
 @app.post("/settings")
@@ -223,26 +248,9 @@ def save_settings(request: Request, access_token: str = Form(""), phone_id: str 
     if verify_token.strip(): set_setting("whatsapp_verify_token", verify_token.strip())
     return RedirectResponse("/settings?saved=1", 303)
 
-
-@app.post("/settings/super-admin")
-def update_super_admin(request: Request, name: str = Form(...), email: str = Form(...)):
-    require_permission(request, "*")
-    normalized = email.strip().lower()
-    if "@" not in normalized:
-        return RedirectResponse("/settings?error=email", 303)
-    with get_db() as c:
-        duplicate = c.execute("SELECT id FROM hr_accounts WHERE LOWER(email)=LOWER(?)", (normalized,)).fetchone()
-    if duplicate:
-        return RedirectResponse("/settings?error=email_exists", 303)
-    set_setting("super_admin_name", name.strip() or "Super Admin")
-    set_setting("super_admin_email", normalized)
-    request.session["user_name"] = get_setting("super_admin_name", "Super Admin")
-    audit(request, "update", "account", "super_admin", "Super Admin identity updated")
-    return RedirectResponse("/settings?saved=account", 303)
-
 @app.post("/settings/password")
 def change_password(request: Request, current_password: str = Form(...), new_password: str = Form(...)):
-    require_permission(request, "*")
+    require_login(request)
     if not verify_password(current_password, get_setting("admin_password_hash")) or len(new_password) < 6:
         return RedirectResponse("/settings?error=password", 303)
     set_setting("admin_password_hash", hash_password(new_password))
@@ -349,7 +357,7 @@ def hr_accounts_page(request: Request, saved: str = "", error: str = ""):
         rows = c.execute("SELECT * FROM hr_accounts ORDER BY is_active DESC, name").fetchall()
     notice = "<div class='notice'>HR account saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Action failed. Email may already exist or password is too short.</div>" if error else "")
     trs = ''.join(f"<tr><td><b>{escape(r['name'])}</b><div class='sub'>{escape(r['email'])}</div></td><td>{escape(r['role'].replace('_',' ').title())}</td><td><span class='status {'ok' if r['is_active'] else 'bad'}'>{'Active' if r['is_active'] else 'Disabled'}</span></td><td>{escape(str(r['last_login_at'] or 'Never'))}</td><td><div class='actions'><form method='post' action='/hr-accounts/{r['id']}/toggle'><button class='btn secondary'>{'Disable' if r['is_active'] else 'Enable'}</button></form><form method='post' action='/hr-accounts/{r['id']}/delete' onsubmit=\"return confirm('Delete this HR account?')\"><button class='btn danger'>Delete</button></form></div></td></tr>" for r in rows) or "<tr><td colspan='5'>No HR accounts yet.</td></tr>"
-    body=f"{notice}<div class='two'><div class='card'><h2>Add HR Account</h2><form method='post'><label>Full Name</label><input name='name' required><label>Email</label><input type='email' name='email' required><label>Role</label><select name='role'><option value='admin'>Admin</option><option value='hr_manager'>HR Manager</option><option value='hr_executive'>HR Executive</option><option value='hr_officer'>HR Officer</option><option value='viewer'>Viewer</option></select><label>Temporary Password</label><input type='password' name='password' minlength='8' required><button class='btn'>Create HR Account</button></form><p class='sub'>HR users can sign in from the normal login page using email and password.</p></div><div class='card'><h2>Role Access</h2><div class='health-list'><div class='health-row'><span>Admin</span><span>Employees, approvals, reports, accounts, audit, settings</span></div><div class='health-row'><span>HR Manager</span><span>Employees, approvals, reports, HR accounts, audit</span></div><div class='health-row'><span>HR Executive</span><span>Employees, approvals, reports</span></div><div class='health-row'><span>HR Officer</span><span>Employees and reports</span></div><div class='health-row'><span>Viewer</span><span>Reports only</span></div></div></div></div><div class='section-gap'></div><div class='card'><h2>HR Accounts</h2><div style='overflow:auto'><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last Login</th><th>Action</th></tr></thead><tbody>{trs}</tbody></table></div></div>"
+    body=f"{notice}<div class='two'><div class='card'><h2>Add HR Account</h2><form method='post'><label>Full Name</label><input name='name' required><label>Email</label><input type='email' name='email' required><label>Role</label><select name='role'><option value='hr_manager'>HR Manager</option><option value='hr_executive'>HR Executive</option><option value='hr_officer'>HR Officer</option><option value='viewer'>Viewer</option></select><label>Temporary Password</label><input type='password' name='password' minlength='8' required><button class='btn'>Create HR Account</button></form><p class='sub'>HR users can sign in from the normal login page using email and password.</p></div><div class='card'><h2>Role Access</h2><div class='health-list'><div class='health-row'><span>HR Manager</span><span>Employees, approvals, reports, HR accounts, audit</span></div><div class='health-row'><span>HR Executive</span><span>Employees, approvals, reports</span></div><div class='health-row'><span>HR Officer</span><span>Employees and reports</span></div><div class='health-row'><span>Viewer</span><span>Reports only</span></div></div></div></div><div class='section-gap'></div><div class='card'><h2>HR Accounts</h2><div style='overflow:auto'><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last Login</th><th>Action</th></tr></thead><tbody>{trs}</tbody></table></div></div>"
     return layout("HR Accounts", body, request, "hr")
 
 @app.post("/hr-accounts")
