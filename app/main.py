@@ -24,7 +24,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.4.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.5.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -69,6 +69,7 @@ def layout(title: str, body: str, request: Request | None = None, active: str = 
             ("employees","Employees","/employees","employees_view"),
             ("performance","Performance","/performance","performance_view"),
             ("pending","Approvals","/pending","approvals_view"),
+            ("duplicates","Duplicate Analysis","/duplicates","approvals_view"),
             ("reports","Reports","/reports","reports_view"),
             ("operations","HR Operations","/hr-operations","leave_view"),
             ("hr","User Accounts","/hr-accounts","user_accounts_view"),
@@ -869,6 +870,39 @@ def save_department(request: Request, name: str=Form(...)):
     require_permission(request,"department_manage")
     with get_db() as c: c.execute("INSERT INTO departments(name) VALUES(?) ON CONFLICT(name) DO NOTHING",(name.strip(),))
     audit(request,"save","department",name,""); return RedirectResponse("/hr-operations?saved=1",303)
+
+@app.get("/duplicates")
+def duplicate_analysis(request: Request, decision: str="", review: str=""):
+    require_permission(request, "approvals_view")
+    clauses, params = ["1=1"], []
+    if decision in {"accept", "pending", "reject"}: clauses.append("f.decision=?"); params.append(decision)
+    if review in {"none", "pending", "approved", "rejected"}: clauses.append("f.review_status=?"); params.append(review)
+    with get_db() as c:
+        rows = c.execute("SELECT f.*,e.staff_id,e.name FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id WHERE "+" AND ".join(clauses)+" ORDER BY f.id DESC LIMIT 300", tuple(params)).fetchall()
+    items=[]
+    can_manage=has_permission(request,"approvals_manage")
+    for r in rows:
+        state="bad" if r["decision"]=="reject" else "warn" if r["decision"]=="pending" else "ok"
+        controls=""
+        if can_manage and r["review_status"]=="pending":
+            controls=f"<form method='post' action='/duplicates/{r['id']}/approve' style='display:inline'><button class='btn'>Approve</button></form> <form method='post' action='/duplicates/{r['id']}/reject' style='display:inline'><button class='btn danger'>Reject</button></form>"
+        items.append(f"<tr><td>#{r['id']}</td><td><b>{escape(r['name'])}</b><br><span class='sub'>{escape(r['staff_id'])}</span></td><td>{escape(r['action'])}</td><td><span class='status {state}'>{escape(r['decision'])}</span><br><span class='sub'>{escape(r['review_status'])}</span></td><td><b>{r['duplicate_score']*100:.1f}%</b></td><td>Hash {r['hash_score']*100:.0f}%<br>Face {r['face_score']*100:.0f}%<br>Pose {r['pose_score']*100:.0f}%<br>Landmark {r['landmark_score']*100:.0f}%</td><td>{'#'+str(r['matched_fingerprint_id']) if r['matched_fingerprint_id'] else '—'}</td><td>{escape(str(r['created_at']))}</td><td>{controls}</td></tr>")
+    thresholds=f"Accept &lt; {settings.duplicate_accept_below:.2f} • Pending {settings.duplicate_accept_below:.2f}–{settings.duplicate_reject_at:.2f} • Reject ≥ {settings.duplicate_reject_at:.2f}"
+    body=f"""<div class='hero'><div><div class='eyebrow'>v9.5 Security</div><h2>Duplicate Selfie Analysis</h2><div class='sub'>{thresholds}</div></div><span class='pill'>{len(rows)} records</span></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><select name='decision' style='max-width:180px'><option value=''>All decisions</option><option value='accept'>Accept</option><option value='pending'>Pending</option><option value='reject'>Reject</option></select><select name='review' style='max-width:180px'><option value=''>All reviews</option><option value='pending'>Needs review</option><option value='approved'>Approved</option><option value='rejected'>Rejected</option></select><button class='btn'>Filter</button></form></div><div class='card' style='overflow:auto'><table><thead><tr><th>ID</th><th>Employee</th><th>Action</th><th>Decision</th><th>Score</th><th>Signals</th><th>Matched</th><th>Time</th><th>Review</th></tr></thead><tbody>{''.join(items) or '<tr><td colspan=9>No duplicate analysis found</td></tr>'}</tbody></table></div>"""
+    return layout("Duplicate Analysis", body, request, "duplicates")
+
+@app.post("/duplicates/{fingerprint_id}/{action}")
+def review_duplicate(request: Request, fingerprint_id: int, action: str):
+    require_permission(request,"approvals_manage")
+    if action not in {"approve","reject"}: raise HTTPException(400,"Invalid action")
+    status="approved" if action=="approve" else "rejected"
+    actor=str(request.session.get("hr_id") or "super_admin")
+    with get_db() as c:
+        row=c.execute("SELECT id FROM attendance_fingerprints WHERE id=? AND review_status='pending'",(fingerprint_id,)).fetchone()
+        if not row: raise HTTPException(404,"Pending fingerprint not found")
+        c.execute("UPDATE attendance_fingerprints SET review_status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(status,actor,fingerprint_id))
+    audit(request,action,"attendance_fingerprint",str(fingerprint_id),status)
+    return RedirectResponse("/duplicates?review=pending",303)
 
 @app.get("/webhook/whatsapp", response_class=PlainTextResponse)
 def verify(hub_mode: str | None = Query(None, alias="hub.mode"), hub_verify_token: str | None = Query(None, alias="hub.verify_token"), hub_challenge: str | None = Query(None, alias="hub.challenge")):

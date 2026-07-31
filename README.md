@@ -131,3 +131,12 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - A real second person is still rejected when the second face is confidently detected and materially sized.
 - Duplicate registration selfies are rejected; employees must provide genuinely different live angles.
 - The same face cannot be registered under another employee profile without HR/Admin intervention.
+
+## v9.5 Duplicate Selfie Intelligence
+
+- `attendance_fingerprints` stores pHash, aHash, dHash, face embedding, pose and normalized landmark signatures.
+- Weighted duplicate engine returns Accept, Pending or Reject without replacing GPS, liveness or face verification.
+- Admin/HR Duplicate Analysis page shows component scores, the matched fingerprint and review controls.
+- Existing SQLite and PostgreSQL databases upgrade automatically; `python scripts/migrate_v9_5.py` is also available.
+- Thresholds are configurable with `DUPLICATE_ACCEPT_BELOW` (0.70), `DUPLICATE_REJECT_AT` (0.90), and the four `DUPLICATE_*_WEIGHT` variables.
+- Pending analysis does not create attendance automatically; approval records the security review and the employee then retries with a fresh live selfie.

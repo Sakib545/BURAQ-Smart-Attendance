@@ -7,7 +7,7 @@ import random
 import time as time_module
 
 from app.face_ai import FaceAIError, extract_embedding, best_match
-
+from app.duplicate_detector import DuplicateThresholds, detect_duplicate, make_fingerprint
 from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
 from app.database import get_db
 
@@ -268,6 +268,22 @@ def receive_image(phone, media_id, image_bytes=None):
     if score < threshold:
         return f"🚫 Face Verification Failed\n\nনিবন্ধিত মুখের সঙ্গে মিল পাওয়া যায়নি।\nMatch score: {score*100:.1f}%\n\nশুধু নিজের বর্তমান selfie পাঠান।"
     action = "check_in" if parts[0] == "checkin_selfie" else "check_out"
+    fingerprint = make_fingerprint(image_bytes, candidate, diagnostics)
+    limits = DuplicateThresholds(settings.duplicate_accept_below, settings.duplicate_reject_at,
+        settings.duplicate_hash_weight, settings.duplicate_face_weight,
+        settings.duplicate_pose_weight, settings.duplicate_landmark_weight)
+    with get_db() as c:
+        prior = c.execute("SELECT * FROM attendance_fingerprints ORDER BY id DESC LIMIT 1000").fetchall()
+    duplicate = detect_duplicate(fingerprint, prior, limits)
+    review_status = "pending" if duplicate.decision == "pending" else "none"
+    with get_db() as c:
+        c.execute("""INSERT INTO attendance_fingerprints(employee_id,action,media_id,phash,ahash,dhash,embedding,pose,yaw,landmarks,duplicate_score,hash_score,face_score,pose_score,landmark_score,matched_fingerprint_id,decision,review_status)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (employee["id"], action, media_id, fingerprint["phash"], fingerprint["ahash"], fingerprint["dhash"], json.dumps(fingerprint["embedding"]), fingerprint["pose"], fingerprint["yaw"], json.dumps(fingerprint["landmarks"]), duplicate.score, duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score, duplicate.matched_fingerprint_id, duplicate.decision, review_status))
+    if duplicate.decision == "reject":
+        return f"🚫 Duplicate Selfie Rejected\nDuplicate score: {duplicate.score*100:.1f}%\nনতুন live selfie তুলে আবার পাঠান।"
+    if duplicate.decision == "pending":
+        clear_state(phone)
+        return f"⏳ Selfie Admin Review-এ পাঠানো হয়েছে।\nDuplicate score: {duplicate.score*100:.1f}%\nAdmin সিদ্ধান্ত দেওয়ার পর আবার চেষ্টা করুন।"
     lat, lon = float(parts[1]), float(parts[2]); dist = float(parts[3]) if len(parts) > 3 and parts[3] else None
     result = check_in(employee) if action == "check_in" else check_out(employee)
     with get_db() as c:

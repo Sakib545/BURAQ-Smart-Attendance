@@ -34,6 +34,12 @@ class Settings:
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     allow_temp_db_fallback: bool = os.getenv("ALLOW_TEMP_DB_FALLBACK", "false").strip().lower() in {"1","true","yes","on"}
     require_secure_secrets: bool = os.getenv("REQUIRE_SECURE_SECRETS", "true").strip().lower() in {"1","true","yes","on"}
+    duplicate_accept_below: float = float(os.getenv("DUPLICATE_ACCEPT_BELOW", "0.70"))
+    duplicate_reject_at: float = float(os.getenv("DUPLICATE_REJECT_AT", "0.90"))
+    duplicate_hash_weight: float = float(os.getenv("DUPLICATE_HASH_WEIGHT", "0.45"))
+    duplicate_face_weight: float = float(os.getenv("DUPLICATE_FACE_WEIGHT", "0.25"))
+    duplicate_pose_weight: float = float(os.getenv("DUPLICATE_POSE_WEIGHT", "0.15"))
+    duplicate_landmark_weight: float = float(os.getenv("DUPLICATE_LANDMARK_WEIGHT", "0.15"))
 
     @property
     def is_postgres(self) -> bool:

@@ -278,6 +278,7 @@ def extract_embedding(image_bytes: bytes, required_pose: str | None = None):
         "face_ratio": round(ratio * 100.0, 1),
         "pose": pose,
         "yaw_score": round(yaw_score, 3),
+        "landmark_signature": [round((float(face[i]) - x) / max(bw, 1.0), 4) if i % 2 == 0 else round((float(face[i]) - y) / max(bh, 1.0), 4) for i in range(4, 14)],
     }
     return feature.tolist(), quality, diagnostics
 

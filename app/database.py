@@ -285,10 +285,33 @@ def apply_feature_migrations() -> None:
         """CREATE TABLE IF NOT EXISTS departments(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS departments(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL UNIQUE,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
         """CREATE TABLE IF NOT EXISTS employee_notes(id INTEGER PRIMARY KEY AUTOINCREMENT,employee_id INTEGER NOT NULL,note_type TEXT NOT NULL DEFAULT 'general',note TEXT NOT NULL,created_by TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE)""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS employee_notes(id BIGSERIAL PRIMARY KEY,employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,note_type TEXT NOT NULL DEFAULT 'general',note TEXT NOT NULL,created_by TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
         """CREATE TABLE IF NOT EXISTS performance_reviews(id INTEGER PRIMARY KEY AUTOINCREMENT,employee_id INTEGER NOT NULL,review_period TEXT NOT NULL,attendance_rating INTEGER NOT NULL,discipline_rating INTEGER NOT NULL,work_quality_rating INTEGER NOT NULL,teamwork_rating INTEGER NOT NULL,communication_rating INTEGER NOT NULL,responsibility_rating INTEGER NOT NULL,overall_rating REAL NOT NULL,comments TEXT,goals TEXT,reviewed_by TEXT,reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE)""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS performance_reviews(id BIGSERIAL PRIMARY KEY,employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,review_period TEXT NOT NULL,attendance_rating INTEGER NOT NULL,discipline_rating INTEGER NOT NULL,work_quality_rating INTEGER NOT NULL,teamwork_rating INTEGER NOT NULL,communication_rating INTEGER NOT NULL,responsibility_rating INTEGER NOT NULL,overall_rating DOUBLE PRECISION NOT NULL,comments TEXT,goals TEXT,reviewed_by TEXT,reviewed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
+        """CREATE TABLE IF NOT EXISTS attendance_fingerprints(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, action TEXT NOT NULL,
+            media_id TEXT, phash TEXT NOT NULL, ahash TEXT NOT NULL, dhash TEXT NOT NULL,
+            embedding TEXT NOT NULL, pose TEXT, yaw REAL NOT NULL DEFAULT 0, landmarks TEXT,
+            duplicate_score REAL NOT NULL DEFAULT 0, hash_score REAL NOT NULL DEFAULT 0,
+            face_score REAL NOT NULL DEFAULT 0, pose_score REAL NOT NULL DEFAULT 0,
+            landmark_score REAL NOT NULL DEFAULT 0, matched_fingerprint_id INTEGER,
+            decision TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'none', reviewed_by TEXT,
+            reviewed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(employee_id) REFERENCES employees(id), FOREIGN KEY(matched_fingerprint_id) REFERENCES attendance_fingerprints(id)
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS attendance_fingerprints(
+            id BIGSERIAL PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id), action TEXT NOT NULL,
+            media_id TEXT, phash TEXT NOT NULL, ahash TEXT NOT NULL, dhash TEXT NOT NULL,
+            embedding TEXT NOT NULL, pose TEXT, yaw DOUBLE PRECISION NOT NULL DEFAULT 0, landmarks TEXT,
+            duplicate_score DOUBLE PRECISION NOT NULL DEFAULT 0, hash_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+            face_score DOUBLE PRECISION NOT NULL DEFAULT 0, pose_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+            landmark_score DOUBLE PRECISION NOT NULL DEFAULT 0, matched_fingerprint_id BIGINT REFERENCES attendance_fingerprints(id),
+            decision TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'none', reviewed_by TEXT,
+            reviewed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_attendance_fingerprints_employee_created ON attendance_fingerprints(employee_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_attendance_fingerprints_review ON attendance_fingerprints(decision, review_status)",
     ]
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
+    mark_migration("v9.5-attendance-fingerprints")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.
