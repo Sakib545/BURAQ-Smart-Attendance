@@ -24,7 +24,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.6.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.6.1", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -552,7 +552,7 @@ def add_performance_review(request: Request, employee_id: int, review_period: st
 def performance_page(request: Request):
     require_permission(request,"performance_view")
     with get_db() as c:
-        rows=c.execute("SELECT e.id,e.staff_id,e.name,e.department,e.designation,p.overall_rating,p.review_period,p.reviewed_at FROM employees e LEFT JOIN performance_reviews p ON p.id=(SELECT p2.id FROM performance_reviews p2 WHERE p2.employee_id=e.id ORDER BY p2.reviewed_at DESC,p2.id DESC LIMIT 1) WHERE e.is_active=1 ORDER BY e.name").fetchall()
+        rows=c.execute("SELECT e.id,e.staff_id,e.name,e.department,e.designation,p.overall_rating,p.review_period,p.reviewed_at FROM employees e LEFT JOIN performance_reviews p ON p.id=(SELECT p2.id FROM performance_reviews p2 WHERE p2.employee_id=e.id ORDER BY p2.reviewed_at DESC,p2.id DESC LIMIT 1) WHERE e.is_active ORDER BY e.name").fetchall()
     trs=''.join(f"<tr><td><b>{escape(r['name'])}</b><div class='sub'>{escape(r['staff_id'])}</div></td><td>{escape(r['department'] or '—')}</td><td>{escape(r['designation'] or '—')}</td><td>{(float(r['overall_rating']) if r['overall_rating'] is not None else 0):.1f}/5"+f"<div class='sub'>{escape(r['review_period'] or '')}</div>"+f"</td><td><a class='btn secondary' href='/employees/{r['id']}#performance'>{'Review' if r['overall_rating'] is None else 'Open'}</a></td></tr>" for r in rows) or "<tr><td colspan='5'>No employees</td></tr>"
     body=f"""<div class='hero'><div><div class='eyebrow'>People Development</div><h2>Performance Reviews</h2><div class='sub'>Simple, consistent employee reviews without unnecessary complexity.</div></div><span class='pill'>{len(rows)} employees</span></div><div class='card'><table><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Latest rating</th><th></th></tr>{trs}</table></div>"""
     return layout('Performance',body,request,'performance')
@@ -761,7 +761,7 @@ def payroll_page(request: Request, month: str="", saved: str="", error: str=""):
     month=month or current
     if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
     rows=_payroll_rows(month); can_manage=has_permission(request,"payroll_manage"); can_export=has_permission(request,"payroll_export")
-    with get_db() as c: employees=c.execute("SELECT id,staff_id,name FROM employees WHERE is_active=1 ORDER BY staff_id").fetchall()
+    with get_db() as c: employees=c.execute("SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id").fetchall()
     employee_options=''.join(f"<option value='{e['id']}'>{escape(e['staff_id'])} - {escape(e['name'])}</option>" for e in employees)
     notices="<div class='notice'>Payroll saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Payroll could not be saved.</div>" if error else "")
     form=""

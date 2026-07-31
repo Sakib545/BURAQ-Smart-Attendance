@@ -148,3 +148,4 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Monthly paid/unpaid tracking, individual PDF payslips, monthly PDF report and styled Excel export.
 - `payroll_view`, `payroll_manage` and `payroll_export` permissions protect every page and download.
 - Employees receive no salary command, menu item or payroll access; their attendance experience is unchanged.
+- v9.6.1 fixes active-employee filtering on Railway PostgreSQL for Payroll and Performance pages.
