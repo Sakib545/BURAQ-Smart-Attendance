@@ -36,3 +36,13 @@ The face/liveness system remains the implementation from the preceding build. Be
 - Super Admin default email: `admin@buraq.com` (override once with `SUPER_ADMIN_EMAIL`).
 - Fixed the 30-second HR login failure caused by nested SQLite write transactions while saving the audit log.
 - HR login, session creation, dashboard redirect and audit logging tested end-to-end.
+
+
+## v8.1.2 Super Admin Access Control
+
+- Webhook URL and WhatsApp credentials are visible only to the Super Admin.
+- Settings, config backup/restore and WhatsApp test messages are Super Admin only.
+- User Accounts is hidden from HR/Admin navigation and direct URL access returns 403.
+- Only the Super Admin can create, disable or delete Admin/HR accounts.
+- Super Admin may create an Admin, HR Manager, HR Executive, HR Officer or Viewer.
+- HR users retain attendance/employee permissions according to their role but cannot manage accounts.
