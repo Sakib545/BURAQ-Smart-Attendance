@@ -1,17 +1,13 @@
 import logging
 import httpx
 from app.runtime import get_setting
-from app.services import log, process
+from app.services import log, process, employee_by_phone, receive_location, receive_image
 
 logger = logging.getLogger(__name__)
 
 
 def _credentials():
-    return (
-        get_setting("whatsapp_access_token"),
-        get_setting("whatsapp_phone_number_id"),
-        get_setting("meta_api_version", "v23.0"),
-    )
+    return (get_setting("whatsapp_access_token"), get_setting("whatsapp_phone_number_id"), get_setting("meta_api_version", "v23.0"))
 
 
 async def _send(to: str, payload: dict):
@@ -40,6 +36,17 @@ async def send_text(to: str, text: str):
     return await _send(to, {"type": "text", "text": {"preview_url": False, "body": text}})
 
 
+async def send_location_request(to: str, body_text: str = "📍 Attendance-এর জন্য আপনার বর্তমান Location পাঠান।"):
+    return await _send(to, {
+        "type": "interactive",
+        "interactive": {
+            "type": "location_request_message",
+            "body": {"text": body_text},
+            "action": {"name": "send_location"},
+        },
+    })
+
+
 async def send_menu(to: str, name: str | None = None):
     greeting = f"স্বাগতম {name}" if name else "BURAQ Smart Attendance"
     return await _send(to, {
@@ -53,13 +60,27 @@ async def send_menu(to: str, name: str | None = None):
                 "button": "Menu খুলুন",
                 "sections": [{"title": "Attendance Menu", "rows": [
                     {"id": "register", "title": "Register", "description": "Staff ID দিয়ে নিবন্ধন"},
-                    {"id": "check_in", "title": "Check In", "description": "আজকের উপস্থিতি শুরু"},
-                    {"id": "check_out", "title": "Check Out", "description": "আজকের উপস্থিতি শেষ"},
+                    {"id": "check_in", "title": "Check In", "description": "Location ও selfie দিয়ে উপস্থিতি"},
+                    {"id": "check_out", "title": "Check Out", "description": "Location ও selfie দিয়ে ছুটি"},
                     {"id": "my_attendance", "title": "My Attendance", "description": "সাম্প্রতিক ৭ দিনের রিপোর্ট"},
                 ]}]
             }
         }
     })
+
+
+async def send_guided_response(phone: str, response: str):
+    if response == "__REQUEST_LOCATION__":
+        return await send_location_request(phone)
+    result = await send_text(phone, response)
+    if response.startswith("✅ Face Registration সম্পন্ন") or response.startswith("✅ Check In সফল") or response.startswith("✅ Check Out সফল"):
+        employee = employee_by_phone(phone)
+        await send_menu(phone, employee["name"] if employee else None)
+    return result
+
+
+async def send_approval_flow(phone: str, name: str, staff_id: str):
+    await send_text(phone, f"✅ আপনার BURAQ Attendance registration Admin approve করেছেন।\n\nনাম: {name}\nStaff ID: {staff_id}\n\n📸 পরবর্তী ধাপ: সামনে তাকিয়ে একটি পরিষ্কার selfie পাঠান।")
 
 
 async def handle(payload: dict):
@@ -80,23 +101,21 @@ async def handle(payload: dict):
                 elif typ == "interactive":
                     interactive = message.get("interactive", {})
                     text = (interactive.get("list_reply") or interactive.get("button_reply") or {}).get("id", "")
-                elif typ == "location":
-                    text = "location"
-                elif typ == "image":
-                    text = "image"
 
                 normalized = " ".join(text.strip().lower().split())
                 if normalized in {"hi", "hello", "menu", "start"}:
-                    from app.services import employee_by_phone
                     employee = employee_by_phone(phone)
                     await send_menu(phone, employee["name"] if employee else None)
                 elif typ in {"text", "interactive"}:
-                    await send_text(phone, process(phone, text))
+                    await send_guided_response(phone, process(phone, text))
                 elif typ == "location":
-                    await send_text(phone, "📍 Location পেয়েছি।")
+                    loc = message.get("location", {})
+                    response = receive_location(phone, loc.get("latitude"), loc.get("longitude"))
+                    await send_guided_response(phone, response)
                 elif typ == "image":
-                    await send_text(phone, "📸 ছবি পেয়েছি।")
+                    media_id = message.get("image", {}).get("id", "")
+                    await send_guided_response(phone, receive_image(phone, media_id))
                 else:
-                    await send_text(phone, "এই message type এখনো supported নয়। Hi লিখে Menu খুলুন।")
+                    await send_text(phone, "এই message type এখনো supported নয়। Menu খুলতে লিখুন: Menu")
                 processed += 1
     return processed

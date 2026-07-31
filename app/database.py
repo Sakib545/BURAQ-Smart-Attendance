@@ -123,6 +123,7 @@ def _fallback_to_sqlite(reason: Exception) -> None:
     engine = _make_engine(fallback_url)
     _active_url = fallback_url
     _create_schema()
+    apply_feature_migrations()
 
 
 def init_db(max_attempts: int = 5) -> None:
@@ -134,6 +135,7 @@ def init_db(max_attempts: int = 5) -> None:
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
             _startup_error = ""
+            apply_feature_migrations()
             logger.info("Database ready (%s)", database_kind())
             return
         except Exception as exc:
@@ -167,3 +169,48 @@ def database_warning() -> str:
     if _startup_error:
         return "PostgreSQL পাওয়া যায়নি; app temporary storage-এ চলছে। Railway PostgreSQL যুক্ত করলে data স্থায়ী হবে।"
     return ""
+
+
+def apply_feature_migrations() -> None:
+    """Add v5.2 guided-flow tables without deleting existing Railway data."""
+    statements = [
+        """CREATE TABLE IF NOT EXISTS face_profiles(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL UNIQUE,
+            reference_media_id TEXT NOT NULL,
+            registered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(employee_id) REFERENCES employees(id)
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS face_profiles(
+            id BIGSERIAL PRIMARY KEY,
+            employee_id BIGINT NOT NULL UNIQUE REFERENCES employees(id),
+            reference_media_id TEXT NOT NULL,
+            registered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS attendance_evidence(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            distance_meters REAL,
+            image_media_id TEXT,
+            verified INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(employee_id) REFERENCES employees(id)
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS attendance_evidence(
+            id BIGSERIAL PRIMARY KEY,
+            employee_id BIGINT NOT NULL REFERENCES employees(id),
+            action TEXT NOT NULL,
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            distance_meters DOUBLE PRECISION,
+            image_media_id TEXT,
+            verified BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+    ]
+    with engine.begin() as conn:
+        for statement in statements:
+            conn.execute(text(statement))

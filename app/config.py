@@ -52,3 +52,8 @@ class Settings:
 
 settings = Settings()
 Path("exports").mkdir(exist_ok=True)
+
+# Guided attendance location settings. Set these in Railway Variables for strict office-radius checks.
+OFFICE_LATITUDE = os.getenv("OFFICE_LATITUDE", "").strip()
+OFFICE_LONGITUDE = os.getenv("OFFICE_LONGITUDE", "").strip()
+OFFICE_RADIUS_METERS = float(os.getenv("OFFICE_RADIUS_METERS", "150"))

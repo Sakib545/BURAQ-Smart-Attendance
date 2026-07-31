@@ -9,19 +9,19 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from html import escape
 
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import FastAPI, BackgroundTasks, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
 from app.database import database_kind, database_ok, database_warning, get_db, init_db
-from app.employee_seed import seed_employees
 from app.runtime import configured, get_setting, set_setting
-from app.whatsapp import handle, send_text
+from app.employee_seed import import_employees
+from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="5.1.2", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="5.2.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 CSS = """
@@ -57,7 +57,8 @@ def base_url(request: Request): return str(request.base_url).rstrip("/")
 @app.on_event("startup")
 def startup():
     init_db()
-    seed_employees()
+    imported = import_employees()
+    logger.info("Employee master synced: %s", imported)
 
 @app.get("/health")
 def health():
@@ -65,7 +66,7 @@ def health():
     # dashboard explains any optional database/configuration warning.
     return {
         "ok": True,
-        "version": "5.1.2",
+        "version": "5.2.0",
         "database": database_kind(),
         "database_connected": database_ok(),
         "whatsapp_configured": configured(),
@@ -177,43 +178,19 @@ def pending_page(request: Request):
     return layout("Approvals", f"<div class='wrap'><div class='top'><div><div class='brand'>Registration Approvals</div><div class='sub'>One-click approval</div></div><a class='btn secondary' href='/dashboard'>Dashboard</a></div><div class='card'><table><thead><tr><th>Staff ID</th><th>Name</th><th>WhatsApp</th><th></th><th></th></tr></thead><tbody>{trs}</tbody></table></div></div>")
 
 @app.post("/pending/{pending_id}/approve")
-async def approve_pending(request: Request, pending_id: int):
+def approve_pending(request: Request, pending_id: int, background_tasks: BackgroundTasks):
     require_login(request)
-    phone = None
-    employee_name = "Employee"
-    staff_id = ""
+    notify = None
     with get_db() as c:
-        row = c.execute(
-            "SELECT p.*,e.name,e.staff_id FROM pending_registrations p "
-            "JOIN employees e ON e.id=p.employee_id "
-            "WHERE p.id=? AND p.status='pending'",
-            (pending_id,),
-        ).fetchone()
+        row=c.execute("SELECT p.*,e.name,e.staff_id FROM pending_registrations p JOIN employees e ON e.id=p.employee_id WHERE p.id=? AND p.status='pending'", (pending_id,)).fetchone()
         if row:
-            phone = row["whatsapp_phone"]
-            employee_name = row["name"]
-            staff_id = row["staff_id"]
-            c.execute(
-                "UPDATE employees SET whatsapp_phone=?,registration_status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (phone, row["employee_id"]),
-            )
-            c.execute(
-                "UPDATE pending_registrations SET status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (pending_id,),
-            )
-
-    if phone:
-        message = (
-            f"✅ আপনার BURAQ Attendance registration Admin approve করেছেন।\n\n"
-            f"নাম: {employee_name}\n"
-            f"Staff ID: {staff_id}\n\n"
-            "এখন Hi লিখে Attendance Menu খুলুন।"
-        )
-        result = await send_text(phone, message)
-        if not result.get("sent"):
-            logger.error("Approval saved but WhatsApp notification failed for %s: %s", phone, result)
-
-    return RedirectResponse("/pending", 303)
+            c.execute("UPDATE employees SET whatsapp_phone=?,registration_status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?", (row['whatsapp_phone'],row['employee_id']))
+            c.execute("UPDATE pending_registrations SET status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?", (pending_id,))
+            c.execute("INSERT INTO conversation_states(phone,state) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET state=excluded.state,updated_at=CURRENT_TIMESTAMP", (row['whatsapp_phone'],'awaiting_face_registration'))
+            notify = (row['whatsapp_phone'], row['name'], row['staff_id'])
+    if notify:
+        background_tasks.add_task(send_approval_flow, *notify)
+    return RedirectResponse("/pending",303)
 
 @app.post("/pending/{pending_id}/reject")
 def reject_pending(request: Request, pending_id: int):
