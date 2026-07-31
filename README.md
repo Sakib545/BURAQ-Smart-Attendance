@@ -29,3 +29,11 @@ After login, open **HR Accounts** to create the first HR user. HR passwords must
 
 ## Important production note
 The face/liveness system remains the implementation from the preceding build. Before a public launch, validate it with real employee photos, low-light tests, replay/photo-screen attacks, PostgreSQL persistence, WhatsApp webhook retries and Railway memory limits.
+
+## v8.1 Unified Login
+
+- Super Admin, Admin, HR Manager, HR Executive, HR Officer and Viewer use the same `/login` page.
+- Every account must sign in with both email and password; blank-email admin login has been removed.
+- Existing deployments keep the current Super Admin password. The default Super Admin email is `admin@buraq.com` unless `SUPER_ADMIN_EMAIL` is set in Railway.
+- Super Admin can update name/email from Dashboard → Settings.
+- A new `Admin` role is available from HR Accounts.
