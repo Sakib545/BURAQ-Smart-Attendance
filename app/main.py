@@ -22,12 +22,14 @@ from app.config import settings
 from app.database import database_kind, database_ok, database_warning, get_db, init_db
 from app.runtime import configured, get_setting, set_setting, import_environment_defaults, get_stored_setting, restore_stored_setting
 from app.employee_seed import import_employees
-from app.whatsapp import handle, send_approval_flow, send_text
+from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_text
 from app.reminders import reminder_worker
+from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
+from app.backups import payroll_backup_worker
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.11.2", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.12.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -224,23 +226,25 @@ def startup():
     if not get_setting("admin_name"):
         set_setting("admin_name", os.getenv("SUPER_ADMIN_NAME", "Super Admin").strip())
     imported = import_employees()
-    logger.info("BURAQ v9.9 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.12 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
     app.state.reminder_task=asyncio.create_task(reminder_worker())
+    app.state.payroll_backup_task=asyncio.create_task(payroll_backup_worker())
 
 @app.on_event("shutdown")
 async def stop_reminders():
-    task=getattr(app.state,"reminder_task",None)
-    if task:
-        task.cancel()
-        try: await task
-        except asyncio.CancelledError: pass
+    for name in ("reminder_task","payroll_backup_task"):
+        task=getattr(app.state,name,None)
+        if task:
+            task.cancel()
+            try: await task
+            except asyncio.CancelledError: pass
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.11.2"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.12.0"}
 
 
 @app.get("/ready")
@@ -252,7 +256,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.11.2",
+        "version": "9.12.0",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -464,6 +468,15 @@ async def restore_settings(request: Request):
         return RedirectResponse("/settings?error=restore",303)
     return RedirectResponse("/settings?saved=restore",303)
 
+@app.get("/settings/payroll-backup")
+def payroll_backup(request: Request):
+    require_super_admin(request)
+    with get_db() as c:
+        payload={"version":2,"type":"buraq_payroll_backup","created_at":datetime.now(ZoneInfo(settings.timezone)).isoformat(),"employee_salary_master":[dict(r) for r in c.execute("SELECT id,staff_id,name,fixed_salary,default_overtime_rate FROM employees ORDER BY id").fetchall()],"payroll_records":[dict(r) for r in c.execute("SELECT * FROM payroll_records ORDER BY salary_month,id").fetchall()],"payroll_change_logs":[dict(r) for r in c.execute("SELECT * FROM payroll_change_logs ORDER BY id").fetchall()]}
+    data=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode("utf-8")
+    stamp=datetime.now(ZoneInfo(settings.timezone)).strftime("%Y%m%d-%H%M%S")
+    return StreamingResponse(io.BytesIO(data),media_type="application/json",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payroll-Backup-{stamp}.json"})
+
 @app.get("/employees", response_class=HTMLResponse)
 def employees_page(request: Request, q: str = "", department: str = "", shift: str = "", status: str = ""):
     require_permission(request, "employees_view")
@@ -571,16 +584,15 @@ def employee_profile(request: Request, employee_id: int, month: str = ""):
     if can_payroll_view:
         payroll_tab="<a class='tab' href='#payroll'>Payroll</a>"
         current_payroll=next((p for p in payroll if p['salary_month']==month),None)
-        fixed=float(current_payroll['fixed_salary']) if current_payroll else 0; hours=float(current_payroll['overtime_hours']) if current_payroll else 0; rate=float(current_payroll['overtime_rate']) if current_payroll else 0; bonus=float(current_payroll['bonus']) if current_payroll else 0; deduction=float(current_payroll['deduction']) if current_payroll else 0
+        fixed=float(current_payroll['fixed_salary']) if current_payroll else float(e['fixed_salary'] or 0); hours=float(current_payroll['overtime_hours']) if current_payroll else 0; rate=float(current_payroll['overtime_rate']) if current_payroll else float(e['default_overtime_rate'] or 0); bonus=float(current_payroll['bonus']) if current_payroll else 0; deduction=float(current_payroll['deduction']) if current_payroll else 0; advance=float(current_payroll['advance_amount']) if current_payroll else 0; fine=float(current_payroll['fine_amount']) if current_payroll else 0; adjustment_reason=str(current_payroll['adjustment_reason'] or '') if current_payroll else ''
         payroll_form=''
         if can_payroll_manage:
-            payroll_form=f"""<div class='card'><div class='card-head'><div><h3>{'Update' if current_payroll else 'Create'} Salary</h3><div class='sub'>HR/Admin input for {escape(month)}</div></div><span class='tag'>Private</span></div><form method='post' action='/payroll'><input type='hidden' name='employee_id' value='{employee_id}'><input type='hidden' name='profile_employee_id' value='{employee_id}'><div class='two'><div><label>Salary Month</label><input type='month' name='salary_month' value='{escape(month)}' required></div><div><label>Fixed Salary</label><input type='number' min='0' step='0.01' name='fixed_salary' value='{fixed:.2f}' required></div></div><div class='two'><div><label>Overtime Hours</label><input type='number' min='0' step='0.01' name='overtime_hours' value='{hours:.2f}'></div><div><label>Rate Per Hour</label><input type='number' min='0' step='0.01' name='overtime_rate' value='{rate:.2f}'></div></div><div class='two'><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='{bonus:.2f}'></div><div><label>Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='{deduction:.2f}'></div></div><label>Private Note</label><textarea name='note'>{escape(current_payroll['note'] or '') if current_payroll else ''}</textarea><button class='btn'>Calculate & Save Salary</button></form></div>"""
+            payroll_form=f"""<div class='card'><div class='card-head'><div><h3>{'Update' if current_payroll else 'Create'} Salary</h3><div class='sub'>Fixed salary stays active until HR changes it.</div></div><span class='tag'>Private</span></div><form method='post' action='/payroll'><input type='hidden' name='employee_id' value='{employee_id}'><input type='hidden' name='profile_employee_id' value='{employee_id}'><div class='two'><div><label>Salary Month</label><input type='month' name='salary_month' value='{escape(month)}' required></div><div><label>Fixed Salary Master</label><input type='number' min='0' step='0.01' name='fixed_salary' value='{fixed:.2f}' required></div></div><div class='two'><div><label>Overtime Mode</label><select name='overtime_mode'><option value='auto'>Automatic</option><option value='manual'>Manual</option></select><label>Manual OT Hours</label><input type='number' min='0' step='0.01' name='overtime_hours' value='{hours:.2f}'></div><div><label>Default OT Rate</label><input type='number' min='0' step='0.01' name='overtime_rate' value='{rate:.2f}'></div></div><div class='two'><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='{bonus:.2f}'><label>Advance</label><input type='number' min='0' step='0.01' name='advance' value='{advance:.2f}'></div><div><label>Fine</label><input type='number' min='0' step='0.01' name='fine' value='{fine:.2f}'><label>Other Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='{deduction:.2f}'></div></div><label>Adjustment Reason</label><input name='adjustment_reason' value='{escape(adjustment_reason)}'><label>Private Note</label><textarea name='note'>{escape(current_payroll['note'] or '') if current_payroll else ''}</textarea><button class='btn'>Calculate & Save Draft</button></form></div>"""
         history=[]
         for p in payroll:
             actions=f"<a class='btn secondary' href='/payroll/{p['id']}/payslip.pdf'>PDF</a>" if can_payroll_export else ''
-            if can_payroll_manage:
-                new_status='unpaid' if p['payment_status']=='paid' else 'paid'; actions+=f" <form method='post' action='/payroll/{p['id']}/status' style='display:inline'><input type='hidden' name='month' value='{escape(month)}'><input type='hidden' name='return_employee_id' value='{employee_id}'><input type='hidden' name='status' value='{new_status}'><button class='btn {'secondary' if new_status=='unpaid' else ''}'>{'Undo Paid' if new_status=='unpaid' else 'Mark Paid'}</button></form>"
-            history.append(f"<tr><td><b>{escape(p['salary_month'])}</b></td><td>{_money(p['fixed_salary'])}</td><td>{_money(p['overtime_amount'])}</td><td>{_money(p['bonus'])}</td><td>{_money(p['deduction'])}</td><td><b>{_money(p['net_salary'])}</b></td><td><span class='status {'ok' if p['payment_status']=='paid' else 'warn'}'>{escape(p['payment_status'])}</span></td><td>{actions}</td></tr>")
+            total_ded=float(p['total_deduction'] or 0) if 'total_deduction' in p.keys() else float(p['deduction'] or 0)
+            history.append(f"<tr><td><b>{escape(p['salary_month'])}</b></td><td>{_money(p['fixed_salary'])}</td><td>{_money(p['overtime_amount'])}</td><td>{_money(p['bonus'])}</td><td>{_money(total_ded)}</td><td><b>{_money(p['net_salary'])}</b></td><td><span class='status {'ok' if p['payment_status']=='paid' else 'warn'}'>{escape(p['payment_status'])}</span></td><td>{actions}</td></tr>")
         if current_payroll:
             net=float(current_payroll['net_salary']); summary=f"""<div class='card payroll-panel'><div class='card-head'><div><span class='confidential'>🔒 HR CONFIDENTIAL</span><h2 style='margin-top:12px'>{escape(month)} Payroll</h2></div><span class='status {'ok' if current_payroll['payment_status']=='paid' else 'warn'}'>{escape(current_payroll['payment_status'])}</span></div><div class='payroll-amount'>৳{_money(net)}</div><div class='sub'>Net salary</div><div class='salary-breakdown' style='margin-top:18px'><div><div class='sub'>Fixed</div><b>৳{_money(current_payroll['fixed_salary'])}</b></div><div><div class='sub'>Overtime</div><b>৳{_money(current_payroll['overtime_amount'])}</b></div><div><div class='sub'>Bonus</div><b>৳{_money(current_payroll['bonus'])}</b></div><div><div class='sub'>Deduction</div><b>৳{_money(current_payroll['deduction'])}</b></div></div></div>"""
         else: summary=f"<div class='card payroll-panel'><span class='confidential'>🔒 HR CONFIDENTIAL</span><h2 style='margin-top:14px'>No salary for {escape(month)}</h2><div class='sub'>Create this employee's monthly salary using the form.</div></div>"
@@ -875,39 +887,63 @@ def _payroll_duty_metrics(employee_id: int, month: str):
     with get_db() as c:
         weekly=c.execute("SELECT * FROM duty_schedules WHERE employee_id=? AND is_active",(employee_id,)).fetchall()
         custom=c.execute("SELECT * FROM custom_duties WHERE employee_id=? AND duty_date>=? AND duty_date<=? AND is_active",(employee_id,first.isoformat(),effective_last.isoformat())).fetchall() if effective_last>=first else []
-        attendance=c.execute("SELECT work_date FROM attendance WHERE employee_id=? AND work_date>=? AND work_date<=? AND check_in IS NOT NULL",(employee_id,first.isoformat(),effective_last.isoformat())).fetchall() if effective_last>=first else []
-        leaves=c.execute("SELECT start_date,end_date FROM leave_requests WHERE employee_id=? AND status='approved' AND start_date<=? AND end_date>=?",(employee_id,effective_last.isoformat(),first.isoformat())).fetchall() if effective_last>=first else []
+        attendance=c.execute("SELECT work_date,check_in,check_out,status,overtime_minutes FROM attendance WHERE employee_id=? AND work_date>=? AND work_date<=? AND check_in IS NOT NULL",(employee_id,first.isoformat(),effective_last.isoformat())).fetchall() if effective_last>=first else []
+        leaves=c.execute("SELECT leave_type,start_date,end_date FROM leave_requests WHERE employee_id=? AND status='approved' AND start_date<=? AND end_date>=?",(employee_id,effective_last.isoformat(),first.isoformat())).fetchall() if effective_last>=first else []
     weekly_days={int(r['weekday']) for r in weekly}; custom_dates={r['duty_date'] for r in custom}; scheduled=set(); day=first
     while day<=effective_last:
         if day.isoformat() in custom_dates or day.weekday() in weekly_days: scheduled.add(day.isoformat())
         day+=timedelta(days=1)
-    worked={r['work_date'] for r in attendance} & scheduled; leave_dates=set()
+    attendance_by_date={r['work_date']:r for r in attendance if r['work_date'] in scheduled}; worked_units=0.0; incomplete=[]
+    for work_date,row in attendance_by_date.items():
+        status=str(row['status'] or '').lower(); worked_units += 0.5 if status in {'half_day','half-day','half day'} else 1.0
+        if not row['check_out']: incomplete.append(work_date)
+    paid_leave_dates=set(); unpaid_leave_dates=set()
     for leave in leaves:
         day=max(datetime.fromisoformat(leave['start_date']).date(),first); end=min(datetime.fromisoformat(leave['end_date']).date(),effective_last)
         while day<=end:
-            if day.isoformat() in scheduled: leave_dates.add(day.isoformat())
+            if day.isoformat() in scheduled and day.isoformat() not in attendance_by_date:
+                leave_name=str(leave['leave_type'] or '').strip().lower()
+                target=unpaid_leave_dates if leave_name in {'unpaid','unpaid leave','lwp','leave without pay','without pay'} else paid_leave_dates
+                target.add(day.isoformat())
             day+=timedelta(days=1)
-    paid_leave=leave_dates-worked; absent=scheduled-worked-paid_leave
-    return {"scheduled":len(scheduled),"worked":len(worked),"paid_leave":len(paid_leave),"absent":len(absent)}
+    scheduled_units=float(len(scheduled)); paid_units=float(len(paid_leave_dates)); unpaid_units=float(len(unpaid_leave_dates)); absent_units=max(scheduled_units-worked_units-paid_units-unpaid_units,0)
+    overtime_minutes=sum(int(r['overtime_minutes'] or 0) for r in attendance)
+    return {"scheduled":scheduled_units,"worked":worked_units,"paid_leave":paid_units,"unpaid_leave":unpaid_units,"absent":absent_units,"auto_overtime_hours":round(overtime_minutes/60,2),"incomplete_dates":incomplete}
+
+def _calculate_employee_payroll(employee_id: int, month: str, fixed_salary: float, overtime_rate: float, overtime_mode: str="auto", manual_overtime_hours: float=0, bonus: float=0, advance: float=0, fine: float=0, deduction: float=0):
+    duty=_payroll_duty_metrics(employee_id,month); overtime_hours=duty['auto_overtime_hours'] if overtime_mode=='auto' else manual_overtime_hours
+    result=calculate_payroll(PayrollInput(fixed_salary=fixed_salary,scheduled_units=duty['scheduled'],worked_units=duty['worked'],paid_leave_units=duty['paid_leave'],unpaid_leave_units=duty['unpaid_leave'],overtime_hours=overtime_hours,overtime_rate=overtime_rate,bonus=bonus,advance=advance,fine=fine,other_deduction=deduction))
+    result['incomplete_dates']=duty['incomplete_dates']; result['overtime_mode']=overtime_mode
+    return result
 
 def _salary_sheet_rows(month: str):
     with get_db() as c:
         rows=c.execute("""SELECT e.id employee_id,e.staff_id,e.name,e.department,e.designation,
-            p.id payroll_id,p.fixed_salary,p.overtime_hours,p.overtime_rate,p.overtime_amount,p.bonus,p.deduction,p.payment_status,p.note
+            p.id payroll_id,COALESCE(p.fixed_salary,e.fixed_salary,0) fixed_salary,p.overtime_hours,
+            COALESCE(p.overtime_rate,e.default_overtime_rate,0) overtime_rate,p.overtime_amount,p.bonus,p.deduction,
+            p.advance_amount,p.fine_amount,p.overtime_mode,p.adjustment_reason,p.payment_method,p.payment_reference,p.payment_status,p.calculation_snapshot,p.note
             FROM employees e LEFT JOIN payroll_records p ON p.employee_id=e.id AND p.salary_month=?
             WHERE e.is_active ORDER BY e.staff_id""",(month,)).fetchall()
     output=[]
     for row in rows:
-        item=dict(row); item.update(_payroll_duty_metrics(row['employee_id'],month)); fixed=float(row['fixed_salary'] or 0); scheduled=item['scheduled']; absent=item['absent']
-        item['per_day_salary']=round(fixed/scheduled,2) if scheduled else 0
-        item['absent_deduction']=round(item['per_day_salary']*absent,2)
-        item['gross_salary']=round(fixed+float(row['overtime_amount'] or 0)+float(row['bonus'] or 0),2)
-        item['net_salary']=round(item['gross_salary']-item['absent_deduction']-float(row['deduction'] or 0),2)
+        item=dict(row); fixed=float(row['fixed_salary'] or 0); rate=float(row['overtime_rate'] or 0); mode=str(row.get('overtime_mode') or 'auto') if hasattr(row,'get') else 'auto'
+        if row['payroll_id'] and row['payment_status'] in {'finalized','paid'} and row['calculation_snapshot']:
+            try: calculated=json.loads(row['calculation_snapshot'])
+            except Exception: calculated=_calculate_employee_payroll(row['employee_id'],month,fixed,rate,mode,float(row['overtime_hours'] or 0),float(row['bonus'] or 0),float(row.get('advance_amount') or 0),float(row.get('fine_amount') or 0),float(row['deduction'] or 0))
+        else: calculated=_calculate_employee_payroll(row['employee_id'],month,fixed,rate,mode,float(row['overtime_hours'] or 0),float(row['bonus'] or 0),float(row.get('advance_amount') or 0),float(row.get('fine_amount') or 0),float(row['deduction'] or 0))
+        item.update(calculated)
         output.append(item)
     return output
 
 def _money(value):
     return f"{float(value or 0):,.2f}"
+
+def _payroll_actor(request: Request) -> str:
+    return str(request.session.get('user_name') or request.session.get('hr_id') or 'Super Admin')
+
+def _log_payroll_change(db, payroll_id: int, action: str, actor: str, reason: str=""):
+    row=db.execute("SELECT * FROM payroll_records WHERE id=?",(payroll_id,)).fetchone()
+    db.execute("INSERT INTO payroll_change_logs(payroll_id,action,actor,reason,snapshot) VALUES(?,?,?,?,?)",(payroll_id,action,actor,reason,json.dumps(dict(row),default=str) if row else '{}'))
 
 @app.get("/payroll", response_class=HTMLResponse)
 def payroll_page(request: Request, month: str="", saved: str="", error: str=""):
@@ -918,50 +954,119 @@ def payroll_page(request: Request, month: str="", saved: str="", error: str=""):
     rows=_payroll_rows(month); can_manage=has_permission(request,"payroll_manage"); can_export=has_permission(request,"payroll_export")
     with get_db() as c: employees=c.execute("SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id").fetchall()
     employee_options=''.join(f"<option value='{e['id']}'>{escape(e['staff_id'])} - {escape(e['name'])}</option>" for e in employees)
-    notices="<div class='notice'>Payroll saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Payroll could not be saved.</div>" if error else "")
+    notices="<div class='notice'>Payroll prepared/saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Adjustment reason is required.</div>" if error=='reason' else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Payroll could not be saved.</div>" if error else ""))
     form=""
     if can_manage:
-        form=f"""<div class='card'><h2>Add or Update Salary</h2><p class='sub'>Saving the same employee and month updates the existing record.</p><form method='post' action='/payroll'><input type='hidden' name='return_month' value='{month}'><label>Employee</label><select name='employee_id' required>{employee_options}</select><label>Salary Month</label><input type='month' name='salary_month' value='{month}' required><div class='two'><div><label>Fixed Salary</label><input type='number' min='0' step='0.01' name='fixed_salary' required></div><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='0'></div></div><div class='two'><div><label>Overtime Hours</label><input type='number' min='0' step='0.01' name='overtime_hours' value='0'></div><div><label>Overtime Rate / Hour</label><input type='number' min='0' step='0.01' name='overtime_rate' value='0'></div></div><label>Other / Manual Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='0'><label>Private HR Note</label><textarea name='note'></textarea><button class='btn'>Calculate & Save</button></form></div>"""
+        form=f"""<div class='card'><h2>Payroll Preview & Adjustment</h2><p class='sub'>Fixed salary remains the employee master value until HR changes it.</p><form method='post' action='/payroll'><input type='hidden' name='return_month' value='{month}'><label>Employee</label><select name='employee_id' required>{employee_options}</select><label>Salary Month</label><input type='month' name='salary_month' value='{month}' required><div class='two'><div><label>Fixed Salary Master</label><input type='number' min='0' step='0.01' name='fixed_salary' required></div><div><label>Default OT Rate / Hour</label><input type='number' min='0' step='0.01' name='overtime_rate' value='0'></div></div><label>Overtime Source</label><select name='overtime_mode'><option value='auto'>Automatic from attendance</option><option value='manual'>HR manual override</option></select><label>Manual OT Hours (manual mode only)</label><input type='number' min='0' step='0.01' name='overtime_hours' value='0'><div class='two'><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='0'></div><div><label>Salary Advance</label><input type='number' min='0' step='0.01' name='advance' value='0'></div></div><div class='two'><div><label>Fine</label><input type='number' min='0' step='0.01' name='fine' value='0'></div><div><label>Other Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='0'></div></div><label>Adjustment Reason (required for bonus/deduction)</label><input name='adjustment_reason'><label>Private HR Note</label><textarea name='note'></textarea><button class='btn'>Calculate & Save Draft</button></form></div>"""
     table=[]
     for r in rows:
         controls=""
-        if can_manage:
-            next_status="paid" if r['payment_status']!='paid' else "unpaid"
-            controls+=f"<form method='post' action='/payroll/{r['id']}/status' style='display:inline'><input type='hidden' name='month' value='{month}'><input type='hidden' name='status' value='{next_status}'><button class='btn {'secondary' if next_status=='unpaid' else ''}'>{'Mark Unpaid' if next_status=='unpaid' else 'Mark Paid'}</button></form> "
+        if can_manage and r['payment_status']=='draft': controls+=f"<form method='post' action='/payroll/{r['id']}/status' style='display:inline'><input type='hidden' name='month' value='{month}'><input type='hidden' name='status' value='finalized'><button class='btn'>Finalize & Lock</button></form> "
+        elif can_manage and r['payment_status']=='finalized': controls+=f"<form method='post' action='/payroll/{r['id']}/status' style='display:inline-flex;gap:5px'><input type='hidden' name='month' value='{month}'><input type='hidden' name='status' value='paid'><input name='payment_method' placeholder='Method' required style='width:90px'><input name='payment_reference' placeholder='Reference' required style='width:110px'><button class='btn'>Mark Paid</button></form> "
+        if request.session.get('role')=='super_admin' and r['payment_status']=='finalized': controls+=f"<form method='post' action='/payroll/{r['id']}/reopen' style='display:inline-flex;gap:5px'><input type='hidden' name='month' value='{month}'><input name='reason' placeholder='Reopen reason' required><button class='btn secondary'>Reopen</button></form> "
         if can_export: controls+=f"<a class='btn secondary' href='/payroll/{r['id']}/payslip.pdf'>Payslip</a>"
-        state='ok' if r['payment_status']=='paid' else 'warn'
-        table.append(f"<tr><td><b>{escape(r['staff_id'])}</b><br><span class='sub'>{escape(r['name'])}</span></td><td>{_money(r['fixed_salary'])}</td><td>{r['overtime_hours']:.2f} × {_money(r['overtime_rate'])}<br><b>{_money(r['overtime_amount'])}</b></td><td>{_money(r['bonus'])}</td><td>{_money(r['deduction'])}</td><td><b>{_money(r['net_salary'])}</b></td><td><span class='status {state}'>{escape(r['payment_status'])}</span></td><td>{controls}</td></tr>")
+        state='ok' if r['payment_status']=='paid' else ('warn' if r['payment_status']=='draft' else 'info')
+        total_ded=float(r['total_deduction'] or 0) if 'total_deduction' in r.keys() else float(r['deduction'] or 0)+float(r['absent_deduction'] or 0)
+        table.append(f"<tr><td><b>{escape(r['staff_id'])}</b><br><span class='sub'>{escape(r['name'])}</span></td><td>{_money(r['fixed_salary'])}</td><td>{r['overtime_hours']:.2f} × {_money(r['overtime_rate'])}<br><b>{_money(r['overtime_amount'])}</b></td><td>{_money(r['bonus'])}</td><td>{_money(total_ded)}</td><td><b>{_money(r['net_salary'])}</b></td><td><span class='status {state}'>{escape(r['payment_status'])}</span></td><td>{controls}</td></tr>")
     gross=sum(float(r['net_salary']) for r in rows); paid=sum(float(r['net_salary']) for r in rows if r['payment_status']=='paid')
-    export_buttons=f"<a class='btn secondary' href='/payroll/export.xlsx?month={month}'>Excel</a><a class='btn secondary' href='/payroll/export.pdf?month={month}'>PDF</a>" if can_export else ""
+    export_buttons=(f"<form method='post' action='/payroll/bulk-prepare' style='display:inline'><input type='hidden' name='month' value='{month}'><button class='btn'>Prepare All Employees</button></form>" if can_manage else "")+(f"<a class='btn secondary' href='/payroll/export.xlsx?month={month}'>Excel</a><a class='btn secondary' href='/payroll/export.pdf?month={month}'>PDF</a>" if can_export else "")+("<a class='btn secondary' href='/settings/payroll-backup'>Backup</a>" if request.session.get('role')=='super_admin' else "")
     body=f"""{notices}<div class='hero'><div><div class='eyebrow'>Private HR Module</div><h2>Salary & Payroll</h2><div class='sub'>Employees cannot access this page or its exports.</div></div><div class='actions'>{export_buttons}</div></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><div style='max-width:220px'><label>Salary Month</label><input type='month' name='month' value='{month}'></div><button class='btn'>Open Month</button></form></div><div class='grid'><div class='card'><div class='sub'>Employees</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Net Payroll</div><div class='metric'>৳{_money(gross)}</div></div><div class='card'><div class='sub'>Paid</div><div class='metric'>৳{_money(paid)}</div></div><div class='card'><div class='sub'>Unpaid</div><div class='metric'>৳{_money(gross-paid)}</div></div></div><div class='section-gap'></div><div class='two'>{form}<div class='card'><h2>Calculation</h2><div class='code'>Per Day = Fixed Salary ÷ Scheduled Duty Days\nAbsent = Scheduled - Worked - Paid Leave\nNet = Fixed + Overtime + Bonus - Absent Deduction - Other Deduction</div><p class='sub'>Approved leave is paid and does not reduce salary. Employees cannot view payroll.</p></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>{escape(month)} Salary Sheet</h2><table><thead><tr><th>Employee</th><th>Fixed</th><th>Overtime</th><th>Bonus</th><th>Other Deduction</th><th>Net</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(table) or '<tr><td colspan=8>No salary records for this month.</td></tr>'}</tbody></table></div>"""
     return layout("Private Payroll",body,request,"payroll")
 
 @app.post("/payroll")
-def save_payroll(request: Request, employee_id: int=Form(...), salary_month: str=Form(...), fixed_salary: float=Form(...), overtime_hours: float=Form(0), overtime_rate: float=Form(0), bonus: float=Form(0), deduction: float=Form(0), note: str=Form(""), return_month: str=Form(""), profile_employee_id: int=Form(0)):
+def save_payroll(request: Request, employee_id: int=Form(...), salary_month: str=Form(...), fixed_salary: float=Form(...), overtime_hours: float=Form(0), overtime_rate: float=Form(0), overtime_mode: str=Form("auto"), bonus: float=Form(0), advance: float=Form(0), fine: float=Form(0), deduction: float=Form(0), adjustment_reason: str=Form(""), note: str=Form(""), return_month: str=Form(""), profile_employee_id: int=Form(0)):
     require_permission(request,"payroll_manage")
-    values=(fixed_salary,overtime_hours,overtime_rate,bonus,deduction)
+    values=(fixed_salary,overtime_hours,overtime_rate,bonus,advance,fine,deduction); overtime_mode=overtime_mode if overtime_mode in {'auto','manual'} else 'auto'
     if not re.fullmatch(r"\d{4}-\d{2}",salary_month) or any(v<0 for v in values): return RedirectResponse(f"/payroll?month={return_month or salary_month}&error=1",303)
-    overtime=round(overtime_hours*overtime_rate,2); duty=_payroll_duty_metrics(employee_id,salary_month)
-    per_day=round(fixed_salary/duty['scheduled'],2) if duty['scheduled'] else 0
-    absent_deduction=round(per_day*duty['absent'],2); net=round(fixed_salary+overtime+bonus-absent_deduction-deduction,2)
-    actor=str(request.session.get('hr_id') or 'super_admin')
+    if adjustment_reason_required(bonus,advance,fine,deduction) and not adjustment_reason.strip(): return RedirectResponse(f"/payroll?month={salary_month}&error=reason",303)
+    actor=_payroll_actor(request); calc=_calculate_employee_payroll(employee_id,salary_month,fixed_salary,overtime_rate,overtime_mode,overtime_hours,bonus,advance,fine,deduction)
     with get_db() as c:
-        c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,note,created_by,updated_by,scheduled_duty_days,worked_duty_days,paid_leave_days,absent_days,absent_deduction)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(employee_id,salary_month) DO UPDATE SET fixed_salary=excluded.fixed_salary,overtime_hours=excluded.overtime_hours,overtime_rate=excluded.overtime_rate,overtime_amount=excluded.overtime_amount,bonus=excluded.bonus,deduction=excluded.deduction,net_salary=excluded.net_salary,note=excluded.note,updated_by=excluded.updated_by,scheduled_duty_days=excluded.scheduled_duty_days,worked_duty_days=excluded.worked_duty_days,paid_leave_days=excluded.paid_leave_days,absent_days=excluded.absent_days,absent_deduction=excluded.absent_deduction,updated_at=CURRENT_TIMESTAMP""",
-            (employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime,bonus,deduction,net,note.strip(),actor,actor,duty['scheduled'],duty['worked'],duty['paid_leave'],duty['absent'],absent_deduction))
-    audit(request,"save","payroll",f"{employee_id}:{salary_month}",f"Net salary: {net:.2f}")
+        existing=c.execute("SELECT id,payment_status FROM payroll_records WHERE employee_id=? AND salary_month=?",(employee_id,salary_month)).fetchone()
+        if existing and existing['payment_status'] in {'finalized','paid'}: raise HTTPException(409,"Finalized payroll is locked. Super Admin must reopen it first.")
+        c.execute("UPDATE employees SET fixed_salary=?,default_overtime_rate=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(fixed_salary,overtime_rate,employee_id))
+        payload=(fixed_salary,calc['overtime_hours'],overtime_rate,calc['overtime_amount'],bonus,deduction,calc['net_salary'],note.strip(),actor,int(calc['scheduled']),int(calc['worked']),int(calc['paid_leave']),int(calc['absent']),calc['absent_deduction'],calc['worked'],calc['paid_leave'],calc['unpaid_leave'],calc['absent'],calc['unpaid_leave_deduction'],advance,fine,calc['gross_salary'],calc['total_deduction'],overtime_mode,adjustment_reason.strip(),json.dumps(calc,default=str))
+        if existing:
+            c.execute("""UPDATE payroll_records SET fixed_salary=?,overtime_hours=?,overtime_rate=?,overtime_amount=?,bonus=?,deduction=?,net_salary=?,note=?,updated_by=?,scheduled_duty_days=?,worked_duty_days=?,paid_leave_days=?,absent_days=?,absent_deduction=?,worked_duty_units=?,paid_leave_units=?,unpaid_leave_units=?,absent_duty_units=?,unpaid_leave_deduction=?,advance_amount=?,fine_amount=?,gross_salary=?,total_deduction=?,overtime_mode=?,adjustment_reason=?,calculation_snapshot=?,payment_status='draft',updated_at=CURRENT_TIMESTAMP WHERE id=?""",payload+(existing['id'],)); payroll_id=existing['id']
+        else:
+            insert_values=(employee_id,salary_month)+payload[:9]+(actor,)+payload[9:]
+            c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,note,created_by,updated_by,scheduled_duty_days,worked_duty_days,paid_leave_days,absent_days,absent_deduction,worked_duty_units,paid_leave_units,unpaid_leave_units,absent_duty_units,unpaid_leave_deduction,advance_amount,fine_amount,gross_salary,total_deduction,overtime_mode,adjustment_reason,calculation_snapshot,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft')""",insert_values); payroll_id=c.execute("SELECT id FROM payroll_records WHERE employee_id=? AND salary_month=?",(employee_id,salary_month)).fetchone()['id']
+        _log_payroll_change(c,payroll_id,"saved",actor,adjustment_reason.strip())
+    audit(request,"save","payroll",f"{employee_id}:{salary_month}",f"Net salary: {calc['net_salary']:.2f}")
     if profile_employee_id==employee_id: return RedirectResponse(f"/employees/{employee_id}?month={salary_month}#payroll",303)
     return RedirectResponse(f"/payroll?month={salary_month}&saved=1",303)
 
 @app.post("/payroll/{payroll_id}/status")
-def payroll_status(request: Request, payroll_id: int, status: str=Form(...), month: str=Form(...), return_employee_id: int=Form(0)):
+def payroll_status(request: Request, background_tasks: BackgroundTasks, payroll_id: int, status: str=Form(...), month: str=Form(...), payment_method: str=Form(""), payment_reference: str=Form(""), return_employee_id: int=Form(0)):
     require_permission(request,"payroll_manage")
-    if status not in {"paid","unpaid"}: raise HTTPException(400,"Invalid payment status")
-    paid="CURRENT_TIMESTAMP" if status=="paid" else "NULL"
-    with get_db() as c: c.execute(f"UPDATE payroll_records SET payment_status=?,paid_at={paid},updated_at=CURRENT_TIMESTAMP WHERE id=?",(status,payroll_id))
+    if status not in {"finalized","paid"}: raise HTTPException(400,"Invalid payroll status")
+    actor=_payroll_actor(request)
+    with get_db() as c:
+        row=c.execute("SELECT * FROM payroll_records WHERE id=?",(payroll_id,)).fetchone()
+        if not row: raise HTTPException(404,"Payroll not found")
+        if status=='finalized':
+            if row['payment_status']!='draft': raise HTTPException(409,"Only draft payroll can be finalized")
+            snapshot=json.loads(row['calculation_snapshot'] or '{}')
+            if float(row['fixed_salary'] or 0)<=0: raise HTTPException(409,"Fixed Salary Master is missing")
+            if float(snapshot.get('scheduled') or 0)<=0: raise HTTPException(409,"No scheduled duty found for this month")
+            if float(snapshot.get('net_salary') or 0)<0: raise HTTPException(409,"Net salary cannot be negative")
+            if snapshot.get('incomplete_dates'): raise HTTPException(409,"Incomplete checkout must be reviewed before finalizing")
+            c.execute("UPDATE payroll_records SET payment_status='finalized',finalized_at=CURRENT_TIMESTAMP,locked_at=CURRENT_TIMESTAMP,locked_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(actor,payroll_id))
+        else:
+            if row['payment_status']!='finalized': raise HTTPException(409,"Finalize payroll before payment")
+            if not payment_method.strip() or not payment_reference.strip(): raise HTTPException(400,"Payment method and reference are required")
+            c.execute("UPDATE payroll_records SET payment_status='paid',payment_method=?,payment_reference=?,paid_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",(payment_method.strip(),payment_reference.strip(),payroll_id))
+        _log_payroll_change(c,payroll_id,status,actor,payment_reference.strip())
+        delivery=c.execute("SELECT p.*,e.staff_id,e.name,e.department,e.designation,e.whatsapp_phone,e.phone FROM payroll_records p JOIN employees e ON e.id=p.employee_id WHERE p.id=?",(payroll_id,)).fetchone() if status=='paid' else None
     audit(request,"payment_status","payroll",str(payroll_id),status)
+    if delivery and (delivery['whatsapp_phone'] or delivery['phone']):
+        pdf_bytes=_build_payslip_pdf(delivery); filename=f"BURAQ-Payslip-{delivery['staff_id']}-{delivery['salary_month']}.pdf"
+        background_tasks.add_task(send_document_bytes,delivery['whatsapp_phone'] or delivery['phone'],pdf_bytes,filename,f"Salary payslip - {delivery['salary_month']}")
     if return_employee_id: return RedirectResponse(f"/employees/{return_employee_id}?month={month}#payroll",303)
     return RedirectResponse(f"/payroll?month={month}",303)
+
+@app.post("/payroll/{payroll_id}/reopen")
+def payroll_reopen(request: Request, payroll_id: int, month: str=Form(...), reason: str=Form(...)):
+    require_super_admin(request)
+    if len(reason.strip())<5: raise HTTPException(400,"Reopen reason is required")
+    actor=_payroll_actor(request)
+    with get_db() as c:
+        row=c.execute("SELECT payment_status FROM payroll_records WHERE id=?",(payroll_id,)).fetchone()
+        if not row: raise HTTPException(404,"Payroll not found")
+        if row['payment_status']=='paid': raise HTTPException(409,"Paid payroll cannot be reopened")
+        c.execute("UPDATE payroll_records SET payment_status='draft',reopened_at=CURRENT_TIMESTAMP,reopen_reason=?,locked_at=NULL,locked_by=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",(reason.strip(),payroll_id)); _log_payroll_change(c,payroll_id,"reopened",actor,reason.strip())
+    audit(request,"reopen","payroll",str(payroll_id),reason.strip())
+    return RedirectResponse(f"/payroll?month={month}",303)
+
+@app.get("/payroll/preview")
+def payroll_preview(request: Request, employee_id: int, month: str):
+    require_permission(request,"payroll_view")
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    with get_db() as c: employee=c.execute("SELECT fixed_salary,default_overtime_rate FROM employees WHERE id=? AND is_active",(employee_id,)).fetchone()
+    if not employee: raise HTTPException(404,"Employee not found")
+    return _calculate_employee_payroll(employee_id,month,float(employee['fixed_salary'] or 0),float(employee['default_overtime_rate'] or 0))
+
+@app.post("/payroll/bulk-prepare")
+def payroll_bulk_prepare(request: Request, month: str=Form(...)):
+    require_permission(request,"payroll_manage")
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    actor=_payroll_actor(request); prepared=0
+    with get_db() as c:
+        employees=c.execute("SELECT id,fixed_salary,default_overtime_rate FROM employees WHERE is_active ORDER BY id").fetchall()
+        for employee in employees:
+            exists=c.execute("SELECT id FROM payroll_records WHERE employee_id=? AND salary_month=?",(employee['id'],month)).fetchone()
+            if exists: continue
+            calc=_calculate_employee_payroll(employee['id'],month,float(employee['fixed_salary'] or 0),float(employee['default_overtime_rate'] or 0))
+            c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,created_by,updated_by,scheduled_duty_days,worked_duty_days,paid_leave_days,absent_days,absent_deduction,worked_duty_units,paid_leave_units,unpaid_leave_units,absent_duty_units,unpaid_leave_deduction,advance_amount,fine_amount,gross_salary,total_deduction,overtime_mode,calculation_snapshot,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft')""",(employee['id'],month,calc['fixed_salary'],calc['overtime_hours'],calc['overtime_rate'],calc['overtime_amount'],0,0,calc['net_salary'],actor,actor,int(calc['scheduled']),int(calc['worked']),int(calc['paid_leave']),int(calc['absent']),calc['absent_deduction'],calc['worked'],calc['paid_leave'],calc['unpaid_leave'],calc['absent'],calc['unpaid_leave_deduction'],0,0,calc['gross_salary'],calc['total_deduction'],'auto',json.dumps(calc,default=str))); prepared+=1
+    audit(request,"bulk_prepare","payroll",month,f"Prepared {prepared} employee payrolls")
+    return RedirectResponse(f"/payroll?month={month}&saved=bulk",303)
+
+@app.post("/employees/{employee_id}/salary-master")
+def salary_master(request: Request, employee_id: int, fixed_salary: float=Form(...), overtime_rate: float=Form(0), return_month: str=Form("")):
+    require_permission(request,"payroll_manage")
+    if fixed_salary<0 or overtime_rate<0: raise HTTPException(400,"Salary values cannot be negative")
+    with get_db() as c: c.execute("UPDATE employees SET fixed_salary=?,default_overtime_rate=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(fixed_salary,overtime_rate,employee_id))
+    audit(request,"salary_master","employee",str(employee_id),f"Fixed salary and OT rate updated")
+    return RedirectResponse(f"/employees/{employee_id}?month={return_month}#payroll",303)
 
 @app.get("/payroll/export.xlsx")
 def payroll_xlsx(request: Request, month: str):
@@ -974,40 +1079,42 @@ def payroll_xlsx(request: Request, month: str):
     rows=_salary_sheet_rows(month); wb=Workbook(); summary=wb.active; summary.title="Summary"; ws=wb.create_sheet("Salary Sheet")
     dark="0D3B2E"; green="087F5B"; mint="EAF7F2"; pale="F4F7F6"; amber="FFF3CD"; red="FDE2E2"; white="FFFFFF"; grey="64748B"
     thin=Side(style="thin",color="D9E4E0"); border=Border(bottom=thin)
-    headers=["SL","Staff ID","Employee Name","Department","Designation","Scheduled Duty Days","Worked Duty Days","Paid Leave Days","Absent Days","Fixed Salary","Per Day Salary","Absent Deduction","OT Hours","OT Amount","Bonus","Gross Salary","Other Deduction","Total Deduction","Net Salary","Payment Status","HR Note"]
-    ws.merge_cells("A1:U1"); ws["A1"]="BURAQ MONTHLY SALARY SHEET"; ws["A1"].font=Font(bold=True,size=20,color=white); ws["A1"].fill=PatternFill("solid",fgColor=dark); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.row_dimensions[1].height=34
-    ws.merge_cells("A2:U2"); ws["A2"]=f"Salary Month: {month}  |  Generated: {datetime.now(ZoneInfo(settings.timezone)).strftime('%d %b %Y, %I:%M %p')}  |  HR/Admin Confidential"; ws["A2"].font=Font(italic=True,color=grey); ws["A2"].alignment=Alignment(horizontal="center")
+    headers=["SL","Staff ID","Employee Name","Department","Designation","Scheduled Duty","Worked Duty","Paid Leave","Unpaid Leave","Absent","Fixed Salary","Per Day Salary","Absent Deduction","Unpaid Leave Ded.","OT Hours","OT Amount","Bonus","Gross Salary","Advance","Fine","Other Deduction","Total Deduction","Net Salary","Status","HR Note"]
+    ws.merge_cells("A1:Y1"); ws["A1"]="BURAQ MONTHLY SALARY SHEET"; ws["A1"].font=Font(bold=True,size=20,color=white); ws["A1"].fill=PatternFill("solid",fgColor=dark); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.row_dimensions[1].height=34
+    ws.merge_cells("A2:Y2"); ws["A2"]=f"Salary Month: {month}  |  Generated: {datetime.now(ZoneInfo(settings.timezone)).strftime('%d %b %Y, %I:%M %p')}  |  HR/Admin Confidential"; ws["A2"].font=Font(italic=True,color=grey); ws["A2"].alignment=Alignment(horizontal="center")
     for col,title in enumerate(headers,1):
         cell=ws.cell(4,col,title); cell.font=Font(bold=True,color=white); cell.fill=PatternFill("solid",fgColor=green); cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
     ws.row_dimensions[4].height=42
     for index,r in enumerate(rows,1):
         row=4+index
-        values=[index,r['staff_id'],r['name'],r['department'] or "",r['designation'] or "",r['scheduled'],r['worked'],r['paid_leave'],r['absent'],float(r['fixed_salary'] or 0),None,float(r['absent_deduction']),float(r['overtime_hours'] or 0),float(r['overtime_amount'] or 0),float(r['bonus'] or 0),None,float(r['deduction'] or 0),None,None,(r['payment_status'] or "not prepared").title() if r['payroll_id'] else "Not Prepared",r['note'] or ""]
+        note_text=" | ".join(x for x in [f"Adjustment: {r.get('adjustment_reason')}" if r.get('adjustment_reason') else "",r.get('note') or ""] if x)
+        values=[index,r['staff_id'],r['name'],r['department'] or "",r['designation'] or "",r['scheduled'],r['worked'],r['paid_leave'],r['unpaid_leave'],r['absent'],float(r['fixed_salary'] or 0),None,None,None,float(r['overtime_hours'] or 0),float(r['overtime_amount'] or 0),float(r['bonus'] or 0),None,float(r.get('advance_amount') or 0),float(r.get('fine_amount') or 0),float(r['deduction'] or 0),None,None,(r['payment_status'] or "not prepared").title() if r['payroll_id'] else "Not Prepared",note_text]
         for col,value in enumerate(values,1): ws.cell(row,col,value)
-        ws.cell(row,11,f'=IF(F{row}=0,0,J{row}/F{row})')
-        ws.cell(row,12,f'=K{row}*I{row}')
-        ws.cell(row,16,f'=J{row}+N{row}+O{row}')
-        ws.cell(row,18,f'=L{row}+Q{row}')
-        ws.cell(row,19,f'=P{row}-R{row}')
+        ws.cell(row,12,f'=IF(F{row}=0,0,K{row}/F{row})')
+        ws.cell(row,13,f'=L{row}*J{row}')
+        ws.cell(row,14,f'=L{row}*I{row}')
+        ws.cell(row,18,f'=K{row}+P{row}+Q{row}')
+        ws.cell(row,22,f'=M{row}+N{row}+S{row}+T{row}+U{row}')
+        ws.cell(row,23,f'=R{row}-V{row}')
         fill=PatternFill("solid",fgColor=white if index%2 else pale)
         for cell in ws[row]: cell.fill=fill; cell.border=border; cell.alignment=Alignment(vertical="center",wrap_text=cell.column in {3,21})
-        status=ws.cell(row,20); status.alignment=Alignment(horizontal="center"); status.fill=PatternFill("solid",fgColor=(mint if status.value=="Paid" else amber if status.value=="Unpaid" else red))
+        status=ws.cell(row,24); status.alignment=Alignment(horizontal="center"); status.fill=PatternFill("solid",fgColor=(mint if status.value=="Paid" else amber if status.value in {"Draft","Finalized"} else red))
     first_data=5; last_data=max(first_data,4+len(rows)); total_row=last_data+1
     ws.cell(total_row,1,"TOTAL"); ws.merge_cells(start_row=total_row,start_column=1,end_row=total_row,end_column=5)
-    for col in [6,7,8,9,10,12,13,14,15,16,17,18,19]: ws.cell(total_row,col,f"=SUM({get_column_letter(col)}{first_data}:{get_column_letter(col)}{last_data})" if rows else 0)
+    for col in [6,7,8,9,10,11,13,14,15,16,17,18,19,20,21,22,23]: ws.cell(total_row,col,f"=SUM({get_column_letter(col)}{first_data}:{get_column_letter(col)}{last_data})" if rows else 0)
     for cell in ws[total_row]: cell.font=Font(bold=True,color=white); cell.fill=PatternFill("solid",fgColor=dark); cell.border=border
     ws.cell(total_row,1).alignment=Alignment(horizontal="right")
     money_fmt='#,##0.00;[Red](#,##0.00);-'
     for row in ws.iter_rows(min_row=5,max_row=total_row):
-        for col in [10,11,12,14,15,16,17,18,19]: row[col-1].number_format=money_fmt
-    ws.freeze_panes="F5"; ws.auto_filter.ref=f"A4:U{last_data}"; ws.sheet_view.showGridLines=False
-    widths=[7,14,25,18,18,15,14,14,12,16,16,18,11,15,14,16,18,18,17,16,28]
+        for col in [11,12,13,14,16,17,18,19,20,21,22,23]: row[col-1].number_format=money_fmt
+    ws.freeze_panes="F5"; ws.auto_filter.ref=f"A4:Y{last_data}"; ws.sheet_view.showGridLines=False
+    widths=[6,13,23,15,15,11,11,11,11,10,14,14,15,16,10,13,12,14,12,11,15,15,14,13,24]
     for col,width in enumerate(widths,1): ws.column_dimensions[get_column_letter(col)].width=width
-    ws.page_setup.orientation="landscape"; ws.page_setup.paperSize=ws.PAPERSIZE_A4; ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=1; ws.print_title_rows="1:4"; ws.print_area=f"A1:U{total_row}"; ws.sheet_properties.pageSetUpPr.fitToPage=True; ws.sheet_properties.pageSetUpPr.autoPageBreaks=False; ws.print_options.horizontalCentered=True; ws.print_options.verticalCentered=True; ws.page_margins=PageMargins(left=0.2,right=0.2,top=0.3,bottom=0.3,header=0.1,footer=0.1)
+    ws.page_setup.orientation="landscape"; ws.page_setup.paperSize=ws.PAPERSIZE_A4; ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=1; ws.print_title_rows="1:4"; ws.print_area=f"A1:Y{total_row}"; ws.sheet_properties.pageSetUpPr.fitToPage=True; ws.sheet_properties.pageSetUpPr.autoPageBreaks=False; ws.print_options.horizontalCentered=True; ws.print_options.verticalCentered=True; ws.page_margins=PageMargins(left=0.15,right=0.15,top=0.25,bottom=0.25,header=0.1,footer=0.1)
 
     summary.merge_cells("A1:H1"); summary["A1"]="BURAQ PAYROLL SUMMARY"; summary["A1"].font=Font(bold=True,size=20,color=white); summary["A1"].fill=PatternFill("solid",fgColor=dark); summary["A1"].alignment=Alignment(horizontal="center"); summary.row_dimensions[1].height=34
     summary.merge_cells("A2:H2"); summary["A2"]=f"Salary Month: {month}  |  All active employees included"; summary["A2"].font=Font(italic=True,color=grey); summary["A2"].alignment=Alignment(horizontal="center")
-    metrics=[("Active Employees",len(rows)),("Payroll Prepared",sum(1 for r in rows if r['payroll_id'])),("Scheduled Duties",sum(r['scheduled'] for r in rows)),("Worked Duties",sum(r['worked'] for r in rows)),("Paid Leave Days",sum(r['paid_leave'] for r in rows)),("Absent Days",sum(r['absent'] for r in rows)),("Gross Salary",f"='Salary Sheet'!P{total_row}"),("Total Deductions",f"='Salary Sheet'!R{total_row}"),("Net Payroll",f"='Salary Sheet'!S{total_row}")]
+    metrics=[("Active Employees",len(rows)),("Payroll Prepared",sum(1 for r in rows if r['payroll_id'])),("Scheduled Duties",sum(r['scheduled'] for r in rows)),("Worked Duties",sum(r['worked'] for r in rows)),("Paid Leave Days",sum(r['paid_leave'] for r in rows)),("Absent Days",sum(r['absent'] for r in rows)),("Gross Salary",f"='Salary Sheet'!R{total_row}"),("Total Deductions",f"='Salary Sheet'!V{total_row}"),("Net Payroll",f"='Salary Sheet'!W{total_row}")]
     for i,(label,value) in enumerate(metrics):
         row=4+(i//3)*3; col=1+(i%3)*3; summary.merge_cells(start_row=row,start_column=col,end_row=row,end_column=col+1); summary.merge_cells(start_row=row+1,start_column=col,end_row=row+1,end_column=col+1)
         summary.cell(row,col,label).font=Font(bold=True,color=grey); summary.cell(row,col).alignment=Alignment(horizontal="center"); summary.cell(row+1,col,value).font=Font(bold=True,size=18,color=dark); summary.cell(row+1,col).alignment=Alignment(horizontal="center"); summary.cell(row,col).fill=summary.cell(row+1,col).fill=PatternFill("solid",fgColor=mint)
@@ -1039,12 +1146,23 @@ def payroll_pdf(request: Request, month: str):
     if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
     month_label=datetime.strptime(month,"%Y-%m").strftime("%B %Y")
     rows=_salary_sheet_rows(month); out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font; styles['Normal'].alignment=1; styles['Normal'].textColor=colors.HexColor("#64748B"); styles['Heading1'].fontName=font; styles['Heading1'].fontSize=22; styles['Heading1'].leading=26; styles['Heading1'].alignment=1; styles['Heading1'].textColor=colors.HexColor("#087F5B")
-    data=[["Staff ID","Employee","Duty","Absent","Fixed","Total Ded.","Net","Status"]]+[[str(r['staff_id']),str(r['name']),f"{r['worked']}/{r['scheduled']}",str(r['absent']),_money(r['fixed_salary']),_money(r['absent_deduction']+float(r['deduction'] or 0)),_money(r['net_salary']),str(r['payment_status'] or 'not prepared').title()] for r in rows]
+    data=[["Staff ID","Employee","Duty","Absent","Fixed","Total Ded.","Net","Status"]]+[[str(r['staff_id']),str(r['name']),f"{r['worked']}/{r['scheduled']}",str(r['absent']),_money(r['fixed_salary']),_money(r['total_deduction']),_money(r['net_salary']),str(r['payment_status'] or 'not prepared').title()] for r in rows]
     data.append(["","TOTAL","","","","",_money(sum(float(r['net_salary']) for r in rows)),""])
     doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=24,rightMargin=24,topMargin=24,bottomMargin=24); table=Table(data,repeatRows=1,colWidths=[65,155,75,70,70,75,80,60])
     table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),font),("FONTNAME",(0,-1),(-1,-1),font),("FONTNAME",(0,-1),(-1,-1),font),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#B7C8C2")),("ROWBACKGROUNDS",(0,1),(-1,-2),[colors.white,colors.HexColor("#F4F7F6")]),("ALIGN",(2,1),(-2,-1),"RIGHT"),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
     doc.build([Paragraph("BURAQ Payment Sheet",styles['Title']),Spacer(1,4),Paragraph(month_label,styles['Heading1']),Paragraph("HR/Admin confidential",styles['Normal']),Spacer(1,14),table]); out.seek(0)
     return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payment-Sheet-{month}.pdf"})
+
+def _build_payslip_pdf(r) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
+    data=[["Salary Item","Amount (BDT)"],["Fixed Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],[f"Absent deduction ({r['absent_duty_units']} days)",f"- {_money(r['absent_deduction'])}"],[f"Unpaid leave ({r['unpaid_leave_units']} days)",f"- {_money(r['unpaid_leave_deduction'])}"],["Salary advance",f"- {_money(r['advance_amount'])}"],["Fine",f"- {_money(r['fine_amount'])}"],["Other deduction",f"- {_money(r['deduction'])}"],["TOTAL DEDUCTION",f"- {_money(r['total_deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
+    table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#DCFCE7")),("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10)]))
+    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=45,bottomMargin=45)
+    doc.build([Paragraph("BURAQ Salary Statement",styles['Title']),Paragraph(f"Employee: {escape(str(r['name']))}<br/>Staff ID: {escape(str(r['staff_id']))}<br/>Department: {escape(str(r['department'] or '-'))}<br/>Salary month: {r['salary_month']}<br/>Payment status: {str(r['payment_status']).title()}",styles['Normal']),Spacer(1,18),table,Spacer(1,18),Paragraph("Confidential - generated for HR/Admin use only.",styles['Normal'])]); return out.getvalue()
 
 @app.get("/payroll/{payroll_id}/payslip.pdf")
 def payroll_payslip(request: Request, payroll_id: int):
@@ -1056,7 +1174,7 @@ def payroll_payslip(request: Request, payroll_id: int):
     with get_db() as c: r=c.execute("SELECT p.*,e.staff_id,e.name,e.department,e.designation FROM payroll_records p JOIN employees e ON e.id=p.employee_id WHERE p.id=?",(payroll_id,)).fetchone()
     if not r: raise HTTPException(404,"Payroll not found")
     out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
-    data=[["Salary Item","Amount (BDT)"],["Fixed Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],[f"Absent deduction ({r['absent_days']} days)",f"- {_money(r['absent_deduction'])}"],["Other deduction",f"- {_money(r['deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
+    data=[["Salary Item","Amount (BDT)"],["Fixed Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],[f"Absent deduction ({r['absent_duty_units']} days)",f"- {_money(r['absent_deduction'])}"],[f"Unpaid leave ({r['unpaid_leave_units']} days)",f"- {_money(r['unpaid_leave_deduction'])}"],["Salary advance",f"- {_money(r['advance_amount'])}"],["Fine",f"- {_money(r['fine_amount'])}"],["Other deduction",f"- {_money(r['deduction'])}"],["TOTAL DEDUCTION",f"- {_money(r['total_deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
     table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#DCFCE7")),("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10)]))
     doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=45,bottomMargin=45)
     doc.build([Paragraph("BURAQ Salary Statement",styles['Title']),Paragraph(f"Employee: {escape(str(r['name']))}<br/>Staff ID: {escape(str(r['staff_id']))}<br/>Department: {escape(str(r['department'] or '-'))}<br/>Salary month: {r['salary_month']}<br/>Payment status: {str(r['payment_status']).title()}",styles['Normal']),Spacer(1,18),table,Spacer(1,18),Paragraph("Confidential - generated for HR/Admin use only.",styles['Normal'])]); out.seek(0)

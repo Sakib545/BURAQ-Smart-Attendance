@@ -327,6 +327,16 @@ def apply_feature_migrations() -> None:
             UNIQUE(employee_id,salary_month)
         )""",
         "CREATE INDEX IF NOT EXISTS ix_payroll_month_status ON payroll_records(salary_month,payment_status)",
+        """CREATE TABLE IF NOT EXISTS payroll_change_logs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, payroll_id INTEGER NOT NULL, action TEXT NOT NULL,
+            actor TEXT, reason TEXT, snapshot TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(payroll_id) REFERENCES payroll_records(id) ON DELETE CASCADE
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS payroll_change_logs(
+            id BIGSERIAL PRIMARY KEY, payroll_id BIGINT NOT NULL REFERENCES payroll_records(id) ON DELETE CASCADE,
+            action TEXT NOT NULL, actor TEXT, reason TEXT, snapshot TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_payroll_changes_payroll ON payroll_change_logs(payroll_id,created_at)",
         "CREATE INDEX IF NOT EXISTS ix_face_samples_employee ON face_samples(employee_id)",
         "CREATE INDEX IF NOT EXISTS ix_attendance_work_date ON attendance(work_date)",
         "CREATE INDEX IF NOT EXISTS ix_attendance_evidence_employee_created ON attendance_evidence(employee_id,created_at)",
@@ -393,6 +403,8 @@ def apply_feature_migrations() -> None:
         ("profile_photo_url", "TEXT"), ("emergency_name", "TEXT"),
         ("emergency_relation", "TEXT"), ("emergency_phone", "TEXT"),
         ("is_active", "INTEGER NOT NULL DEFAULT 1" if _active_url.startswith("sqlite") else "BOOLEAN NOT NULL DEFAULT TRUE"),
+        ("fixed_salary", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("default_overtime_rate", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
     ]
     existing_columns = {col["name"] for col in inspect(engine).get_columns("employees")}
     for column, definition in employee_columns:
@@ -407,6 +419,24 @@ def apply_feature_migrations() -> None:
         ("paid_leave_days", "INTEGER NOT NULL DEFAULT 0"),
         ("absent_days", "INTEGER NOT NULL DEFAULT 0"),
         ("absent_deduction", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("worked_duty_units", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("paid_leave_units", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("unpaid_leave_units", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("absent_duty_units", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("unpaid_leave_deduction", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("advance_amount", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("fine_amount", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("gross_salary", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("total_deduction", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("overtime_mode", "TEXT NOT NULL DEFAULT 'auto'"),
+        ("adjustment_reason", "TEXT"),
+        ("payment_method", "TEXT"),
+        ("payment_reference", "TEXT"),
+        ("locked_at", "TEXT" if _active_url.startswith("sqlite") else "TIMESTAMPTZ"),
+        ("locked_by", "TEXT"),
+        ("reopened_at", "TEXT" if _active_url.startswith("sqlite") else "TIMESTAMPTZ"),
+        ("reopen_reason", "TEXT"),
+        ("calculation_snapshot", "TEXT"),
     ]
     existing_payroll = {col["name"] for col in inspect(engine).get_columns("payroll_records")}
     for column, definition in payroll_columns:
@@ -414,4 +444,7 @@ def apply_feature_migrations() -> None:
             continue
         with engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE payroll_records ADD COLUMN {column} {definition}"))
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE payroll_records SET payment_status='draft' WHERE payment_status='unpaid'"))
     mark_migration("v9.11-duty-based-salary")
+    mark_migration("v9.12-payroll-pro")

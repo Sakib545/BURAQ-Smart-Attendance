@@ -189,3 +189,16 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Payroll management and exports remain private to authorized HR/Admin users.
 - v9.11.1 renames the monthly PDF to BURAQ Payment Sheet and displays the selected month prominently.
 - v9.11.2 sets both Excel tabs to centered A4 landscape, fitting each complete sheet onto one printed page.
+
+## v9.12 Payroll Pro
+
+- Fixed salary and default overtime rate are employee master values: set once and reuse automatically until HR changes them.
+- One central payroll engine powers preview, saved records, Excel, monthly PDF and individual payslips.
+- Regular/custom/Friday/night duty, half-day attendance, paid leave, unpaid leave, absence and automatic attendance overtime are calculated separately.
+- Bonus, advance, fine and other deductions require an adjustment reason; HR can override overtime manually.
+- Payroll follows Draft -> Finalized -> Paid. Finalized records are locked, and only Super Admin can reopen an unpaid record with a reason.
+- Paid payroll requires payment method and reference; every save, finalize, reopen and payment stores a snapshot audit log.
+- Prepare All Employees generates the selected month from persistent salary master values without copying the previous month.
+- Finalization blocks records with incomplete checkout dates, and Super Admin can download a full payroll JSON backup.
+- Daily payroll backups are written to `BACKUP_DIR` (default `/data/backups`); mount a Railway persistent volume at `/data`.
+- Joining and resignation date proration are intentionally not included.

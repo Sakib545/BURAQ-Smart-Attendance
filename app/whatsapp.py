@@ -58,6 +58,19 @@ async def send_text(to: str, text: str):
 async def send_template(to: str, template_name: str, values: list[str]):
     return await _send(to,{"type":"template","template":{"name":template_name,"language":{"code":"bn"},"components":[{"type":"body","parameters":[{"type":"text","text":str(v)} for v in values]}]}})
 
+async def send_document_bytes(to: str, content: bytes, filename: str, caption: str=""):
+    token, phone_id, api_version = _credentials()
+    if not token or not phone_id or not to: return {"sent":False,"reason":"WhatsApp setup or employee number missing"}
+    headers={"Authorization":f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            upload=await client.post(f"https://graph.facebook.com/{api_version}/{phone_id}/media",headers=headers,data={"messaging_product":"whatsapp","type":"application/pdf"},files={"file":(filename,content,"application/pdf")})
+        if upload.is_error: return {"sent":False,"status_code":upload.status_code,"error":upload.text}
+        return await _send(to,{"type":"document","document":{"id":upload.json()["id"],"filename":filename,"caption":caption}})
+    except Exception as exc:
+        logger.exception("Could not send WhatsApp document")
+        return {"sent":False,"error":str(exc)}
+
 
 async def send_location_request(to: str, body_text: str = "📍 Attendance-এর জন্য আপনার বর্তমান Location পাঠান।"):
     return await _send(to, {
