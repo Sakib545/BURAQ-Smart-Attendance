@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import time
 import uuid
@@ -24,7 +25,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.6.1", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.6.2", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
