@@ -150,3 +150,4 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Employees receive no salary command, menu item or payroll access; their attendance experience is unchanged.
 - v9.6.1 fixes active-employee filtering on Railway PostgreSQL for Payroll and Performance pages.
 - v9.6.2 fixes the missing regular-expression import used by Payroll month validation.
+- v9.7 adds a polished confidential Payroll section inside each Employee 360 profile with inline salary create/edit, month summary, history, payment controls and payslip download.
