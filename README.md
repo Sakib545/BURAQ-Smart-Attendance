@@ -171,3 +171,11 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Database-backed reminder logs prevent repeated messages and provide an Admin audit view.
 - v9.9.1 adds one-day Custom Duty assignments; a custom date/time/office overrides that employee's weekly duty and reminder for the selected date.
 - v9.9.2 fixes sidebar account-card overlap when the navigation menu is taller than the viewport.
+
+## v9.10 Employee Duty Control
+
+- A Duty button now sits beside Profile and Reset Face in Employee Center.
+- Employee-specific Duty page supports selectable regular weekly, custom date, Friday and night assignments.
+- Morning, evening and night presets remain fully overridable with selectable start/end time and office.
+- Night duty can be one-time or weekly; an end time earlier than start is treated as next day.
+- Attendance checkout and WhatsApp checkout reminders correctly follow overnight duties across midnight.

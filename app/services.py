@@ -189,10 +189,22 @@ def save_face_reference(employee, media_id, image_bytes):
 def shift_times(shift):
     return (time(16), time(22)) if (shift or "").lower() == "evening" else (time(8), time(16))
 
+def duty_window(employee, duty_date):
+    date_text=duty_date.isoformat()
+    with get_db() as c:
+        duty=c.execute("SELECT start_time,end_time FROM custom_duties WHERE employee_id=? AND duty_date=? AND is_active",(employee['id'],date_text)).fetchone()
+        if not duty: duty=c.execute("SELECT start_time,end_time FROM duty_schedules WHERE employee_id=? AND weekday=? AND is_active",(employee['id'],duty_date.weekday())).fetchone()
+    if duty:
+        start=time.fromisoformat(duty['start_time']); end=time.fromisoformat(duty['end_time'])
+    else: start,end=shift_times(employee['shift'])
+    start_dt=datetime.combine(duty_date,start,tzinfo=now_local().tzinfo); end_dt=datetime.combine(duty_date,end,tzinfo=now_local().tzinfo)
+    if end_dt<=start_dt: end_dt+=timedelta(days=1)
+    return start_dt,end_dt
+
 
 def check_in(employee):
-    current = now_local(); work_date = current.date().isoformat(); start, _ = shift_times(employee["shift"])
-    late = max(0, int((current - datetime.combine(current.date(), start, tzinfo=current.tzinfo)).total_seconds() // 60))
+    current = now_local(); work_date = current.date().isoformat(); start_dt,_=duty_window(employee,current.date())
+    late = max(0, int((current-start_dt).total_seconds() // 60))
     with get_db() as c:
         record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], work_date)).fetchone()
         if record and record["check_in"]: return f"ℹ️ আজ Check In করা হয়েছে: {datetime.fromisoformat(record['check_in']).strftime('%I:%M %p')}"
@@ -202,12 +214,19 @@ def check_in(employee):
 
 
 def check_out(employee):
-    current = now_local(); work_date = current.date().isoformat(); _, end_time = shift_times(employee["shift"])
-    early = max(0, int((datetime.combine(current.date(), end_time, tzinfo=current.tzinfo) - current).total_seconds() // 60))
-    overtime = max(0, int((current - datetime.combine(current.date(), time(22), tzinfo=current.tzinfo)).total_seconds() // 60))
+    current=now_local(); today=current.date(); yesterday=today-timedelta(days=1)
     with get_db() as c:
-        record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], work_date)).fetchone()
-        if not record or not record["check_in"]: return "❌ আগে Check In করতে হবে।"
+        today_record=c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?",(employee['id'],today.isoformat())).fetchone()
+        previous_record=c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?",(employee['id'],yesterday.isoformat())).fetchone()
+    record=today_record if today_record and today_record['check_in'] and not today_record['check_out'] else None
+    duty_date=today
+    if not record and previous_record and previous_record['check_in'] and not previous_record['check_out']:
+        prev_start,prev_end=duty_window(employee,yesterday)
+        if prev_end.date()>yesterday and current<=prev_end+timedelta(hours=12): record=previous_record; duty_date=yesterday
+    if not record: return "❌ আগে Check In করতে হবে।"
+    _,end_dt=duty_window(employee,duty_date)
+    early=max(0,int((end_dt-current).total_seconds()//60)); overtime=max(0,int((current-end_dt).total_seconds()//60))
+    with get_db() as c:
         if record["check_out"]: return f"ℹ️ আজ Check Out করা হয়েছে: {datetime.fromisoformat(record['check_out']).strftime('%I:%M %p')}"
         worked = max(0, int((current - datetime.fromisoformat(record["check_in"])).total_seconds() // 60))
         c.execute("UPDATE attendance SET check_out=?,early_leave_minutes=?,overtime_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (current.isoformat(timespec="seconds"), early, overtime, record["id"]))
