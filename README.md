@@ -20,3 +20,11 @@
 ## Railway Healthcheck fix
 
 v4.3-এ `/health` database provisioning-এর জন্য 503 দেয় না। PostgreSQL সাময়িকভাবে unavailable হলে app retry করে এবং startup বন্ধ না করে temporary SQLite fallback ব্যবহার করে। Dashboard warning দেখায়, যাতে service deploy হয় এবং পরে PostgreSQL reference ঠিক করা যায়। স্থায়ী attendance data-এর জন্য PostgreSQL অবশ্যই যুক্ত রাখুন।
+
+## v5.1 changes
+- Registration preview with YES/CANCEL confirmation.
+- Better Bangladesh phone-number matching.
+- Automatic approval when employee phone matches WhatsApp number.
+- Pending admin approval when the number does not match.
+- Improved check-in, check-out, worked-hours, late and early-leave messages.
+- Safer duplicate-registration handling.

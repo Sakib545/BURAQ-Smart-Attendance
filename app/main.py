@@ -20,7 +20,7 @@ from app.whatsapp import handle, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="4.3.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="5.1.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 CSS = """
@@ -63,7 +63,7 @@ def health():
     # dashboard explains any optional database/configuration warning.
     return {
         "ok": True,
-        "version": "4.3.0",
+        "version": "5.1.0",
         "database": database_kind(),
         "database_connected": database_ok(),
         "whatsapp_configured": configured(),
