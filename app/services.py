@@ -100,7 +100,7 @@ def confirm_registration(employee_id, phone):
 
 def save_face_reference(employee, media_id, image_bytes):
     try:
-        embedding, quality = extract_embedding(image_bytes)
+        embedding, quality, diagnostics = extract_embedding(image_bytes)
     except FaceAIError as exc:
         return f"❌ Face Registration হয়নি।\n{exc}"
     with get_db() as c:
@@ -118,9 +118,9 @@ def save_face_reference(employee, media_id, image_bytes):
             c.execute("INSERT INTO face_profiles(employee_id,reference_media_id) VALUES(?,?)", (employee["id"], media_id))
     if count < 3:
         set_state(employee["whatsapp_phone"] or employee["phone"], "awaiting_face_registration")
-        return f"✅ Selfie {count}/3 গ্রহণ করা হয়েছে।\n\nআরও {3-count}টি selfie পাঠান—মুখ সামান্য বাম/ডান করে, ভালো আলোতে।"
+        return f"✅ Selfie {count}/3 গ্রহণ করা হয়েছে।\n🔎 Face quality: {quality:.1f}%\n📐 Face area: {diagnostics['face_ratio']:.1f}%\n\nআরও {3-count}টি আলাদা selfie পাঠান—একবার সোজা, একবার সামান্য বাম, একবার সামান্য ডান দিকে তাকিয়ে।"
     clear_state(employee["whatsapp_phone"] or employee["phone"])
-    return f"✅ Face Registration সম্পন্ন হয়েছে।\n\n👤 {employee['name']}\n🆔 {employee['staff_id']}\n🔐 ৩টি Face AI sample সংরক্ষিত\n\nএখন Attendance Menu ব্যবহার করুন।"
+    return f"✅ Face Registration সম্পন্ন হয়েছে।\n\n👤 {employee['name']}\n🆔 {employee['staff_id']}\n🔐 ৩টি Face AI sample সংরক্ষিত\n🔎 শেষ selfie quality: {quality:.1f}%\n\nএখন Attendance Menu ব্যবহার করুন।"
 
 
 def shift_times(shift):
@@ -213,7 +213,7 @@ def receive_image(phone, media_id, image_bytes=None):
     if not current or not current["state"].startswith(("checkin_selfie:", "checkout_selfie:")):
         return "ℹ️ এই মুহূর্তে selfie প্রয়োজন নেই। Menu থেকে Check In বা Check Out নির্বাচন করুন।"
     try:
-        candidate, quality = extract_embedding(image_bytes)
+        candidate, quality, diagnostics = extract_embedding(image_bytes)
     except FaceAIError as exc:
         return f"❌ Face Verification Failed\n{exc}"
     with get_db() as c:

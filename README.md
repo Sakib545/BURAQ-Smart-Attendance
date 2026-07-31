@@ -1,27 +1,27 @@
-# BURAQ Smart Attendance v6.0 — Face AI
+# BURAQ Smart Attendance v6.1 — Face Detection Hotfix
 
-## নতুন কী আছে
-- ৩টি registration selfie থেকে employee-specific Face AI profile
-- Attendance selfie-এর মুখ registered employee-এর মুখের সঙ্গে মিলিয়ে দেখা
-- অন্য ব্যক্তির selfie হলে attendance reject
-- একাধিক মুখ, মুখ না পাওয়া, খুব দূরের/low-resolution ছবি reject
-- WhatsApp image Graph API থেকে securely download করে processing
-- GPS office-radius verification আগের মতো চালু
-- Professional dashboard refresh এবং Employee page-এ Face AI 0/3–3/3 status
-- Admin-এর জন্য Reset Face button
+This build fixes WhatsApp selfie detection failures seen in v6.0.
 
-## Railway Update
-পুরোনো repository-এর files replace করে deploy করুন। PostgreSQL data delete হবে না। প্রথম build-এ OpenCV face models download হবে, তাই build কিছুটা বেশি সময় নিতে পারে।
+## Fixes
+- Applies phone-camera EXIF orientation before face detection.
+- Uses a lower, practical YuNet confidence threshold.
+- Retries detection after low-light enhancement.
+- Caps very large images to reduce Railway memory usage.
+- Rejects multiple faces, blurry images and very distant faces.
+- Shows useful face-quality progress during 3-selfie registration.
+- Gives diagnostic image dimensions and lighting guidance when detection fails.
+- Keeps Face AI matching, GPS verification, existing employees and attendance data.
 
-Variables:
+## Employee instructions
+Send each registration selfie as a separate WhatsApp image message. Do not send a collage. Use the WhatsApp camera, face the camera, and keep only one person in the frame.
+
+## Railway
+Replace the old repository files with this build and redeploy. Existing persistent database data is not intentionally deleted.
+
+Required variables include:
+
 ```
 OFFICE_LATITUDE=25.18892481916644
 OFFICE_LONGITUDE=89.87014577946071
 OFFICE_RADIUS_METERS=100
 ```
-
-## গুরুত্বপূর্ণ migration note
-v5.2-এর পুরোনো single selfie শুধু media ID ছিল; biometric embedding ছিল না। তাই existing employees প্রথম Check In-এ ৩টি নতুন selfie দিয়ে Face Registration সম্পন্ন করবে। Admin চাইলে Employees page থেকে `Reset Face` চাপতে পারবেন।
-
-## Security note
-Face matching এখন বাস্তব AI embedding comparison করে। এটি অন্য মানুষের selfie আটকায়। তবে একটি স্থির printed/photo-screen attack শতভাগ আটকাতে active liveness challenge প্রয়োজন; সেটি আলাদা camera/video challenge feature।
