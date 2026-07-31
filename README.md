@@ -188,3 +188,4 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Salary Sheet shows scheduled, worked, leave and absent days alongside fixed salary, deductions, overtime, bonus, gross and net salary.
 - Payroll management and exports remain private to authorized HR/Admin users.
 - v9.11.1 renames the monthly PDF to BURAQ Payment Sheet and displays the selected month prominently.
+- v9.11.2 sets both Excel tabs to centered A4 landscape, fitting each complete sheet onto one printed page.

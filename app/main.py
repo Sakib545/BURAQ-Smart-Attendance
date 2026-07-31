@@ -27,7 +27,7 @@ from app.reminders import reminder_worker
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.11.1", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.11.2", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -240,7 +240,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.11.1"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.11.2"}
 
 
 @app.get("/ready")
@@ -252,7 +252,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.11.1",
+        "version": "9.11.2",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -967,6 +967,7 @@ def payroll_status(request: Request, payroll_id: int, status: str=Form(...), mon
 def payroll_xlsx(request: Request, month: str):
     require_permission(request,"payroll_export")
     from openpyxl import Workbook
+    from openpyxl.worksheet.page import PageMargins
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
     if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
@@ -1002,7 +1003,7 @@ def payroll_xlsx(request: Request, month: str):
     ws.freeze_panes="F5"; ws.auto_filter.ref=f"A4:U{last_data}"; ws.sheet_view.showGridLines=False
     widths=[7,14,25,18,18,15,14,14,12,16,16,18,11,15,14,16,18,18,17,16,28]
     for col,width in enumerate(widths,1): ws.column_dimensions[get_column_letter(col)].width=width
-    ws.page_setup.orientation="landscape"; ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0; ws.print_title_rows="1:4"; ws.sheet_properties.pageSetUpPr.fitToPage=True
+    ws.page_setup.orientation="landscape"; ws.page_setup.paperSize=ws.PAPERSIZE_A4; ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=1; ws.print_title_rows="1:4"; ws.print_area=f"A1:U{total_row}"; ws.sheet_properties.pageSetUpPr.fitToPage=True; ws.sheet_properties.pageSetUpPr.autoPageBreaks=False; ws.print_options.horizontalCentered=True; ws.print_options.verticalCentered=True; ws.page_margins=PageMargins(left=0.2,right=0.2,top=0.3,bottom=0.3,header=0.1,footer=0.1)
 
     summary.merge_cells("A1:H1"); summary["A1"]="BURAQ PAYROLL SUMMARY"; summary["A1"].font=Font(bold=True,size=20,color=white); summary["A1"].fill=PatternFill("solid",fgColor=dark); summary["A1"].alignment=Alignment(horizontal="center"); summary.row_dimensions[1].height=34
     summary.merge_cells("A2:H2"); summary["A2"]=f"Salary Month: {month}  |  All active employees included"; summary["A2"].font=Font(italic=True,color=grey); summary["A2"].alignment=Alignment(horizontal="center")
@@ -1014,6 +1015,7 @@ def payroll_xlsx(request: Request, month: str):
     summary.merge_cells("A14:H14"); summary["A14"]="Formula: Fixed Salary ÷ Scheduled Days × Absent Days = Absent Deduction; Paid leave is not deducted."; summary["A14"].alignment=Alignment(horizontal="center",wrap_text=True); summary["A14"].font=Font(italic=True,color=grey)
     summary.sheet_view.showGridLines=False
     for col in range(1,9): summary.column_dimensions[get_column_letter(col)].width=17
+    summary.page_setup.orientation="landscape"; summary.page_setup.paperSize=summary.PAPERSIZE_A4; summary.page_setup.fitToWidth=1; summary.page_setup.fitToHeight=1; summary.print_area="A1:H14"; summary.sheet_properties.pageSetUpPr.fitToPage=True; summary.sheet_properties.pageSetUpPr.autoPageBreaks=False; summary.print_options.horizontalCentered=True; summary.print_options.verticalCentered=True; summary.page_margins=PageMargins(left=0.35,right=0.35,top=0.5,bottom=0.5,header=0.1,footer=0.1)
     out=io.BytesIO(); wb.save(out); out.seek(0)
     return StreamingResponse(out,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payroll-{month}.xlsx"})
 
