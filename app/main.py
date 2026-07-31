@@ -24,7 +24,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.3.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.4.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -205,7 +205,7 @@ def startup():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.3.0"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.4.0"}
 
 
 @app.get("/ready")
@@ -217,7 +217,7 @@ def ready():
         "database": database_kind(),
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
-        "version": "9.3.0",
+        "version": "9.4.0",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 

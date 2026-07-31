@@ -134,6 +134,16 @@ def save_face_reference(employee, media_id, image_bytes):
             score = best_match(embedding, [json.loads(r["embedding"]) for r in rows])
             if score < 0.42:
                 return "❌ আগের selfie-এর সঙ্গে এই মুখ মিলছে না। একই employee নিজের selfie দিন।"
+            if score > 0.985:
+                return "⚠️ একই বা প্রায় একই selfie আবার পাঠানো হয়েছে। ফোন/মুখের angle সামান্য বদলে নতুন live selfie দিন।"
+
+        # Stop one person's face being registered under another employee account.
+        other_rows = c.execute("SELECT employee_id,embedding FROM face_samples WHERE employee_id<>?", (employee["id"],)).fetchall()
+        if other_rows:
+            duplicate_score = best_match(embedding, [json.loads(r["embedding"]) for r in other_rows])
+            if duplicate_score >= 0.62:
+                return "🚫 এই মুখটি অন্য employee profile-এ আগে থেকেই নিবন্ধিত। HR/Admin-এর সঙ্গে যোগাযোগ করুন।"
+
         c.execute("INSERT INTO face_samples(employee_id,media_id,embedding,quality) VALUES(?,?,?,?)", (employee["id"], media_id, json.dumps(embedding), quality))
         count = c.execute("SELECT COUNT(*) c FROM face_samples WHERE employee_id=?", (employee["id"],)).fetchone()["c"]
         existing = c.execute("SELECT id FROM face_profiles WHERE employee_id=?", (employee["id"],)).fetchone()

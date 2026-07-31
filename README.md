@@ -122,3 +122,12 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - HR comments, goals and review history
 - Dynamic `performance_view` and `performance_manage` permissions
 - No Documents module
+
+## v9.4 Face Detection Accuracy Hotfix
+
+- Fixed a YuNet issue where one selfie could be reported as 2–4 faces.
+- Added landmark validation and non-maximum suppression for overlapping detections.
+- Tiny background faces/posters no longer reject a close single-person selfie.
+- A real second person is still rejected when the second face is confidently detected and materially sized.
+- Duplicate registration selfies are rejected; employees must provide genuinely different live angles.
+- The same face cannot be registered under another employee profile without HR/Admin intervention.
