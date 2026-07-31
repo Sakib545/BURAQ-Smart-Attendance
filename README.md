@@ -36,3 +36,8 @@ v4.3-এ `/health` database provisioning-এর জন্য 503 দেয় ন�
 - Existing WhatsApp registrations are preserved during startup sync.
 - The obsolete `BRQ001` demo record and example were removed.
 - Efad's corrected phone number is included: `01706759945`.
+
+
+## v5.1.2 — Approval Notification
+
+Admin dashboard থেকে pending registration approve করলে employee-এর WhatsApp-এ সঙ্গে সঙ্গে confirmation message যায়। Approval database-এ save হয়; WhatsApp API সাময়িকভাবে ব্যর্থ হলেও approval বাতিল হয় না এবং error log-এ লেখা হয়।

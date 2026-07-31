@@ -21,7 +21,7 @@ from app.whatsapp import handle, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="5.1.1", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="5.1.2", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 CSS = """
@@ -65,7 +65,7 @@ def health():
     # dashboard explains any optional database/configuration warning.
     return {
         "ok": True,
-        "version": "5.1.1",
+        "version": "5.1.2",
         "database": database_kind(),
         "database_connected": database_ok(),
         "whatsapp_configured": configured(),
@@ -177,14 +177,43 @@ def pending_page(request: Request):
     return layout("Approvals", f"<div class='wrap'><div class='top'><div><div class='brand'>Registration Approvals</div><div class='sub'>One-click approval</div></div><a class='btn secondary' href='/dashboard'>Dashboard</a></div><div class='card'><table><thead><tr><th>Staff ID</th><th>Name</th><th>WhatsApp</th><th></th><th></th></tr></thead><tbody>{trs}</tbody></table></div></div>")
 
 @app.post("/pending/{pending_id}/approve")
-def approve_pending(request: Request, pending_id: int):
+async def approve_pending(request: Request, pending_id: int):
     require_login(request)
+    phone = None
+    employee_name = "Employee"
+    staff_id = ""
     with get_db() as c:
-        row=c.execute("SELECT * FROM pending_registrations WHERE id=? AND status='pending'", (pending_id,)).fetchone()
+        row = c.execute(
+            "SELECT p.*,e.name,e.staff_id FROM pending_registrations p "
+            "JOIN employees e ON e.id=p.employee_id "
+            "WHERE p.id=? AND p.status='pending'",
+            (pending_id,),
+        ).fetchone()
         if row:
-            c.execute("UPDATE employees SET whatsapp_phone=?,registration_status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?", (row['whatsapp_phone'],row['employee_id']))
-            c.execute("UPDATE pending_registrations SET status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?", (pending_id,))
-    return RedirectResponse("/pending",303)
+            phone = row["whatsapp_phone"]
+            employee_name = row["name"]
+            staff_id = row["staff_id"]
+            c.execute(
+                "UPDATE employees SET whatsapp_phone=?,registration_status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (phone, row["employee_id"]),
+            )
+            c.execute(
+                "UPDATE pending_registrations SET status='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (pending_id,),
+            )
+
+    if phone:
+        message = (
+            f"✅ আপনার BURAQ Attendance registration Admin approve করেছেন।\n\n"
+            f"নাম: {employee_name}\n"
+            f"Staff ID: {staff_id}\n\n"
+            "এখন Hi লিখে Attendance Menu খুলুন।"
+        )
+        result = await send_text(phone, message)
+        if not result.get("sent"):
+            logger.error("Approval saved but WhatsApp notification failed for %s: %s", phone, result)
+
+    return RedirectResponse("/pending", 303)
 
 @app.post("/pending/{pending_id}/reject")
 def reject_pending(request: Request, pending_id: int):
