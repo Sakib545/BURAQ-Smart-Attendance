@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from html import escape
 
@@ -22,7 +22,7 @@ from app.whatsapp import handle, send_approval_flow, send_text
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="8.2.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="8.3.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 CSS = """
@@ -43,6 +43,8 @@ def layout(title: str, body: str, request: Request | None = None, active: str = 
             ("dashboard","Dashboard","/dashboard","dashboard_view"),
             ("employees","Employees","/employees","employees_view"),
             ("pending","Approvals","/pending","approvals_view"),
+            ("reports","Reports","/reports","reports_view"),
+            ("operations","HR Operations","/hr-operations","leave_view"),
             ("hr","User Accounts","/hr-accounts","user_accounts_view"),
             ("audit","Activity Logs","/audit-logs","audit_view"),
             ("settings","Settings","/settings","settings_view"),
@@ -78,6 +80,11 @@ PERMISSION_CATALOG = {
     "approvals_manage": ("Approvals: Approve/Reject", "Registration approve/reject করবে"),
     "reports_view": ("Reports: View", "Attendance report দেখবে"),
     "reports_export": ("Reports: Export", "CSV/PDF/Excel export করবে"),
+    "leave_view": ("Leave: View", "Leave এবং correction request দেখবে"),
+    "leave_manage": ("Leave: Approve/Reject", "Leave ও correction approve/reject করবে"),
+    "attendance_edit": ("Attendance: Correct", "Attendance correction request করবে"),
+    "shift_manage": ("Shift Management", "Shift manage করবে"),
+    "department_manage": ("Department Management", "Department manage করবে"),
     "audit_view": ("Audit Log: View", "Activity log দেখবে"),
     "settings_view": ("Settings: View", "সাধারণ settings page দেখবে"),
     "whatsapp_settings": ("WhatsApp Settings", "Token, Phone ID ও Webhook দেখবে/পরিবর্তন করবে"),
@@ -85,10 +92,10 @@ PERMISSION_CATALOG = {
     "user_accounts_manage": ("User Accounts: Manage", "Admin/HR account create, disable বা delete করবে"),
 }
 DEFAULT_ROLE_PERMISSIONS = {
-    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","face_reset","approvals_view","approvals_manage","reports_view","reports_export","audit_view"},
-    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","face_reset","approvals_view","approvals_manage","reports_view","reports_export","audit_view"},
-    "hr_executive": {"dashboard_view","employees_view","employees_add","employees_edit","approvals_view","approvals_manage","reports_view","reports_export"},
-    "hr_officer": {"dashboard_view","employees_view","reports_view"},
+    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","face_reset","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","face_reset","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "hr_executive": {"dashboard_view","employees_view","employees_add","employees_edit","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit"},
+    "hr_officer": {"dashboard_view","employees_view","reports_view","leave_view"},
     "viewer": {"dashboard_view","reports_view"},
 }
 
@@ -537,6 +544,148 @@ def audit_logs_page(request: Request):
         rows=c.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 300").fetchall()
     trs=''.join(f"<tr><td>{escape(str(r['created_at']))}</td><td><b>{escape(r['actor_name'] or r['actor_type'])}</b><div class='sub'>{escape(r['actor_type'])}</div></td><td>{escape(r['action'])}</td><td>{escape((r['target_type'] or '')+' '+(r['target_id'] or ''))}</td><td>{escape(r['details'] or '')}</td><td>{escape(r['ip_address'] or '')}</td></tr>" for r in rows) or "<tr><td colspan='6'>No activity yet.</td></tr>"
     return layout("Activity Logs",f"<div class='card'><h2>Security & Activity Audit</h2><div style='overflow:auto'><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th><th>IP</th></tr></thead><tbody>{trs}</tbody></table></div></div>",request,"audit")
+
+
+def _attendance_report_rows(start_date: str, end_date: str, status: str = "", department: str = ""):
+    clauses = ["a.work_date>=?", "a.work_date<=?"]
+    params = [start_date, end_date]
+    if status:
+        clauses.append("a.status=?"); params.append(status)
+    if department:
+        clauses.append("e.department=?"); params.append(department)
+    sql = "SELECT a.*,e.staff_id,e.name,e.department,e.shift FROM attendance a JOIN employees e ON e.id=a.employee_id WHERE " + " AND ".join(clauses) + " ORDER BY a.work_date DESC,e.staff_id"
+    with get_db() as c:
+        return c.execute(sql, params).fetchall()
+
+@app.get("/reports", response_class=HTMLResponse)
+def reports_page(request: Request, start_date: str = "", end_date: str = "", status: str = "", department: str = ""):
+    require_permission(request, "reports_view")
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    start_date = start_date or today.replace(day=1).isoformat(); end_date = end_date or today.isoformat()
+    rows = _attendance_report_rows(start_date, end_date, status, department)
+    with get_db() as c:
+        deps = c.execute("SELECT DISTINCT department FROM employees WHERE department IS NOT NULL AND department<>'' ORDER BY department").fetchall()
+    dep_options = ''.join(f"<option value='{escape(d['department'])}' {'selected' if department==d['department'] else ''}>{escape(d['department'])}</option>" for d in deps)
+    table_rows = ''.join(f"<tr><td>{escape(r['work_date'])}</td><td><b>{escape(r['staff_id'])}</b><div class='sub'>{escape(r['name'])}</div></td><td>{escape(r['department'] or '-')}</td><td>{escape(r['shift'])}</td><td>{escape((r['check_in'] or '-')[11:16] if r['check_in'] else '-')}</td><td>{escape((r['check_out'] or '-')[11:16] if r['check_out'] else '-')}</td><td>{r['late_minutes']}m</td><td>{r['overtime_minutes']}m</td><td>{escape(r['status'])}</td></tr>" for r in rows) or "<tr><td colspan='9'>No records found.</td></tr>"
+    q=f"start_date={start_date}&end_date={end_date}&status={status}&department={department}"
+    exports=(f"<a class='btn secondary' href='/reports/export.csv?{q}'>CSV</a><a class='btn secondary' href='/reports/export.xlsx?{q}'>Excel</a><a class='btn secondary' href='/reports/export.pdf?{q}'>PDF</a>" if has_permission(request,'reports_export') else '')
+    body=f"""<div class='card'><form method='get'><div class='grid'><div><label>From</label><input type='date' name='start_date' value='{start_date}'></div><div><label>To</label><input type='date' name='end_date' value='{end_date}'></div><div><label>Status</label><select name='status'><option value=''>All</option><option value='present' {'selected' if status=='present' else ''}>Present</option><option value='leave' {'selected' if status=='leave' else ''}>Leave</option><option value='absent' {'selected' if status=='absent' else ''}>Absent</option></select></div><div><label>Department</label><select name='department'><option value=''>All</option>{dep_options}</select></div></div><div class='actions'><button class='btn'>Apply</button>{exports}</div></form></div><div class='section-gap'></div><div class='grid'><div class='card'><div class='sub'>Records</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Late Records</div><div class='metric'>{sum(1 for r in rows if r['late_minutes']>0)}</div></div><div class='card'><div class='sub'>Overtime Minutes</div><div class='metric'>{sum(r['overtime_minutes'] for r in rows)}</div></div><div class='card'><div class='sub'>Leave Records</div><div class='metric'>{sum(1 for r in rows if r['status']=='leave')}</div></div></div><div class='section-gap'></div><div class='card'><h2>Attendance Report</h2><div style='overflow:auto'><table><thead><tr><th>Date</th><th>Employee</th><th>Department</th><th>Shift</th><th>In</th><th>Out</th><th>Late</th><th>OT</th><th>Status</th></tr></thead><tbody>{table_rows}</tbody></table></div></div>"""
+    return layout("Attendance Reports", body, request, "reports")
+
+@app.get("/reports/export.csv")
+def report_csv(request: Request, start_date: str, end_date: str, status: str = "", department: str = ""):
+    require_permission(request,"reports_export"); rows=_attendance_report_rows(start_date,end_date,status,department)
+    out=io.StringIO(); w=csv.writer(out); w.writerow(["Date","Staff ID","Name","Department","Shift","Check In","Check Out","Late","Early Leave","Overtime","Status"])
+    for r in rows: w.writerow([r[k] for k in ["work_date","staff_id","name","department","shift","check_in","check_out","late_minutes","early_leave_minutes","overtime_minutes","status"]])
+    return StreamingResponse(io.BytesIO(out.getvalue().encode("utf-8-sig")),media_type="text/csv",headers={"Content-Disposition":f"attachment; filename=BURAQ-{start_date}-to-{end_date}.csv"})
+
+@app.get("/reports/export.xlsx")
+def report_xlsx(request: Request, start_date: str, end_date: str, status: str = "", department: str = ""):
+    require_permission(request,"reports_export")
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    rows=_attendance_report_rows(start_date,end_date,status,department); wb=Workbook(); ws=wb.active; ws.title="Attendance"
+    headers=["Date","Staff ID","Name","Department","Shift","Check In","Check Out","Late","Early Leave","Overtime","Status"]; ws.append(headers)
+    for c in ws[1]: c.font=Font(bold=True,color="FFFFFF"); c.fill=PatternFill("solid",fgColor="087F5B")
+    for r in rows: ws.append([r[k] for k in ["work_date","staff_id","name","department","shift","check_in","check_out","late_minutes","early_leave_minutes","overtime_minutes","status"]])
+    for col in ws.columns: ws.column_dimensions[col[0].column_letter].width=min(max(len(str(x.value or "")) for x in col)+2,30)
+    out=io.BytesIO(); wb.save(out); out.seek(0)
+    return StreamingResponse(out,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f"attachment; filename=BURAQ-{start_date}-to-{end_date}.xlsx"})
+
+@app.get("/reports/export.pdf")
+def report_pdf(request: Request, start_date: str, end_date: str, status: str = "", department: str = ""):
+    require_permission(request,"reports_export")
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    rows=_attendance_report_rows(start_date,end_date,status,department); out=io.BytesIO()
+    data=[["Date","Staff ID","Name","Department","Shift","In","Out","Late","OT","Status"]]+[[str(r[k] or "") for k in ["work_date","staff_id","name","department","shift","check_in","check_out","late_minutes","overtime_minutes","status"]] for r in rows]
+    doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=18,rightMargin=18,topMargin=18,bottomMargin=18); styles=getSampleStyleSheet(); table=Table(data,repeatRows=1)
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTSIZE",(0,0),(-1,-1),7),("GRID",(0,0),(-1,-1),.3,colors.grey)]))
+    doc.build([Paragraph("BURAQ Attendance Report",styles["Title"]),Paragraph(f"{start_date} to {end_date}",styles["Normal"]),Spacer(1,8),table]); out.seek(0)
+    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-{start_date}-to-{end_date}.pdf"})
+
+@app.get("/hr-operations", response_class=HTMLResponse)
+def operations_page(request: Request, saved: str = ""):
+    require_permission(request,"leave_view")
+    with get_db() as c:
+        employees=c.execute("SELECT id,staff_id,name FROM employees ORDER BY name").fetchall()
+        leaves=c.execute("SELECT l.*,e.staff_id,e.name FROM leave_requests l JOIN employees e ON e.id=l.employee_id ORDER BY l.id DESC LIMIT 200").fetchall()
+        corrections=c.execute("SELECT x.*,e.staff_id,e.name FROM attendance_corrections x JOIN employees e ON e.id=x.employee_id ORDER BY x.id DESC LIMIT 200").fetchall()
+        shifts=c.execute("SELECT * FROM shifts ORDER BY name").fetchall(); deps=c.execute("SELECT * FROM departments ORDER BY name").fetchall()
+    opts=''.join(f"<option value='{e['id']}'>{escape(e['staff_id'])} — {escape(e['name'])}</option>" for e in employees)
+    can_decide=has_permission(request,"leave_manage")
+    leave_rows=[]
+    for r in leaves:
+        actions="-"
+        if can_decide and r['status']=='pending': actions=f"<div class='actions'><form method='post' action='/leave/{r['id']}/approve'><button class='btn'>Approve</button></form><form method='post' action='/leave/{r['id']}/reject'><button class='btn danger'>Reject</button></form></div>"
+        leave_rows.append(f"<tr><td>{escape(r['staff_id'])}<div class='sub'>{escape(r['name'])}</div></td><td>{escape(r['leave_type'])}</td><td>{escape(r['start_date'])} → {escape(r['end_date'])}</td><td>{escape(r['reason'] or '')}</td><td>{escape(r['status'])}</td><td>{actions}</td></tr>")
+    correction_rows=[]
+    for r in corrections:
+        actions="-"
+        if can_decide and r['status']=='pending': actions=f"<div class='actions'><form method='post' action='/correction/{r['id']}/approve'><button class='btn'>Apply</button></form><form method='post' action='/correction/{r['id']}/reject'><button class='btn danger'>Reject</button></form></div>"
+        correction_rows.append(f"<tr><td>{escape(r['staff_id'])}<div class='sub'>{escape(r['name'])}</div></td><td>{escape(r['work_date'])}</td><td>{escape(r['requested_check_in'] or '-')}</td><td>{escape(r['requested_check_out'] or '-')}</td><td>{escape(r['reason'])}</td><td>{escape(r['status'])}</td><td>{actions}</td></tr>")
+    correction_form=""
+    if has_permission(request,"attendance_edit"):
+        correction_form=f"<div class='card'><h2>Attendance Correction</h2><form method='post' action='/correction'><label>Employee</label><select name='employee_id'>{opts}</select><label>Work Date</label><input type='date' name='work_date' required><label>Check In (HH:MM)</label><input name='check_in'><label>Check Out (HH:MM)</label><input name='check_out'><label>Reason</label><textarea name='reason' required></textarea><button class='btn'>Submit</button></form></div>"
+    management=""
+    if has_permission(request,"shift_manage") or has_permission(request,"department_manage"):
+        shift_form=("<div class='card'><h2>Shifts</h2><form method='post' action='/shifts'><label>Name</label><input name='name' required><label>Start</label><input type='time' name='start_time' required><label>End</label><input type='time' name='end_time' required><button class='btn'>Save Shift</button></form><p class='sub'>"+", ".join(escape(x['name']) for x in shifts)+"</p></div>") if has_permission(request,"shift_manage") else ""
+        dep_form=("<div class='card'><h2>Departments</h2><form method='post' action='/departments'><label>Name</label><input name='name' required><button class='btn'>Save Department</button></form><p class='sub'>"+", ".join(escape(x['name']) for x in deps)+"</p></div>") if has_permission(request,"department_manage") else ""
+        management=f"<div class='section-gap'></div><div class='two'>{shift_form}{dep_form}</div>"
+    body=("<div class='notice'>Saved successfully.</div>" if saved else "")+f"<div class='two'><div class='card'><h2>Leave Request</h2><form method='post' action='/leave'><label>Employee</label><select name='employee_id'>{opts}</select><label>Type</label><select name='leave_type'><option>Casual</option><option>Sick</option><option>Annual</option><option>Unpaid</option></select><label>Start</label><input type='date' name='start_date' required><label>End</label><input type='date' name='end_date' required><label>Reason</label><textarea name='reason'></textarea><button class='btn'>Submit</button></form></div>{correction_form}</div>{management}<div class='section-gap'></div><div class='card'><h2>Leave Requests</h2><div style='overflow:auto'><table><thead><tr><th>Employee</th><th>Type</th><th>Dates</th><th>Reason</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(leave_rows) or '<tr><td colspan=6>No requests.</td></tr>'}</tbody></table></div></div><div class='section-gap'></div><div class='card'><h2>Attendance Corrections</h2><div style='overflow:auto'><table><thead><tr><th>Employee</th><th>Date</th><th>In</th><th>Out</th><th>Reason</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(correction_rows) or '<tr><td colspan=7>No requests.</td></tr>'}</tbody></table></div></div>"
+    return layout("HR Operations",body,request,"operations")
+
+@app.post("/leave")
+def create_leave(request: Request, employee_id: int=Form(...), leave_type: str=Form(...), start_date: str=Form(...), end_date: str=Form(...), reason: str=Form("")):
+    require_permission(request,"leave_view")
+    with get_db() as c: c.execute("INSERT INTO leave_requests(employee_id,leave_type,start_date,end_date,reason,requested_by) VALUES(?,?,?,?,?,?)",(employee_id,leave_type,start_date,end_date,reason,str(request.session.get('hr_id') or 'super_admin')))
+    audit(request,"create","leave_request",str(employee_id),f"{start_date} to {end_date}"); return RedirectResponse("/hr-operations?saved=1",303)
+
+@app.post("/leave/{request_id}/{action}")
+def decide_leave(request: Request, request_id: int, action: str):
+    require_permission(request,"leave_manage"); status="approved" if action=="approve" else "rejected" if action=="reject" else None
+    if not status: raise HTTPException(400)
+    with get_db() as c:
+        row=c.execute("SELECT * FROM leave_requests WHERE id=?",(request_id,)).fetchone(); c.execute("UPDATE leave_requests SET status=?,decided_by=?,decided_at=CURRENT_TIMESTAMP WHERE id=?",(status,str(request.session.get('hr_id') or 'super_admin'),request_id))
+        if row and status=="approved":
+            d=datetime.fromisoformat(row['start_date']).date(); end=datetime.fromisoformat(row['end_date']).date()
+            while d<=end:
+                c.execute("INSERT INTO attendance(employee_id,work_date,status,source) VALUES(?,?,?,?) ON CONFLICT(employee_id,work_date) DO UPDATE SET status=excluded.status,source=excluded.source,updated_at=CURRENT_TIMESTAMP",(row['employee_id'],d.isoformat(),'leave','hr')); d+=timedelta(days=1)
+    audit(request,status,"leave_request",str(request_id),""); return RedirectResponse("/hr-operations?saved=1",303)
+
+@app.post("/correction")
+def create_correction(request: Request, employee_id: int=Form(...), work_date: str=Form(...), check_in: str=Form(""), check_out: str=Form(""), reason: str=Form(...)):
+    require_permission(request,"attendance_edit")
+    with get_db() as c: c.execute("INSERT INTO attendance_corrections(employee_id,work_date,requested_check_in,requested_check_out,reason,requested_by) VALUES(?,?,?,?,?,?)",(employee_id,work_date,check_in or None,check_out or None,reason,str(request.session.get('hr_id') or 'super_admin')))
+    audit(request,"create","attendance_correction",str(employee_id),work_date); return RedirectResponse("/hr-operations?saved=1",303)
+
+@app.post("/correction/{request_id}/{action}")
+def decide_correction(request: Request, request_id: int, action: str):
+    require_permission(request,"leave_manage"); status="approved" if action=="approve" else "rejected" if action=="reject" else None
+    if not status: raise HTTPException(400)
+    with get_db() as c:
+        row=c.execute("SELECT * FROM attendance_corrections WHERE id=?",(request_id,)).fetchone()
+        if row and status=="approved":
+            ci=row['requested_check_in']; co=row['requested_check_out']
+            if ci and len(ci)<=5: ci=f"{row['work_date']}T{ci}:00"
+            if co and len(co)<=5: co=f"{row['work_date']}T{co}:00"
+            c.execute("INSERT INTO attendance(employee_id,work_date,check_in,check_out,status,source) VALUES(?,?,?,?,?,?) ON CONFLICT(employee_id,work_date) DO UPDATE SET check_in=COALESCE(excluded.check_in,attendance.check_in),check_out=COALESCE(excluded.check_out,attendance.check_out),source='hr_correction',updated_at=CURRENT_TIMESTAMP",(row['employee_id'],row['work_date'],ci,co,'present','hr_correction'))
+        c.execute("UPDATE attendance_corrections SET status=?,decided_by=?,decided_at=CURRENT_TIMESTAMP WHERE id=?",(status,str(request.session.get('hr_id') or 'super_admin'),request_id))
+    audit(request,status,"attendance_correction",str(request_id),""); return RedirectResponse("/hr-operations?saved=1",303)
+
+@app.post("/shifts")
+def save_shift(request: Request, name: str=Form(...), start_time: str=Form(...), end_time: str=Form(...)):
+    require_permission(request,"shift_manage")
+    with get_db() as c: c.execute("INSERT INTO shifts(name,start_time,end_time) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time",(name.strip(),start_time,end_time))
+    audit(request,"save","shift",name,f"{start_time}-{end_time}"); return RedirectResponse("/hr-operations?saved=1",303)
+
+@app.post("/departments")
+def save_department(request: Request, name: str=Form(...)):
+    require_permission(request,"department_manage")
+    with get_db() as c: c.execute("INSERT INTO departments(name) VALUES(?) ON CONFLICT(name) DO NOTHING",(name.strip(),))
+    audit(request,"save","department",name,""); return RedirectResponse("/hr-operations?saved=1",303)
 
 @app.get("/webhook/whatsapp", response_class=PlainTextResponse)
 def verify(hub_mode: str | None = Query(None, alias="hub.mode"), hub_verify_token: str | None = Query(None, alias="hub.verify_token"), hub_challenge: str | None = Query(None, alias="hub.challenge")):

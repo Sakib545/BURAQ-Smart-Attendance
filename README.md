@@ -52,3 +52,7 @@ The face/liveness system remains the implementation from the preceding build. Be
 Super Admin can open **User Accounts → Permissions** and choose exactly what each Admin/HR account can see or do. Menus are hidden when access is not granted, and direct URL/API access returns HTTP 403.
 
 Granular permissions include dashboard, employee view/add/edit/delete, Face AI reset, approval view/manage, report view/export, audit logs, general settings, WhatsApp credentials/webhook, and user-account view/manage. Existing accounts keep safe role defaults until the Super Admin saves a custom permission set.
+
+
+## v8.3
+Attendance reports (CSV/Excel/PDF), leave approvals, attendance corrections, shift and department management with dynamic permissions.
