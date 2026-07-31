@@ -230,6 +230,16 @@ def apply_feature_migrations() -> None:
             updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""",
         """CREATE UNIQUE INDEX IF NOT EXISTS ux_hr_accounts_email_lower ON hr_accounts(LOWER(email))""",
+        """CREATE TABLE IF NOT EXISTS account_permissions(
+            account_id INTEGER NOT NULL, permission TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(account_id, permission),
+            FOREIGN KEY(account_id) REFERENCES hr_accounts(id) ON DELETE CASCADE
+        )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS account_permissions(
+            account_id BIGINT NOT NULL REFERENCES hr_accounts(id) ON DELETE CASCADE,
+            permission TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(account_id, permission)
+        )""",
         """CREATE TABLE IF NOT EXISTS audit_logs(
             id INTEGER PRIMARY KEY AUTOINCREMENT, actor_type TEXT NOT NULL, actor_id TEXT,
             actor_name TEXT, action TEXT NOT NULL, target_type TEXT, target_id TEXT,
