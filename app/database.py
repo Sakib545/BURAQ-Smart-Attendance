@@ -476,7 +476,7 @@ def apply_face_ai_migrations() -> None:
             liveness_score {real} NOT NULL DEFAULT 0,
             liveness_verdict TEXT,
             liveness_detail TEXT,
-            liveness_model {"INTEGER" if sqlite else "BOOLEAN"} NOT NULL DEFAULT 0,
+            liveness_model {"INTEGER NOT NULL DEFAULT 0" if sqlite else "BOOLEAN NOT NULL DEFAULT FALSE"},
             elapsed_ms {real} NOT NULL DEFAULT 0,
             created_at {"TEXT" if sqlite else "TIMESTAMPTZ"} NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""",
