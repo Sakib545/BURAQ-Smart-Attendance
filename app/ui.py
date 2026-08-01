@@ -139,6 +139,7 @@ NAV_BLUEPRINT: list[tuple[str, list[tuple[str, str, str, str, str]]]] = [
         ("performance", "Performance", "/performance", "trending-up", "performance_view"),
     ]),
     ("Administration", [
+        ("duplicates", "Selfie review", "/duplicates", "search", "approvals_view"),
         ("reports", "Reports", "/reports", "file-text", "reports_view"),
         ("users", "User accounts", "/hr-accounts", "shield", "user_accounts_view"),
         ("settings", "Settings", "/settings", "sliders", "settings_view"),
@@ -154,7 +155,6 @@ _COMPOUND = {
 # Route "active" keys that belong to a parent nav entry.
 ACTIVE_ALIASES = {
     "pending": "duty",
-    "duplicates": "employees",
     "operations": "leave",
     "hr": "users",
     "audit": "users",
@@ -162,14 +162,16 @@ ACTIVE_ALIASES = {
 }
 
 
-def build_nav(perm: Callable[[str], bool]) -> list[dict]:
+def build_nav(perm: Callable[[str], bool], badges: dict[str, int] | None = None) -> list[dict]:
+    badges = badges or {}
     groups = []
     for label, entries in NAV_BLUEPRINT:
         items = []
         for key, text, url, ic, flag in entries:
             allowed = any(perm(p) for p in _COMPOUND[flag]) if flag in _COMPOUND else perm(flag)
             if allowed:
-                items.append({"key": key, "label": text, "url": url, "icon": ic})
+                items.append({"key": key, "label": text, "url": url, "icon": ic,
+                              "badge": int(badges.get(key) or 0)})
         groups.append({"label": label, "entries": items})
     return groups
 

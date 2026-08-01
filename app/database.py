@@ -476,7 +476,7 @@ def apply_face_ai_migrations() -> None:
             liveness_score {real} NOT NULL DEFAULT 0,
             liveness_verdict TEXT,
             liveness_detail TEXT,
-            liveness_model {"INTEGER NOT NULL DEFAULT 0" if sqlite else "BOOLEAN NOT NULL DEFAULT FALSE"},
+            liveness_model {"INTEGER" if sqlite else "BOOLEAN"} NOT NULL DEFAULT 0,
             elapsed_ms {real} NOT NULL DEFAULT 0,
             created_at {"TEXT" if sqlite else "TIMESTAMPTZ"} NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""",
@@ -486,4 +486,8 @@ def apply_face_ai_migrations() -> None:
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
+    existing_samples = {col["name"] for col in inspect(engine).get_columns("face_samples")}
+    if "source" not in existing_samples:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE face_samples ADD COLUMN source TEXT NOT NULL DEFAULT 'enroll'"))
     mark_migration("v9.20-face-ai-telemetry")

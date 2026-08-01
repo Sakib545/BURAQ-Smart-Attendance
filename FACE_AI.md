@@ -92,6 +92,31 @@ counts against the passive signals; `ANTISPOOF_INPUT` sets the crop size.
 If the file is absent or fails to load, the module silently falls back to the
 passive signals. Deployment never breaks because a model is missing.
 
+## Adaptive gallery
+
+A profile built from three registration selfies slowly stops matching the
+person — beards, glasses, weight, ageing. Rather than asking everyone to
+re-register every few months, a verification that clears a much higher bar than
+normal acceptance is stored as an extra reference sample.
+
+All of these must hold before a selfie joins the gallery:
+
+| Condition | Default |
+| --- | --- |
+| match score | `>= FACE_ADAPT_MIN_SCORE` (0.62), well above the 0.48 accept line |
+| quality | `>= FACE_ADAPT_MIN_QUALITY` (70) |
+| margin over the next employee | `>= FACE_ADAPT_MIN_MARGIN` (0.12), double the normal requirement |
+| liveness verdict | `live`, not `review` |
+| not near-identical | score `<= 0.97`, otherwise it adds nothing |
+
+The gallery is capped at `FACE_GALLERY_MAX` (8). When it overflows, the
+lowest-quality *automatic* sample is dropped; the original enrolment samples are
+never evicted, so a bad automatic sample can never take the profile over.
+Samples carry a `source` column (`enroll` or `auto`) and every addition is
+logged as an `adapt` event.
+
+Set `FACE_ADAPT_ENABLED=false` to turn this off.
+
 ## Telemetry
 
 Every enrolment and verification writes to `face_events`: scores, margin,
@@ -132,5 +157,6 @@ threshold moves. Until it has a few weeks of real traffic, any change to
   poses within one session if the risk justifies it.
 - The impostor gallery is loaded in full. At a few thousand employees this
   should move to a vector index rather than a linear scan.
-- There is no template updating. Beards, glasses and time will slowly raise
-  false rejections; re-enrolment is currently manual through the HR panel.
+- The adaptive gallery only grows from selfies that clear a high bar. Someone
+  whose appearance changes abruptly (a full beard shaved overnight) may still
+  need manual re-enrolment.

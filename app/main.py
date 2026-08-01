@@ -57,13 +57,26 @@ async def request_context(request: Request, call_next):
     logger.info("request_id=%s method=%s path=%s status=%s duration_ms=%s", request_id, request.method, request.url.path, response.status_code, duration_ms)
     return response
 
+def nav_badges(request: Request) -> dict:
+    """Counts shown next to sidebar items. Never allowed to break a page."""
+    if not has_permission(request, "approvals_view"):
+        return {}
+    try:
+        with get_db() as c:
+            waiting = c.execute("SELECT COUNT(*) c FROM attendance_fingerprints WHERE review_status='pending'").fetchone()["c"]
+        return {"duplicates": int(waiting or 0)}
+    except Exception:
+        logger.warning("nav badge count failed", exc_info=True)
+        return {}
+
+
 def layout(title: str, body: str, request: Request | None = None, active: str = ""):
     """Wrap route markup in the application shell."""
     chrome = request is not None and logged_in(request)
     nav_groups: list = []
     user_name = role_label = today_line = ""
     if chrome:
-        nav_groups = ui.build_nav(lambda flag: has_permission(request, flag))
+        nav_groups = ui.build_nav(lambda flag: has_permission(request, flag), nav_badges(request))
         user_name = str(request.session.get("user_name", "Admin"))
         role_label = str(request.session.get("role", "super_admin")).replace("_", " ").title()
         today_line = datetime.now(ZoneInfo(settings.timezone)).strftime("%a %d %b, %I:%M %p")
@@ -478,6 +491,7 @@ def dashboard(request: Request):
         on_leave = int(c.execute("SELECT COUNT(DISTINCT employee_id) c FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?", (today,today)).fetchone()["c"] or 0)
         pending_leave = int(c.execute("SELECT COUNT(*) c FROM leave_requests WHERE status='pending'").fetchone()["c"] or 0)
         pending_correction = int(c.execute("SELECT COUNT(*) c FROM attendance_corrections WHERE status='pending'").fetchone()["c"] or 0)
+        pending_selfie = int(c.execute("SELECT COUNT(*) c FROM attendance_fingerprints WHERE review_status='pending'").fetchone()["c"] or 0)
         week_counts=c.execute("SELECT work_date,COUNT(*) c FROM attendance WHERE work_date>=? AND work_date<=? AND check_in IS NOT NULL GROUP BY work_date",(week_days[0].isoformat(),week_days[-1].isoformat())).fetchall()
         live_rows=c.execute("""SELECT e.name,e.staff_id,a.check_in,a.check_out,
             CASE WHEN l.employee_id IS NOT NULL THEN 'leave' WHEN a.check_in IS NOT NULL THEN 'present' ELSE 'absent' END status
@@ -496,7 +510,7 @@ def dashboard(request: Request):
         status=str(r['status']); cls={'present':'status-present','leave':'status-leave'}.get(status,'status-absent')
         live_table += f"<tr><td><div class='kpi-row'><span class='avatar'>{escape(initials)}</span><span><b>{escape(str(r['name']))}</b><div class='sub'>{escape(str(r['staff_id']))}</div></span></div></td><td><span class='status-badge {cls}'>{status.title()}</span></td><td>{escape(str(r['check_in'] or '—'))}</td><td>{escape(str(r['check_out'] or '—'))}</td></tr>"
     readiness_pct=attendance_rate
-    pending_total=pending_registration+pending_leave+pending_correction
+    pending_total=pending_registration+pending_leave+pending_correction+pending_selfie
     payroll_pending=0
     name=escape(str(request.session.get('user_name','Admin')))
     role=escape(str(request.session.get('role','super_admin')).replace('_',' ').title())
@@ -507,11 +521,13 @@ def dashboard(request: Request):
     if has_permission(request,'leave_view'): quick.append(("/hr-operations","☂","Add Leave"))
     if has_permission(request,'payroll_view'): quick.append(("/payroll", ui.icon("banknote"), "Run Payroll"))
     if has_permission(request,'reports_view'): quick.append(("/reports","◔","View Reports"))
+    if has_permission(request,'approvals_view'): quick.append(("/duplicates?review=pending", ui.icon("search"), "Selfie Review"))
     quick_html=''.join(f"<a href='{url}'><span class='qicon'>{icon}</span><span>{label}</span></a>" for url,icon,label in quick)
     pending_items=[]
     if has_permission(request,'leave_view'): pending_items.append(("/hr-operations","♧","Pending Leaves",f"{pending_leave} leave requests",pending_leave))
     if has_permission(request,'approvals_view'): pending_items.append(("/pending","▣","Pending Approvals",f"{pending_registration} approvals",pending_registration))
     if has_permission(request,'attendance_edit'): pending_items.append(("/hr-operations","▤","Attendance Corrections",f"{pending_correction} correction requests",pending_correction))
+    if has_permission(request,'approvals_view'): pending_items.append(("/duplicates?review=pending", ui.icon("search"), "Selfie Review", f"{pending_selfie} selfie waiting for a decision", pending_selfie))
     if has_permission(request,'payroll_view'): pending_items.append(("/payroll", ui.icon("banknote"), "Payroll Not Prepared",now.strftime('%B %Y'),payroll_pending))
     pending_html=''.join(f"<a class='pending-item' href='{url}'><span class='pending-icon'>{icon}</span><span><b>{title}</b><div class='sub'>{subtitle}</div></span><span class='count-chip'>{count}</span><span>›</span></a>" for url,icon,title,subtitle,count in pending_items)
     body=f"""
@@ -1822,13 +1838,17 @@ def delete_custom_duty(request: Request, duty_id: int):
     return RedirectResponse('/duty-schedules',303)
 
 @app.get("/duplicates")
-def duplicate_analysis(request: Request, decision: str="", review: str=""):
+def duplicate_analysis(request: Request, decision: str="", review: str="", scope: str=""):
     require_permission(request, "approvals_view")
+    # Land on the queue that needs a decision. `scope=all` opens the history.
+    if not decision and not review and scope != "all":
+        review = "pending"
     clauses, params = ["1=1"], []
     if decision in {"accept", "pending", "reject"}: clauses.append("f.decision=?"); params.append(decision)
     if review in {"none", "pending", "approved", "rejected"}: clauses.append("f.review_status=?"); params.append(review)
     with get_db() as c:
-        rows = c.execute("SELECT f.*,e.staff_id,e.name FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id WHERE "+" AND ".join(clauses)+" ORDER BY f.id DESC LIMIT 300", tuple(params)).fetchall()
+        rows = c.execute("SELECT f.*,e.staff_id,e.name FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id WHERE "+" AND ".join(clauses)+" ORDER BY CASE WHEN f.review_status='pending' THEN 0 ELSE 1 END, f.id DESC LIMIT 300", tuple(params)).fetchall()
+        waiting = int(c.execute("SELECT COUNT(*) c FROM attendance_fingerprints WHERE review_status='pending'").fetchone()["c"] or 0)
     items=[]
     can_manage=has_permission(request,"approvals_manage")
     for r in rows:
@@ -1837,9 +1857,21 @@ def duplicate_analysis(request: Request, decision: str="", review: str=""):
         if can_manage and r["review_status"]=="pending":
             controls=f"<form method='post' action='/duplicates/{r['id']}/approve' style='display:inline'><button class='btn'>Approve</button></form> <form method='post' action='/duplicates/{r['id']}/reject' style='display:inline'><button class='btn danger'>Reject</button></form>"
         items.append(f"<tr><td>#{r['id']}</td><td><b>{escape(r['name'])}</b><br><span class='sub'>{escape(r['staff_id'])}</span></td><td>{escape(r['action'])}</td><td><span class='status {state}'>{escape(r['decision'])}</span><br><span class='sub'>{escape(r['review_status'])}</span></td><td><b>{r['duplicate_score']*100:.1f}%</b></td><td>Hash {r['hash_score']*100:.0f}%<br>Face {r['face_score']*100:.0f}%<br>Pose {r['pose_score']*100:.0f}%<br>Landmark {r['landmark_score']*100:.0f}%</td><td>{'#'+str(r['matched_fingerprint_id']) if r['matched_fingerprint_id'] else '—'}</td><td>{escape(str(r['created_at']))}</td><td>{controls}</td></tr>")
-    thresholds=f"Accept &lt; {settings.duplicate_accept_below:.2f} • Pending {settings.duplicate_accept_below:.2f}–{settings.duplicate_reject_at:.2f} • Reject ≥ {settings.duplicate_reject_at:.2f}"
-    body=f"""<div class='hero'><div><div class='eyebrow'>v9.5 Security</div><h2>Duplicate Selfie Analysis</h2><div class='sub'>{thresholds}</div></div><span class='pill'>{len(rows)} records</span></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><select name='decision' style='max-width:180px'><option value=''>All decisions</option><option value='accept'>Accept</option><option value='pending'>Pending</option><option value='reject'>Reject</option></select><select name='review' style='max-width:180px'><option value=''>All reviews</option><option value='pending'>Needs review</option><option value='approved'>Approved</option><option value='rejected'>Rejected</option></select><button class='btn'>Filter</button></form></div><div class='card' style='overflow:auto'><table><thead><tr><th>ID</th><th>Employee</th><th>Action</th><th>Decision</th><th>Score</th><th>Signals</th><th>Matched</th><th>Time</th><th>Review</th></tr></thead><tbody>{''.join(items) or '<tr><td colspan=9>No duplicate analysis found</td></tr>'}</tbody></table></div>"""
-    return layout("Duplicate Analysis", body, request, "duplicates")
+    thresholds=f"Accept &lt; {settings.duplicate_accept_below:.2f} • Review {settings.duplicate_accept_below:.2f}–{settings.duplicate_reject_at:.2f} • Reject ≥ {settings.duplicate_reject_at:.2f}"
+    tabs=[("Needs review", "/duplicates?review=pending", review=="pending" and scope!="all", waiting),
+          ("Approved", "/duplicates?review=approved", review=="approved", None),
+          ("Rejected", "/duplicates?review=rejected", review=="rejected", None),
+          ("All selfies", "/duplicates?scope=all", scope=="all", None)]
+    tab_html="".join(f"<a class='tab{' active' if active else ''}' href='{url}'>{label}{f' ({count})' if count else ''}</a>" for label,url,active,count in tabs)
+    empty="<div class='empty-state'>এই তালিকায় কিছু নেই। নতুন selfie review-এ এলে এখানে দেখা যাবে।</div>"
+    table=f"<div style='overflow:auto'><table><thead><tr><th>ID</th><th>Employee</th><th>Action</th><th>Status</th><th>Score</th><th>Signals</th><th>Matched</th><th>Time</th><th>Decision</th></tr></thead><tbody>{''.join(items)}</tbody></table></div>" if items else empty
+    body=f"""<div class='hero'>
+      <div><div class='eyebrow'>Security</div><h2>Selfie Review</h2><div class='sub'>{thresholds}</div></div>
+      <span class='pill'>{waiting} waiting</span>
+    </div>
+    <div class='tabs'>{tab_html}</div>
+    <div class='card'>{table}</div>"""
+    return layout("Selfie Review", body, request, "duplicates")
 
 @app.post("/duplicates/{fingerprint_id}/{action}")
 def review_duplicate(request: Request, fingerprint_id: int, action: str, background_tasks: BackgroundTasks):

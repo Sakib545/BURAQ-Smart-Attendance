@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 from math import asin, cos, radians, sin, sqrt
 import re
 import json
+import logging
 import random
 import time as time_module
 
@@ -150,6 +151,52 @@ def confirm_registration(employee_id, phone):
         c.execute("UPDATE employees SET registration_status='pending',updated_at=CURRENT_TIMESTAMP WHERE id=?", (employee["id"],))
     set_state(phone, "waiting_for_approval")
     return "⏳ WhatsApp নম্বর employee record-এর সঙ্গে মেলেনি। Admin approval-এর জন্য পাঠানো হয়েছে। Approve হলে পরের ধাপ নিজে থেকেই আসবে।"
+
+
+def adapt_gallery(employee_id: int, embedding, quality: float, score: float, margin: float,
+                  diagnostics: dict, media_id: str | None) -> None:
+    """Let a confidently verified selfie join the gallery.
+
+    A face profile built from three registration selfies slowly stops matching
+    the person: beards, glasses, weight, ageing. Rather than making everyone
+    re-register every few months, a verification that clears a much higher bar
+    than normal acceptance is stored as an extra reference.
+
+    The bar is deliberately strict — a wrong sample here poisons the profile
+    permanently. Enrolment samples are never evicted.
+    """
+    if not settings.face_adapt_enabled:
+        return
+    if score < settings.face_adapt_min_score or quality < settings.face_adapt_min_quality:
+        return
+    if margin < settings.face_adapt_min_margin:
+        return
+    if diagnostics.get("liveness_verdict") != "live":
+        return
+    # Near-identical to something already stored adds nothing but bloat.
+    if score > 0.97:
+        return
+
+    try:
+        with get_db() as c:
+            rows = c.execute("SELECT id,quality,source FROM face_samples WHERE employee_id=? ORDER BY id",
+                             (employee_id,)).fetchall()
+            c.execute("INSERT INTO face_samples(employee_id,media_id,embedding,quality,source) VALUES(?,?,?,?,?)",
+                      (employee_id, media_id, json.dumps(embedding), quality, "auto"))
+
+            auto = [r for r in rows if (r["source"] or "enroll") == "auto"]
+            over = len(rows) + 1 - settings.face_gallery_max
+            if over > 0 and auto:
+                weakest = sorted(auto, key=lambda r: float(r["quality"] or 0))[:over]
+                for row in weakest:
+                    c.execute("DELETE FROM face_samples WHERE id=?", (row["id"],))
+        invalidate_gallery_cache()
+        log_face_event(employee_id=employee_id, stage="adapt", action="gallery_sample",
+                       decision="accepted", reason="auto_enrolled", match_score=score,
+                       quality=quality, diagnostics=diagnostics)
+    except Exception:
+        # Never let profile maintenance break a check-in.
+        logging.getLogger(__name__).warning("gallery adaptation failed", exc_info=True)
 
 
 ENROLL_POSES = ["straight", "left", "right"]
@@ -405,6 +452,7 @@ def receive_image(phone, media_id, image_bytes=None):
 
     record("accepted", "verified" if diagnostics.get("liveness_verdict") == "live" else "verified_liveness_review",
            score, impostor_score, impostor_id, quality, diagnostics)
+    adapt_gallery(employee["id"], candidate, quality, score, margin, diagnostics, media_id)
 
     action = "check_in" if parts[0] == "checkin_selfie" else "check_out"
     fingerprint = make_fingerprint(image_bytes, candidate, diagnostics)

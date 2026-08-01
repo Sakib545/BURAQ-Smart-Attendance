@@ -49,6 +49,13 @@ class Settings:
     # The claimed employee must beat every other employee by this much.
     face_margin_min: float = float(os.getenv("FACE_MARGIN_MIN", "0.06"))
     face_enroll_samples: int = int(os.getenv("FACE_ENROLL_SAMPLES", "3"))
+    # Adaptive gallery: a confidently verified selfie can join the gallery so
+    # the profile follows beards, glasses and ageing instead of drifting away.
+    face_adapt_enabled: bool = os.getenv("FACE_ADAPT_ENABLED", "true").strip().lower() in {"1","true","yes","on"}
+    face_adapt_min_score: float = float(os.getenv("FACE_ADAPT_MIN_SCORE", "0.62"))
+    face_adapt_min_quality: float = float(os.getenv("FACE_ADAPT_MIN_QUALITY", "70"))
+    face_adapt_min_margin: float = float(os.getenv("FACE_ADAPT_MIN_MARGIN", "0.12"))
+    face_gallery_max: int = int(os.getenv("FACE_GALLERY_MAX", "8"))
     face_blur_min: float = float(os.getenv("FACE_BLUR_MIN", "42"))
 
     @property

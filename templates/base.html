@@ -35,6 +35,7 @@
           {% for item in group.entries %}
           <a href="{{ item.url }}" title="{{ item.label }}" class="{{ 'active' if item.key == active else '' }}"{% if item.key == active %} aria-current="page"{% endif %}>
             {{ icon(item.icon) }}<span>{{ item.label }}</span>
+            {% if item.badge %}<span style="margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#1c7c54;color:#fff;font-size:11px;font-weight:500;display:inline-grid;place-items:center">{{ item.badge }}</span>{% endif %}
           </a>
           {% endfor %}
         </nav>
