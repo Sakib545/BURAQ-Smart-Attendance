@@ -31,7 +31,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.18.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.18.2", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -94,12 +94,13 @@ def layout(title: str, body: str, request: Request | None = None, active: str = 
             ("performance","⌁  Performance","/performance",has_permission(request,"performance_view")),
             ("reports","▤  Reports","/reports",has_permission(request,"reports_view")),
             ("users","♧  Users","/hr-accounts",has_permission(request,"user_accounts_view")),
+            ("account","◎  My Account","/my-account",True),
             ("settings","⚙  Settings","/settings",has_permission(request,"settings_view")),
         ]
         links = "".join(f"<a class='{"active" if group==k else ""}' href='{u}'>{label}</a>" for k,label,u,visible in nav if visible)
         user_name = escape(str(request.session.get("user_name", "Admin")))
         role_label = escape(role.replace("_", " ").title())
-        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ</div><div class='side-sub brand-sub'>Smart Attendance</div><nav class='side-nav'>{links}</nav><div class='side-account'><b>{user_name}</b><div class='side-sub'>{role_label} • Online</div></div><a class='btn secondary' style='margin-top:10px;text-align:center' href='/logout'>Logout</a></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div></div><div class='actions'><details class='mobile-menu'><summary class='btn secondary'>☰ Menu</summary><div class='mobile-panel'>{links}<a href='/logout'>Logout</a></div></details><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></div></header><div class='page'>{body}</div></main></div>"
+        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ</div><div class='side-sub brand-sub'>Smart Attendance</div><nav class='side-nav'>{links}</nav><a class='side-account' href='/my-account' style='display:block;text-decoration:none;color:inherit'><b>{user_name}</b><div class='side-sub'>{role_label} • Online</div><div class='side-sub' style='margin-top:5px'>Manage email & password →</div></a><a class='btn secondary' style='margin-top:10px;text-align:center' href='/logout'>Logout</a></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div></div><div class='actions'><details class='mobile-menu'><summary class='btn secondary'>☰ Menu</summary><div class='mobile-panel'>{links}<a href='/logout'>Logout</a></div></details><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></div></header><div class='page'>{body}</div></main></div>"
     script = """<script>(function(){const root=document.documentElement;const saved=localStorage.getItem('buraq-theme');if(saved)root.dataset.theme=saved;document.getElementById('themeToggle')?.addEventListener('click',()=>{const next=root.dataset.theme==='dark'?'light':'dark';root.dataset.theme=next;localStorage.setItem('buraq-theme',next);});})();</script>"""
     return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{escape(title)}</title>{CSS}</head><body>{body}{script}</body></html>")
 
@@ -375,6 +376,114 @@ def login(request: Request, password: str = Form(...), email: str = Form(...)):
 @app.get("/logout")
 def logout(request: Request):
     request.session.clear(); return RedirectResponse("/login", 302)
+
+@app.get("/my-account", response_class=HTMLResponse)
+def my_account_page(request: Request, saved: str = "", error: str = ""):
+    require_login(request)
+    notice = ""
+    if saved:
+        notice = "<div class='notice'>Account information updated successfully.</div>"
+    elif error == "password":
+        notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Current password is incorrect.</div>"
+    elif error == "mismatch":
+        notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>New passwords do not match or are shorter than 8 characters.</div>"
+    elif error == "email":
+        notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>This email is already being used by another account.</div>"
+    elif error:
+        notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Account could not be updated.</div>"
+
+    if request.session.get("role") == "super_admin" and request.session.get("admin"):
+        name = get_setting("admin_name", "Super Admin")
+        email = get_setting("admin_email", "admin@buraq.com")
+        role_label = "Super Admin"
+    else:
+        account_id = request.session.get("hr_id")
+        with get_db() as c:
+            row = c.execute("SELECT name,email,role FROM hr_accounts WHERE id=?", (account_id,)).fetchone()
+        if not row:
+            request.session.clear()
+            return RedirectResponse("/login", 303)
+        name, email = row["name"], row["email"]
+        role_label = row["role"].replace("_", " ").title()
+
+    body = f"""{notice}
+    <div class='hero'><div><div class='eyebrow'>Account</div><h2>My Account</h2></div><span class='pill'>{escape(role_label)}</span></div>
+    <div class='two'>
+      <div class='card'>
+        <h2>Profile Information</h2>
+        <form method='post' action='/my-account/profile'>
+          <label>Full Name</label><input name='name' value='{escape(str(name))}' required>
+          <label>Email Address</label><input type='email' name='email' value='{escape(str(email))}' autocomplete='email' required>
+          <label>Current Password</label><input type='password' name='current_password' autocomplete='current-password' required>
+          <button class='btn'>Save Profile</button>
+        </form>
+      </div>
+      <div class='card'>
+        <h2>Change Password</h2>
+        <form method='post' action='/my-account/password'>
+          <label>Current Password</label><input type='password' name='current_password' autocomplete='current-password' required>
+          <label>New Password</label><input type='password' name='new_password' minlength='8' autocomplete='new-password' required>
+          <label>Confirm New Password</label><input type='password' name='confirm_password' minlength='8' autocomplete='new-password' required>
+          <button class='btn'>Change Password</button>
+        </form>
+      </div>
+    </div>"""
+    return layout("My Account", body, request, "account")
+
+@app.post("/my-account/profile")
+def update_my_account_profile(request: Request, name: str = Form(...), email: str = Form(...), current_password: str = Form(...)):
+    require_login(request)
+    normalized_email = email.strip().lower()
+    clean_name = name.strip()
+    if not clean_name or not normalized_email:
+        return RedirectResponse("/my-account?error=1", 303)
+
+    if request.session.get("role") == "super_admin" and request.session.get("admin"):
+        if not verify_password(current_password, admin_setup_hash()):
+            return RedirectResponse("/my-account?error=password", 303)
+        with get_db() as c:
+            duplicate = c.execute("SELECT id FROM hr_accounts WHERE LOWER(email)=LOWER(?)", (normalized_email,)).fetchone()
+        if duplicate:
+            return RedirectResponse("/my-account?error=email", 303)
+        set_setting("admin_name", clean_name)
+        set_setting("admin_email", normalized_email)
+        request.session["user_name"] = clean_name
+        audit(request, "profile_update", "user_account", "super_admin", "Super Admin name/email changed")
+    else:
+        account_id = request.session.get("hr_id")
+        with get_db() as c:
+            row = c.execute("SELECT password_hash FROM hr_accounts WHERE id=?", (account_id,)).fetchone()
+            if not row or not verify_password(current_password, row["password_hash"]):
+                return RedirectResponse("/my-account?error=password", 303)
+            admin_email = get_setting("admin_email", "admin@buraq.com").strip().lower()
+            duplicate = c.execute("SELECT id FROM hr_accounts WHERE LOWER(email)=LOWER(?) AND id<>?", (normalized_email, account_id)).fetchone()
+            if normalized_email == admin_email or duplicate:
+                return RedirectResponse("/my-account?error=email", 303)
+            c.execute("UPDATE hr_accounts SET name=?,email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (clean_name, normalized_email, account_id))
+            audit(request, "profile_update", "user_account", str(account_id), "HR/Admin name/email changed", db=c)
+        request.session["user_name"] = clean_name
+    return RedirectResponse("/my-account?saved=profile", 303)
+
+@app.post("/my-account/password")
+def update_my_account_password(request: Request, current_password: str = Form(...), new_password: str = Form(...), confirm_password: str = Form(...)):
+    require_login(request)
+    if len(new_password) < 8 or new_password != confirm_password:
+        return RedirectResponse("/my-account?error=mismatch", 303)
+
+    if request.session.get("role") == "super_admin" and request.session.get("admin"):
+        if not verify_password(current_password, admin_setup_hash()):
+            return RedirectResponse("/my-account?error=password", 303)
+        set_setting("admin_password_hash", hash_password(new_password))
+        audit(request, "password_change", "user_account", "super_admin", "Super Admin password changed")
+    else:
+        account_id = request.session.get("hr_id")
+        with get_db() as c:
+            row = c.execute("SELECT password_hash FROM hr_accounts WHERE id=?", (account_id,)).fetchone()
+            if not row or not verify_password(current_password, row["password_hash"]):
+                return RedirectResponse("/my-account?error=password", 303)
+            c.execute("UPDATE hr_accounts SET password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (hash_password(new_password), account_id))
+            audit(request, "password_change", "user_account", str(account_id), "HR/Admin password changed", db=c)
+    return RedirectResponse("/my-account?saved=password", 303)
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):

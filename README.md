@@ -1,3 +1,12 @@
+## v9.18.2 Self-Service Account Settings
+
+- Admin/HR users can change their own name and email.
+- Admin/HR users can securely change their own password.
+- Current password is required for all account changes.
+- Duplicate email addresses are blocked.
+- All changes are written to the audit log.
+- Existing permissions and system features are unchanged.
+
 ## v9.18.1 Dashboard PostgreSQL Hotfix
 
 - Fixed dashboard 500 error on Railway PostgreSQL caused by comparing a Boolean column with integer `1`.
