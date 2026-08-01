@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r re
 COPY . .
 RUN python -c "from app.face_ai import ensure_models; ensure_models()"
 RUN mkdir -p /app/data /app/exports && chmod +x /app/start.sh
+RUN test -f /app/static/css/app.css && test -f /app/templates/base.html
 
 EXPOSE 8000
 

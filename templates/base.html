@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0b3b2e">
+<title>{{ title }} · BURAQ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Hind+Siliguri:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/css/app.css?v={{ asset_v }}">
+<script>
+(function(){var r=document.documentElement;try{var t=localStorage.getItem('buraq-theme');if(t)r.dataset.theme=t;var n=localStorage.getItem('buraq-nav');if(n)r.dataset.nav=n;}catch(e){}})();
+</script>
+</head>
+<body>
+{{ sprite }}
+
+{% if chrome %}
+<div class="shell">
+  <div class="scrim" aria-hidden="true"></div>
+
+  <aside class="sidebar" id="sidebar">
+    <a class="logo" href="/dashboard">
+      <span class="mark">{{ icon('shield') }}</span>
+      <span>BURAQ</span>
+    </a>
+    <div class="brand-sub">Smart attendance</div>
+
+    {% for group in nav_groups %}
+      {% if group.entries %}
+      <div class="nav-group">
+        <div class="nav-label">{{ group.label }}</div>
+        <nav class="side-nav">
+          {% for item in group.entries %}
+          <a href="{{ item.url }}" class="{{ 'active' if item.key == active else '' }}"{% if item.key == active %} aria-current="page"{% endif %}>
+            {{ icon(item.icon) }}<span>{{ item.label }}</span>
+          </a>
+          {% endfor %}
+        </nav>
+      </div>
+      {% endif %}
+    {% endfor %}
+
+    <div class="side-foot">
+      <a class="side-account" href="/my-account">
+        <span class="side-avatar">{{ initials }}</span>
+        <span class="who">
+          <b>{{ user_name }}</b>
+          <span class="side-sub">{{ role_label }}</span>
+        </span>
+      </a>
+      <a class="side-logout" href="/logout">{{ icon('logout') }}<span>Sign out</span></a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="icon-btn menu-btn" id="menuToggle" type="button" aria-label="Open navigation">{{ icon('menu') }}</button>
+        <button class="icon-btn" id="navToggle" type="button" aria-label="Collapse navigation">{{ icon('panel') }}</button>
+        <div class="title">{{ title }}</div>
+      </div>
+      <div class="actions">
+        <div class="today-strip"><span class="dot"></span>{{ today_line }}</div>
+        <button class="icon-btn" id="themeToggle" type="button" aria-label="Switch theme">{{ icon('contrast') }}</button>
+      </div>
+    </header>
+
+    <div class="page">{{ body }}</div>
+  </main>
+
+  <nav class="tabbar">
+    {% for item in tabbar %}
+    <a href="{{ item.url }}" class="{{ 'active' if item.key == active else '' }}">{{ icon(item.icon) }}<span>{{ item.label }}</span></a>
+    {% endfor %}
+    <a href="#" id="menuToggle2" onclick="document.getElementById('menuToggle').click();return false;">{{ icon('menu') }}<span>More</span></a>
+  </nav>
+</div>
+{% else %}
+<div class="page">{{ body }}</div>
+{% endif %}
+
+<script src="/static/js/app.js?v={{ asset_v }}" defer></script>
+</body>
+</html>

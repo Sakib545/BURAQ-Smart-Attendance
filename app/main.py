@@ -18,8 +18,10 @@ from html import escape
 
 from fastapi import FastAPI, BackgroundTasks, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
+from app import ui
 from app.config import settings
 from app.database import database_kind, database_ok, database_warning, get_db, init_db
 from app.runtime import configured, get_setting, set_setting, import_environment_defaults, get_stored_setting, restore_stored_setting
@@ -33,6 +35,9 @@ logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.I
 logger = logging.getLogger(__name__)
 app = FastAPI(title=settings.app_name, version="9.19.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.middleware("http")
 async def request_context(request: Request, call_next):
@@ -52,67 +57,27 @@ async def request_context(request: Request, call_next):
     logger.info("request_id=%s method=%s path=%s status=%s duration_ms=%s", request_id, request.method, request.url.path, response.status_code, duration_ms)
     return response
 
-CSS = """
-<style>
-:root{--bg:#f4f7f6;--panel:#ffffff;--panel2:#f8faf9;--ink:#15211e;--muted:#697873;--brand:#087f5b;--brand2:#066747;--line:#dfe8e4;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--shadow:0 12px 34px rgba(22,59,49,.09)}
-[data-theme="dark"]{--bg:#0f1715;--panel:#17201d;--panel2:#1c2824;--ink:#eef7f3;--muted:#a4b5af;--brand:#20a97a;--brand2:#37bd8f;--line:#2b3b36;--shadow:none}
-*{box-sizing:border-box}html{color-scheme:light}html[data-theme="dark"]{color-scheme:dark}body{margin:0;background:var(--bg);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink)}
-a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px 1fr}.sidebar{background:#0d3b2e;color:#fff;padding:24px 18px;position:sticky;top:0;height:100vh}.logo{font-size:22px;font-weight:900;line-height:1.2;margin-bottom:6px}.logo:before{content:'◉';color:#59d4a9;margin-right:8px}.side-sub{font-size:12px;color:#b8d4ca;margin-bottom:28px}.side-nav{display:grid;gap:7px}.side-nav a{padding:11px 13px;border-radius:11px;text-decoration:none;color:#d8ebe4;font-weight:650}.side-nav a:hover,.side-nav a.active{background:rgba(255,255,255,.13);color:#fff}.main{min-width:0}.topbar{height:70px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 28px;position:sticky;top:0;z-index:5}.page{padding:26px;max-width:1400px;margin:auto}.title{font-size:27px;font-weight:850;letter-spacing:-.5px}.sub{color:var(--muted);font-size:14px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:15px}.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:20px;box-shadow:var(--shadow)}.metric{font-size:31px;font-weight:850;margin-top:7px}.status{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:999px;font-size:13px;font-weight:750}.status:before{content:'●';font-size:10px}.ok{background:#dcfce7;color:var(--ok)}.warn{background:#fef3c7;color:var(--warn)}.bad{background:#fee2e2;color:var(--bad)}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{border:0;border-radius:11px;padding:10px 14px;background:var(--brand);color:#fff;font-weight:750;cursor:pointer;text-decoration:none;display:inline-block}.btn:hover{background:var(--brand2)}.btn.secondary{background:var(--panel2);border:1px solid var(--line);color:var(--ink)}.btn.danger{background:#fee2e2;color:var(--bad)}input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;margin:6px 0 14px;background:var(--panel);color:var(--ink)}label{font-size:14px;font-weight:700}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line)}th{color:var(--muted)}h2{margin:0 0 14px}h3{margin:0 0 10px}.notice{padding:13px 15px;border-radius:12px;background:#ecfeff;color:#155e75;margin-bottom:16px}.code{font-family:ui-monospace,monospace;background:#111827;color:#f9fafb;padding:12px;border-radius:10px;overflow:auto}.login{max-width:450px;margin:7vh auto;padding:18px}.login .card{padding:30px}.masked{font-family:ui-monospace,monospace;letter-spacing:.5px;background:var(--panel2);padding:11px;border-radius:10px;border:1px solid var(--line)}.section-gap{height:16px}.mobile-menu{display:none}.health-list{display:grid;gap:10px}.health-row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}
-
-.hero{display:flex;justify-content:space-between;gap:20px;align-items:center;padding:24px;background:linear-gradient(135deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);margin-bottom:16px}.hero h2{font-size:25px;margin-bottom:6px}.eyebrow{text-transform:uppercase;letter-spacing:1.4px;font-size:11px;font-weight:850;color:var(--brand)}.metric-card{position:relative;overflow:hidden}.metric-card:after{content:'';position:absolute;right:-25px;top:-25px;width:85px;height:85px;border-radius:50%;background:rgba(8,127,91,.08)}.metric-label{font-size:13px;color:var(--muted);font-weight:700}.metric-foot{margin-top:10px;font-size:12px;color:var(--muted)}.kpi-icon{width:38px;height:38px;display:grid;place-items:center;border-radius:11px;background:var(--panel2);border:1px solid var(--line);font-size:18px}.card-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}.timeline{display:grid;gap:4px}.timeline-item{display:grid;grid-template-columns:42px 1fr auto;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.avatar{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:var(--panel2);font-weight:850;color:var(--brand);border:1px solid var(--line)}.pill{display:inline-flex;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:800;background:var(--panel2);border:1px solid var(--line)}.chart{height:210px;display:flex;gap:10px;align-items:flex-end;padding:18px 8px 4px}.bar-wrap{flex:1;min-width:0;text-align:center}.bar{min-height:5px;border-radius:8px 8px 3px 3px;background:linear-gradient(180deg,var(--brand),var(--brand2));position:relative}.bar-value{position:absolute;top:-22px;left:50%;transform:translateX(-50%);font-size:11px;font-weight:800}.bar-label{font-size:11px;color:var(--muted);margin-top:8px}.progress{height:8px;background:var(--panel2);border-radius:999px;overflow:hidden;border:1px solid var(--line)}.progress span{display:block;height:100%;background:var(--brand);border-radius:999px}.quick-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.quick-link{padding:14px;border:1px solid var(--line);border-radius:13px;text-decoration:none;background:var(--panel2);font-weight:750}.quick-link:hover{border-color:var(--brand);transform:translateY(-1px)}.health-dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--ok);box-shadow:0 0 0 4px rgba(21,128,61,.12)}
-.profile-hero{display:grid;grid-template-columns:110px 1fr auto;gap:20px;align-items:center}.profile-photo{width:104px;height:104px;border-radius:24px;object-fit:cover;background:var(--panel2);border:1px solid var(--line);display:grid;place-items:center;font-size:35px;font-weight:900;color:var(--brand)}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.fact{padding:13px;background:var(--panel2);border:1px solid var(--line);border-radius:12px}.fact b{display:block;margin-top:4px}.calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:7px}.cal-day{min-height:76px;border:1px solid var(--line);border-radius:11px;padding:8px;background:var(--panel2)}.cal-day.empty{opacity:.35}.cal-day.present{border-left:4px solid #15803d}.cal-day.late{border-left:4px solid #b45309}.cal-day.leave{border-left:4px solid #2563eb}.cal-day.absent{border-left:4px solid #b91c1c}.searchbar{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:10px;align-items:end}.checkbox{width:auto;margin:0}.table-actions{display:flex;gap:6px;flex-wrap:wrap}.tag{display:inline-flex;padding:4px 8px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);font-size:11px;font-weight:750}
-.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}.tab{padding:9px 13px;border:1px solid var(--line);border-radius:10px;text-decoration:none;background:var(--panel)}.summary-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.rating{font-size:22px;font-weight:850}.stars{color:#b7791f;letter-spacing:2px}
-.payroll-panel{background:linear-gradient(135deg,#0d3b2e,#087f5b);color:#fff;border:0}.payroll-panel .sub{color:#c8e6dc}.payroll-amount{font-size:34px;font-weight:900;letter-spacing:-1px}.money-card{position:relative;overflow:hidden}.money-card:after{content:'৳';position:absolute;right:14px;top:4px;font-size:64px;font-weight:900;color:rgba(8,127,91,.07)}.salary-breakdown{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.salary-part{padding:14px;border-radius:13px;background:var(--panel2);border:1px solid var(--line)}.salary-part b{display:block;font-size:18px;margin-top:5px}.confidential{display:inline-flex;gap:7px;align-items:center;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.14);font-size:11px;font-weight:800}
-.sidebar{display:flex;flex-direction:column;overflow-y:auto}.side-nav{flex:0 0 auto}.side-account{margin-top:auto;padding:12px;border-radius:12px;background:rgba(255,255,255,.08);flex:0 0 auto}.side-account .side-sub{margin:3px 0 0}.mobile-panel{position:absolute;right:16px;top:62px;min-width:210px;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:8px;box-shadow:var(--shadow);display:grid;z-index:20}.mobile-panel a{padding:11px;text-decoration:none;border-radius:9px}.mobile-panel a.active{background:var(--panel2);color:var(--brand);font-weight:800}.mobile-menu summary{list-style:none}
-.control-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.control-card{display:block;text-decoration:none;min-height:150px;transition:.18s ease}.control-card:hover{transform:translateY(-3px);border-color:var(--brand)}.control-icon{font-size:30px;margin-bottom:16px}.control-card h3{font-size:18px}.control-card .sub{line-height:1.5}
-@media(max-width:900px){.summary-strip{grid-template-columns:1fr 1fr}.shell{grid-template-columns:1fr}.sidebar{display:none}.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}.mobile-menu{display:block}.page{padding:16px}.topbar{padding:0 16px}}
-@media(max-width:700px){.control-grid{grid-template-columns:1fr}.profile-hero{grid-template-columns:1fr}.facts{grid-template-columns:1fr 1fr}.salary-breakdown{grid-template-columns:1fr 1fr}.searchbar{grid-template-columns:1fr}.calendar{gap:4px}.cal-day{min-height:58px;padding:5px}}
-@media(max-width:540px){.grid{grid-template-columns:1fr}.topbar{height:auto;padding:13px 16px;gap:10px}.title{font-size:22px}}
-
-/* v9.18 clean dashboard system */
-.dashboard-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:24px}.dashboard-head h1{font-size:30px;line-height:1.08;margin:0 0 8px;letter-spacing:-.8px}.dashboard-date{font-size:14px;color:var(--muted);font-weight:650}.dashboard-tools{display:flex;gap:10px;align-items:center}.dashboard-search{width:270px;margin:0;background:var(--panel)}
-.dashboard-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}.dashboard-kpi{padding:20px;min-height:138px}.dashboard-kpi .metric{font-size:30px}.dashboard-kpi .metric-foot{min-height:18px}.kpi-row{display:flex;gap:12px;align-items:center}.kpi-symbol{width:43px;height:43px;border-radius:50%;display:grid;place-items:center;font-size:20px;font-weight:800}.kpi-green{background:#e7f8f1;color:#07875e}.kpi-orange{background:#fff2e7;color:#e66a00}.kpi-red{background:#ffecef;color:#e11d48}.kpi-purple{background:#f3eefe;color:#7c3aed}.kpi-blue{background:#eaf2ff;color:#2563eb}.mini-line{height:5px;background:#edf1ef;border-radius:999px;margin-top:13px;overflow:hidden}.mini-line span{display:block;height:100%;border-radius:999px}.dashboard-main-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:16px}.dashboard-panel{min-height:290px}.readiness-wrap{display:grid;grid-template-columns:190px 1fr;align-items:center;gap:22px;padding:10px 12px}.donut{--pct:0;position:relative;width:160px;height:160px;border-radius:50%;background:conic-gradient(var(--brand) calc(var(--pct)*1%),#e7ecea 0);display:grid;place-items:center}.donut:after{content:'';position:absolute;width:116px;height:116px;background:var(--panel);border-radius:50%}.donut-value{position:relative;z-index:1;text-align:center}.donut-value b{display:block;font-size:34px}.legend-list{display:grid;gap:14px}.legend-row{display:grid;grid-template-columns:12px 1fr auto;gap:10px;align-items:center}.legend-dot{width:10px;height:10px;border-radius:50%}.dashboard-table{font-size:13px}.dashboard-table td,.dashboard-table th{padding:10px 8px}.status-badge{display:inline-flex;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:800}.status-present{background:#dcfce7;color:#15803d}.status-absent{background:#ffe4e6;color:#be123c}.status-leave{background:#f3e8ff;color:#7e22ce}.pending-list{display:grid}.pending-item{display:grid;grid-template-columns:42px 1fr auto 20px;align-items:center;gap:12px;padding:15px 0;border-bottom:1px solid var(--line);text-decoration:none}.pending-icon{width:39px;height:39px;border-radius:50%;display:grid;place-items:center;background:var(--panel2)}.count-chip{min-width:29px;text-align:center;background:#e8f8f2;color:var(--brand);padding:5px 8px;border-radius:999px;font-size:12px;font-weight:850}.dashboard-quick{display:grid;grid-template-columns:repeat(6,1fr);gap:12px}.dashboard-quick a{min-height:96px;padding:17px 10px;text-align:center;border:1px solid var(--line);background:var(--panel);border-radius:14px;text-decoration:none;font-weight:750;display:grid;place-items:center;gap:7px;box-shadow:var(--shadow)}.dashboard-quick .qicon{font-size:24px}.dashboard-quick a:hover{border-color:var(--brand);transform:translateY(-2px)}
-.topbar .sub{display:none}.topbar{height:64px}.side-sub.brand-sub{margin-bottom:28px}.sidebar .logo{font-size:21px}.page{max-width:1500px}.card{box-shadow:0 4px 18px rgba(22,59,49,.055)}
-@media(max-width:1150px){.dashboard-kpis{grid-template-columns:repeat(3,1fr)}.dashboard-quick{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:900px){.dashboard-main-grid{grid-template-columns:1fr}.dashboard-head{flex-direction:column}.dashboard-search{width:100%}.dashboard-kpis{grid-template-columns:1fr 1fr}.readiness-wrap{grid-template-columns:1fr;justify-items:center}.dashboard-quick{grid-template-columns:1fr 1fr}}
-@media(max-width:540px){.dashboard-kpis{grid-template-columns:1fr}.dashboard-quick{grid-template-columns:1fr 1fr}.dashboard-head h1{font-size:25px}}
-
-/* v9.19 usability polish: visual-only, no workflow changes */
-body{line-height:1.5}.sidebar{box-shadow:8px 0 30px rgba(4,44,32,.08)}.side-nav a{display:flex;align-items:center;min-height:43px;transition:background .16s ease,transform .16s ease}.side-nav a:hover{transform:translateX(2px)}
-.topbar{backdrop-filter:saturate(140%) blur(12px);background:color-mix(in srgb,var(--panel) 94%,transparent)}.page{padding-top:30px}.card,.hero{transition:border-color .16s ease,box-shadow .16s ease}.card:hover{border-color:color-mix(in srgb,var(--brand) 24%,var(--line))}
-.btn{min-height:40px;display:inline-flex;align-items:center;justify-content:center;gap:7px;transition:transform .14s ease,background .14s ease,box-shadow .14s ease}.btn:hover{transform:translateY(-1px);box-shadow:0 7px 18px rgba(8,127,91,.14)}.btn:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,a:focus-visible{outline:3px solid color-mix(in srgb,var(--brand) 30%,transparent);outline-offset:2px}
-input,select,textarea{min-height:43px;transition:border-color .14s ease,box-shadow .14s ease}input:focus,select:focus,textarea:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(8,127,91,.10)}
-table{background:var(--panel)}thead th{position:sticky;top:63px;z-index:2;background:var(--panel2);font-size:12px;text-transform:uppercase;letter-spacing:.035em}tbody tr{transition:background .12s ease}tbody tr:hover{background:color-mix(in srgb,var(--brand) 5%,var(--panel))}.notice{border:1px solid color-mix(in srgb,#0891b2 25%,var(--line))}
-.hero{padding:22px 24px}.hero .sub{max-width:720px}.metric{font-variant-numeric:tabular-nums}.actions{align-items:center}.status,.pill,.tag{white-space:nowrap}.empty-state{padding:34px;text-align:center;color:var(--muted)}
-@media(max-width:900px){.searchbar{grid-template-columns:1fr 1fr}.hero{align-items:flex-start;flex-direction:column}}
-@media(max-width:560px){.searchbar{grid-template-columns:1fr}.card{padding:16px}.hero{padding:18px}.actions>.btn{flex:1}.table-actions .btn{flex:1 1 auto}thead th{top:63px}}
-
-</style>
-"""
-
 def layout(title: str, body: str, request: Request | None = None, active: str = ""):
-    if request is not None and logged_in(request):
-        role = request.session.get("role", "super_admin")
-        group={"pending":"admin","duplicates":"admin","operations":"leave","hr":"users","audit":"users"}.get(active,active)
-        nav=[
-            ("dashboard","⌂  Dashboard","/dashboard",has_permission(request,"dashboard_view")),
-            ("employees","♙  Employees","/employees",has_permission(request,"employees_view") or has_permission(request,"performance_view")),
-            ("attendance","◷  Attendance","/attendance",any(has_permission(request,p) for p in ("reports_view","leave_view","attendance_edit"))),
-            ("duty","▣  Duty","/duty",has_permission(request,"duty_view")),
-            ("leave","▢  Leave","/hr-operations",has_permission(request,"leave_view")),
-            ("payroll","৳  Payroll","/payroll",has_permission(request,"payroll_view")),
-            ("performance","⌁  Performance","/performance",has_permission(request,"performance_view")),
-            ("reports","▤  Reports","/reports",has_permission(request,"reports_view")),
-            ("users","♧  Users","/hr-accounts",has_permission(request,"user_accounts_view")),
-            ("account","◎  My Account","/my-account",True),
-            ("settings","⚙  Settings","/settings",has_permission(request,"settings_view")),
-        ]
-        links = "".join(f"<a class='{"active" if group==k else ""}' href='{u}'>{label}</a>" for k,label,u,visible in nav if visible)
-        user_name = escape(str(request.session.get("user_name", "Admin")))
-        role_label = escape(role.replace("_", " ").title())
-        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ</div><div class='side-sub brand-sub'>Smart Attendance</div><nav class='side-nav'>{links}</nav><a class='side-account' href='/my-account' style='display:block;text-decoration:none;color:inherit'><b>{user_name}</b><div class='side-sub'>{role_label} • Online</div><div class='side-sub' style='margin-top:5px'>Manage email & password →</div></a><a class='btn secondary' style='margin-top:10px;text-align:center' href='/logout'>Logout</a></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div></div><div class='actions'><details class='mobile-menu'><summary class='btn secondary'>☰ Menu</summary><div class='mobile-panel'>{links}<a href='/logout'>Logout</a></div></details><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></div></header><div class='page'>{body}</div></main></div>"
-    script = """<script>(function(){const root=document.documentElement;const saved=localStorage.getItem('buraq-theme');if(saved)root.dataset.theme=saved;document.getElementById('themeToggle')?.addEventListener('click',()=>{const next=root.dataset.theme==='dark'?'light':'dark';root.dataset.theme=next;localStorage.setItem('buraq-theme',next);});})();</script>"""
-    return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{escape(title)}</title>{CSS}</head><body>{body}{script}</body></html>")
+    """Wrap route markup in the application shell."""
+    chrome = request is not None and logged_in(request)
+    nav_groups: list = []
+    user_name = role_label = today_line = ""
+    if chrome:
+        nav_groups = ui.build_nav(lambda flag: has_permission(request, flag))
+        user_name = str(request.session.get("user_name", "Admin"))
+        role_label = str(request.session.get("role", "super_admin")).replace("_", " ").title()
+        today_line = datetime.now(ZoneInfo(settings.timezone)).strftime("%a %d %b, %I:%M %p")
+    return HTMLResponse(ui.render_page(
+        title=title,
+        body=body,
+        chrome=chrome,
+        nav_groups=nav_groups,
+        active=active,
+        user_name=user_name,
+        role_label=role_label,
+        today_line=today_line,
+    ))
+
 
 def hash_password(password: str, salt: str | None = None):
     salt = salt or secrets.token_hex(16)
