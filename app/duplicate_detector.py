@@ -24,6 +24,9 @@ class DuplicateThresholds:
     face_weight: float = 0.10
     pose_weight: float = 0.15
     landmark_weight: float = 0.20
+    # Pose and landmark agreement only count as evidence once the images
+    # themselves already look alike. See detect_duplicate for why.
+    corroboration_gate: float = 0.72
 
 
 @dataclass(frozen=True)
@@ -105,11 +108,19 @@ def compare(candidate: dict, previous: dict) -> tuple[float, float, float, float
 
 
 def detect_duplicate(candidate: dict, previous_rows: Iterable[dict], thresholds: DuplicateThresholds) -> DuplicateResult:
-    weights = np.asarray([thresholds.hash_weight, thresholds.face_weight, thresholds.pose_weight, thresholds.landmark_weight], dtype=float)
-    weights = weights / max(weights.sum(), 1e-9)
+    full_weights = np.asarray([thresholds.hash_weight, thresholds.face_weight, thresholds.pose_weight, thresholds.landmark_weight], dtype=float)
+    full_weights = full_weights / max(full_weights.sum(), 1e-9)
+    # When the images are plainly different, pose and landmark agreement say
+    # nothing: an employee who stands in the same spot every morning scores high
+    # on both every single day. Adding them unconditionally pushed honest,
+    # regular staff towards the review threshold over time.
+    base_weights = np.asarray([thresholds.hash_weight, thresholds.face_weight, 0.0, 0.0], dtype=float)
+    base_weights = base_weights / max(base_weights.sum(), 1e-9)
+
     best = DuplicateResult(0.0, "accept", None)
     for row in previous_rows:
         components = compare(candidate, row)
+        weights = full_weights if components[0] >= thresholds.corroboration_gate else base_weights
         score = float(np.dot(weights, np.asarray(components)))
         # Exact/near-exact image evidence is decisive. Face similarity alone is
         # deliberately weak because every genuine selfie of the same employee

@@ -6,7 +6,8 @@ import json
 import random
 import time as time_module
 
-from app.face_ai import FaceAIError, extract_embedding, best_match
+from app.face_ai import FaceAIError, extract_embedding, best_match, best_impostor, gallery_score
+from app.face_log import invalidate_gallery_cache, load_impostor_gallery, log_face_event
 from app.duplicate_detector import DuplicateThresholds, detect_duplicate, make_fingerprint
 from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
 from app.database import get_db
@@ -151,25 +152,65 @@ def confirm_registration(employee_id, phone):
     return "⏳ WhatsApp নম্বর employee record-এর সঙ্গে মেলেনি। Admin approval-এর জন্য পাঠানো হয়েছে। Approve হলে পরের ধাপ নিজে থেকেই আসবে।"
 
 
+ENROLL_POSES = ["straight", "left", "right"]
+ENROLL_POSE_PROMPT = {
+    "straight": "সোজা সামনে তাকিয়ে",
+    "left": "মাথা সামান্য বাম দিকে ঘুরিয়ে",
+    "right": "মাথা সামান্য ডান দিকে ঘুরিয়ে",
+}
+
+
 def save_face_reference(employee, media_id, image_bytes):
-    try:
-        embedding, quality, diagnostics = extract_embedding(image_bytes)
-    except FaceAIError as exc:
-        return f"❌ Face Registration হয়নি।\n{exc}"
+    started = time_module.perf_counter()
+    target = settings.face_enroll_samples
+
     with get_db() as c:
-        rows = c.execute("SELECT embedding FROM face_samples WHERE employee_id=?", (employee["id"],)).fetchall()
-        if rows:
-            score = best_match(embedding, [json.loads(r["embedding"]) for r in rows])
+        rows = c.execute("SELECT embedding FROM face_samples WHERE employee_id=? ORDER BY id", (employee["id"],)).fetchall()
+    existing = [json.loads(r["embedding"]) for r in rows]
+    index = len(existing)
+
+    # Ask for a different angle each time. Without this every sample tends to be
+    # the same straight-on shot, and the gallery has no tolerance for head turn.
+    wanted_pose = ENROLL_POSES[index] if index < len(ENROLL_POSES) else "any"
+
+    def record(decision, reason, **extra):
+        log_face_event(employee_id=employee["id"], stage="enroll", action="sample_%d" % (index + 1),
+                       decision=decision, reason=reason,
+                       elapsed_ms=(time_module.perf_counter() - started) * 1000, **extra)
+
+    try:
+        embedding, quality, diagnostics = extract_embedding(image_bytes, required_pose=wanted_pose)
+    except FaceAIError as exc:
+        record("rejected", str(exc).splitlines()[0][:200])
+        return "\u274c Face Registration হয়নি।\n%s" % exc
+
+    if diagnostics.get("liveness_verdict") == "spoof":
+        record("rejected", "liveness", diagnostics=diagnostics)
+        return "\U0001f6ab ছবিটি স্ক্রিন বা ছাপানো ছবি বলে মনে হচ্ছে। সরাসরি ক্যামেরার সামনে থেকে live selfie দিন।"
+
+    if quality < settings.face_enroll_quality_min:
+        record("rejected", "quality", quality=quality, diagnostics=diagnostics)
+        return ("\u274c এই selfie-এর মান কম (%.0f%%, দরকার %.0f%%)।\n"
+                "Registration-এর ছবি সারাজীবন ব্যবহার হবে, তাই ভালো আলোতে ক্যামেরার কাছ থেকে আবার তুলুন।"
+                % (quality, settings.face_enroll_quality_min))
+
+    with get_db() as c:
+        if existing:
+            score = gallery_score(embedding, existing)
             if score < 0.42:
-                return "❌ আগের selfie-এর সঙ্গে এই মুখ মিলছে না। একই employee নিজের selfie দিন।"
-            if score > 0.985:
-                return "⚠️ একই বা প্রায় একই selfie আবার পাঠানো হয়েছে। ফোন/মুখের angle সামান্য বদলে নতুন live selfie দিন।"
+                record("rejected", "identity_mismatch", match_score=score, quality=quality, diagnostics=diagnostics)
+                return "\u274c আগের selfie-এর সঙ্গে এই মুখ মিলছে না। একই employee নিজের selfie দিন।"
+            if best_match(embedding, existing) > 0.985:
+                record("rejected", "identical_sample", match_score=score, quality=quality, diagnostics=diagnostics)
+                return "\u26a0\ufe0f একই বা প্রায় একই selfie আবার পাঠানো হয়েছে। ফোন/মুখের angle সামান্য বদলে নতুন live selfie দিন।"
 
         # Stop one person's face being registered under another employee account.
         other_rows = c.execute("SELECT employee_id,embedding FROM face_samples WHERE employee_id<>?", (employee["id"],)).fetchall()
         if other_rows:
             duplicate_score = best_match(embedding, [json.loads(r["embedding"]) for r in other_rows])
             if duplicate_score >= 0.62:
+                record("rejected", "already_registered_elsewhere", impostor_score=duplicate_score,
+                       quality=quality, diagnostics=diagnostics)
                 return "🚫 এই মুখটি অন্য employee profile-এ আগে থেকেই নিবন্ধিত। HR/Admin-এর সঙ্গে যোগাযোগ করুন।"
 
         c.execute("INSERT INTO face_samples(employee_id,media_id,embedding,quality) VALUES(?,?,?,?)", (employee["id"], media_id, json.dumps(embedding), quality))
@@ -179,11 +220,20 @@ def save_face_reference(employee, media_id, image_bytes):
             c.execute("UPDATE face_profiles SET reference_media_id=?,updated_at=CURRENT_TIMESTAMP WHERE employee_id=?", (media_id, employee["id"]))
         else:
             c.execute("INSERT INTO face_profiles(employee_id,reference_media_id) VALUES(?,?)", (employee["id"], media_id))
-    if count < 3:
+    invalidate_gallery_cache()
+    record("accepted", "sample_stored", quality=quality, diagnostics=diagnostics)
+    if count < target:
         set_state(employee["whatsapp_phone"] or employee["phone"], "awaiting_face_registration")
-        return f"✅ Selfie {count}/3 গ্রহণ করা হয়েছে।\n🔎 Face quality: {quality:.1f}%\n📐 Face area: {diagnostics['face_ratio']:.1f}%\n\nআরও {3-count}টি আলাদা selfie পাঠান—একবার সোজা, একবার সামান্য বাম, একবার সামান্য ডান দিকে তাকিয়ে।"
+        next_pose = ENROLL_POSES[count] if count < len(ENROLL_POSES) else "any"
+        guidance = ENROLL_POSE_PROMPT.get(next_pose, "স্বাভাবিকভাবে")
+        return ("\u2705 Selfie %d/%d গ্রহণ করা হয়েছে।\n\U0001f50e Face quality: %.1f%%\n"
+                "\U0001f4d0 Face area: %.1f%%\n\nএবার %s পরের selfie তুলুন।"
+                % (count, target, quality, diagnostics["face_ratio"], guidance))
     clear_state(employee["whatsapp_phone"] or employee["phone"])
-    return f"✅ Face Registration সম্পন্ন হয়েছে।\n\n👤 {employee['name']}\n🆔 {employee['staff_id']}\n🔐 ৩টি Face AI sample সংরক্ষিত\n🔎 শেষ selfie quality: {quality:.1f}%\n\nএখন Attendance Menu ব্যবহার করুন।"
+    return ("\u2705 Face Registration সম্পন্ন হয়েছে।\n\n\U0001f464 %s\n\U0001f194 %s\n"
+            "\U0001f510 %d টি Face AI sample সংরক্ষিত\n\U0001f50e শেষ selfie quality: %.1f%%\n\n"
+            "এখন Attendance Menu ব্যবহার করুন।"
+            % (employee["name"], employee["staff_id"], count, quality))
 
 
 def shift_times(shift):
@@ -304,23 +354,64 @@ def receive_image(phone, media_id, image_bytes=None):
         parts[4:] = [pose, str(new_issued_at)]
         set_state(phone, ":".join(parts))
         return "⌛ আগের selfie challenge-এর সময় শেষ হয়েছে।\n\n" + liveness_prompt(pose)
+    started = time_module.perf_counter()
+
+    def record(decision, reason, score=0.0, impostor=0.0, impostor_id=None, quality_value=0.0, detail=None):
+        log_face_event(employee_id=employee["id"], stage="verify", action=parts[0],
+                       decision=decision, reason=reason, match_score=score,
+                       impostor_score=impostor, impostor_employee_id=impostor_id,
+                       quality=quality_value, diagnostics=detail or {},
+                       elapsed_ms=(time_module.perf_counter() - started) * 1000)
+
     try:
         candidate, quality, diagnostics = extract_embedding(image_bytes, required_pose=challenge_pose)
     except FaceAIError as exc:
-        return f"❌ Live Face Verification Failed\n{exc}\n\n⏳ Challenge শেষ হওয়ার আগে আবার চেষ্টা করুন।"
+        record("rejected", str(exc).splitlines()[0][:200])
+        return "\u274c Live Face Verification Failed\n%s\n\n\u23f3 Challenge শেষ হওয়ার আগে আবার চেষ্টা করুন।" % exc
+
     with get_db() as c:
         rows = c.execute("SELECT embedding FROM face_samples WHERE employee_id=? ORDER BY id", (employee["id"],)).fetchall()
-    score = best_match(candidate, [json.loads(r["embedding"]) for r in rows])
+    own_samples = [json.loads(r["embedding"]) for r in rows]
+    score = gallery_score(candidate, own_samples)
+    impostor_score, impostor_id = best_impostor(candidate, load_impostor_gallery(employee["id"]))
+    margin = score - impostor_score
     threshold = settings.face_match_threshold
+
+    # Only a confident spoof reading blocks attendance. The passive signals are
+    # heuristics; until they have been tuned against logged data, a borderline
+    # reading is recorded for review rather than used to turn someone away.
+    if diagnostics.get("liveness_verdict") == "spoof":
+        record("rejected", "liveness", score, impostor_score, impostor_id, quality, diagnostics)
+        return ("\U0001f6ab Live Face Verification Failed\n\n"
+                "ছবিটি স্ক্রিন বা ছাপানো ছবি থেকে তোলা বলে মনে হচ্ছে।\n"
+                "সরাসরি ক্যামেরার সামনে দাঁড়িয়ে নতুন selfie দিন।")
+
     if quality < settings.face_quality_min:
-        return f"❌ Selfie quality কম ({quality:.0f}%)। ভালো আলোতে ক্যামেরার কাছে এসে নতুন selfie দিন।"
+        record("rejected", "quality", score, impostor_score, impostor_id, quality, diagnostics)
+        return "\u274c Selfie quality কম (%.0f%%)। ভালো আলোতে ক্যামেরার কাছে এসে নতুন selfie দিন।" % quality
+
     if score < threshold:
-        return f"🚫 Face Verification Failed\n\nনিবন্ধিত মুখের সঙ্গে মিল পাওয়া যায়নি।\nMatch score: {score*100:.1f}%\n\nশুধু নিজের বর্তমান selfie পাঠান।"
+        record("rejected", "below_threshold", score, impostor_score, impostor_id, quality, diagnostics)
+        return ("\U0001f6ab Face Verification Failed\n\nনিবন্ধিত মুখের সঙ্গে মিল পাওয়া যায়নি।\n"
+                "Match score: %.1f%%\n\nশুধু নিজের বর্তমান selfie পাঠান।" % (score * 100))
+
+    # Beating the threshold is not enough when someone else in the workforce
+    # matches almost as well — siblings and lookalikes fail exactly here.
+    if impostor_id is not None and margin < settings.face_margin_min:
+        record("rejected", "margin", score, impostor_score, impostor_id, quality, diagnostics)
+        return ("\U0001f6ab Face Verification Failed\n\nএই মুখ একাধিক employee profile-এর সঙ্গে "
+                "প্রায় সমানভাবে মিলছে, তাই নিশ্চিতভাবে শনাক্ত করা যায়নি।\n"
+                "ভালো আলোতে সোজা তাকিয়ে আবার চেষ্টা করুন, না হলে HR-এর সঙ্গে যোগাযোগ করুন।")
+
+    record("accepted", "verified" if diagnostics.get("liveness_verdict") == "live" else "verified_liveness_review",
+           score, impostor_score, impostor_id, quality, diagnostics)
+
     action = "check_in" if parts[0] == "checkin_selfie" else "check_out"
     fingerprint = make_fingerprint(image_bytes, candidate, diagnostics)
     limits = DuplicateThresholds(settings.duplicate_accept_below, settings.duplicate_reject_at,
         settings.duplicate_hash_weight, settings.duplicate_face_weight,
-        settings.duplicate_pose_weight, settings.duplicate_landmark_weight)
+        settings.duplicate_pose_weight, settings.duplicate_landmark_weight,
+        settings.duplicate_corroboration_gate)
     with get_db() as c:
         # Exact hashes are checked globally to stop one employee reusing another
         # employee's saved image. Near-duplicate scoring is limited to the same

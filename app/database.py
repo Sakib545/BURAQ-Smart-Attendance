@@ -449,3 +449,41 @@ def apply_feature_migrations() -> None:
         conn.execute(text("UPDATE payroll_records SET payment_status='draft' WHERE payment_status='unpaid'"))
     mark_migration("v9.11-duty-based-salary")
     mark_migration("v9.12-payroll-pro")
+    apply_face_ai_migrations()
+
+
+def apply_face_ai_migrations() -> None:
+    """Telemetry for face verification, so thresholds can be tuned from evidence."""
+    sqlite = _active_url.startswith("sqlite")
+    real = "REAL" if sqlite else "DOUBLE PRECISION"
+    statements = [
+        f"""CREATE TABLE IF NOT EXISTS face_events(
+            id {"INTEGER PRIMARY KEY AUTOINCREMENT" if sqlite else "BIGSERIAL PRIMARY KEY"},
+            employee_id {"INTEGER" if sqlite else "BIGINT"},
+            stage TEXT NOT NULL,
+            action TEXT,
+            decision TEXT NOT NULL,
+            reason TEXT,
+            match_score {real} NOT NULL DEFAULT 0,
+            impostor_score {real} NOT NULL DEFAULT 0,
+            margin {real} NOT NULL DEFAULT 0,
+            impostor_employee_id {"INTEGER" if sqlite else "BIGINT"},
+            quality {real} NOT NULL DEFAULT 0,
+            blur {real} NOT NULL DEFAULT 0,
+            brightness {real} NOT NULL DEFAULT 0,
+            face_ratio {real} NOT NULL DEFAULT 0,
+            pose TEXT,
+            liveness_score {real} NOT NULL DEFAULT 0,
+            liveness_verdict TEXT,
+            liveness_detail TEXT,
+            liveness_model {"INTEGER" if sqlite else "BOOLEAN"} NOT NULL DEFAULT 0,
+            elapsed_ms {real} NOT NULL DEFAULT 0,
+            created_at {"TEXT" if sqlite else "TIMESTAMPTZ"} NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_face_events_created ON face_events(created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_face_events_stage_decision ON face_events(stage, decision)",
+    ]
+    with engine.begin() as conn:
+        for statement in statements:
+            conn.execute(text(statement))
+    mark_migration("v9.20-face-ai-telemetry")

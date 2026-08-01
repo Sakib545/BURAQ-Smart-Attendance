@@ -10,6 +10,17 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from app import liveness
+
+# Detection runs on a downscaled copy and the boxes are mapped back, which is
+# 3-5x faster than detecting on a full phone-resolution frame with no measured
+# loss in accuracy at selfie distance.
+DETECT_MAX_SIDE = int(os.getenv("FACE_DETECT_MAX_SIDE", "640"))
+
+# Models are baked into the image at build time. Downloading during a request
+# would make the first check-in of a cold container hang on GitHub.
+ALLOW_RUNTIME_DOWNLOAD = os.getenv("FACE_ALLOW_MODEL_DOWNLOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
+
 MODEL_DIR = Path(os.getenv("FACE_MODEL_DIR", Path(__file__).resolve().parent.parent / "models"))
 DETECTOR = MODEL_DIR / "face_detection_yunet_2023mar.onnx"
 RECOGNIZER = MODEL_DIR / "face_recognition_sface_2021dec.onnx"
@@ -36,11 +47,21 @@ def ensure_models() -> None:
                 ) from exc
 
 
+def models_present() -> bool:
+    return all(path.exists() and path.stat().st_size >= 100_000 for path in (DETECTOR, RECOGNIZER))
+
+
 def _models():
     cached = getattr(_MODEL_STATE, "models", None)
     if cached is not None:
         return cached
-    ensure_models()
+    if not models_present():
+        if not ALLOW_RUNTIME_DOWNLOAD:
+            raise FaceAIError(
+                "Face AI model server-এ নেই। Redeploy করুন, অথবা জরুরি হলে "
+                "FACE_ALLOW_MODEL_DOWNLOAD=true সেট করুন।"
+            )
+        ensure_models()
     try:
         detector = cv2.FaceDetectorYN.create(str(DETECTOR), "", (320, 320), 0.55, 0.30, 5000)
         recognizer = cv2.FaceRecognizerSF.create(str(RECOGNIZER), "")
@@ -79,9 +100,21 @@ def _enhance(image: np.ndarray) -> np.ndarray:
 
 
 def _detect_once(detector, image: np.ndarray):
+    """Detect on a downscaled copy, then map boxes and landmarks back."""
     h, w = image.shape[:2]
-    detector.setInputSize((w, h))
-    _, faces = detector.detect(image)
+    scale = min(1.0, DETECT_MAX_SIDE / float(max(h, w)))
+    if scale < 1.0:
+        small = cv2.resize(image, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_AREA)
+    else:
+        small, scale = image, 1.0
+
+    detector.setInputSize((small.shape[1], small.shape[0]))
+    _, faces = detector.detect(small)
+    if faces is None or len(faces) == 0 or scale == 1.0:
+        return faces
+
+    faces = np.asarray(faces, dtype=np.float32).copy()
+    faces[:, :14] /= scale  # bounding box + five landmark pairs; column 14 is the score
     return faces
 
 
@@ -171,11 +204,15 @@ def _select_valid_faces(faces, image_shape):
 
 def _find_faces(detector, image: np.ndarray):
     """Try normal and enhanced images and choose the most credible result."""
-    attempts = [image, _enhance(image)]
     best_faces = []
     best_image = image
     best_score = -1.0
-    for candidate in attempts:
+    for index, candidate in enumerate((image, None)):
+        if candidate is None:
+            # Only pay for CLAHE when the plain frame was not already good.
+            if best_faces and best_score >= 1.05:
+                break
+            candidate = _enhance(image)
         raw_faces = _detect_once(detector, candidate)
         valid_faces = _select_valid_faces(raw_faces, candidate.shape)
         if not valid_faces:
@@ -282,6 +319,8 @@ def extract_embedding(image_bytes: bytes, required_pose: str | None = None):
         raise FaceAIError("Face feature তৈরি হয়নি। আবার চেষ্টা করুন।")
     feature /= norm
 
+    spoof = liveness.analyse(detected_image, face)
+
     size_score = min(100.0, ratio * 450.0)
     blur_score = min(100.0, blur / 2.0)
     quality = round(max(1.0, min(100.0, confidence * 45.0 + size_score * 0.35 + blur_score * 0.20)), 1)
@@ -296,6 +335,10 @@ def extract_embedding(image_bytes: bytes, required_pose: str | None = None):
         "pose": pose,
         "yaw_score": round(yaw_score, 3),
         "landmark_signature": [round((float(face[i]) - x) / max(bw, 1.0), 4) if i % 2 == 0 else round((float(face[i]) - y) / max(bh, 1.0), 4) for i in range(4, 14)],
+        "liveness_score": spoof.score,
+        "liveness_verdict": spoof.verdict,
+        "liveness_components": spoof.components,
+        "liveness_model": spoof.model_used,
     }
     return feature.tolist(), quality, diagnostics
 
@@ -308,3 +351,33 @@ def similarity(a, b):
 def best_match(candidate, samples):
     scores = [similarity(candidate, sample) for sample in samples]
     return max(scores) if scores else 0.0
+
+
+def gallery_score(candidate, samples) -> float:
+    """Mean of the two closest enrolled samples.
+
+    Taking the maximum lets a single lucky sample carry the decision, and the
+    false-accept rate of max-of-N grows with the gallery. Averaging the top two
+    keeps a genuine match while making an accidental one much harder.
+    """
+    scores = sorted((similarity(candidate, sample) for sample in samples), reverse=True)
+    if not scores:
+        return 0.0
+    if len(scores) == 1:
+        return float(scores[0])
+    return float((scores[0] + scores[1]) / 2.0)
+
+
+def best_impostor(candidate, rows) -> tuple[float, int | None]:
+    """Closest match among *other* employees, for the margin check.
+
+    `rows` are (employee_id, embedding) pairs. Verification that only compares
+    against the claimed employee cannot tell siblings apart; requiring the
+    claimed score to beat every other employee by a margin can.
+    """
+    best_score, best_employee = 0.0, None
+    for employee_id, embedding in rows:
+        score = similarity(candidate, embedding)
+        if score > best_score:
+            best_score, best_employee = score, employee_id
+    return float(best_score), best_employee

@@ -40,8 +40,15 @@ class Settings:
     duplicate_face_weight: float = float(os.getenv("DUPLICATE_FACE_WEIGHT", "0.10"))
     duplicate_pose_weight: float = float(os.getenv("DUPLICATE_POSE_WEIGHT", "0.15"))
     duplicate_landmark_weight: float = float(os.getenv("DUPLICATE_LANDMARK_WEIGHT", "0.20"))
+    duplicate_corroboration_gate: float = float(os.getenv("DUPLICATE_CORROBORATION_GATE", "0.72"))
     face_match_threshold: float = float(os.getenv("FACE_MATCH_THRESHOLD", "0.48"))
     face_quality_min: float = float(os.getenv("FACE_QUALITY_MIN", "45"))
+    # A sample below this never enters the gallery. A weak enrolment sample is
+    # permanent and makes every later verification harder.
+    face_enroll_quality_min: float = float(os.getenv("FACE_ENROLL_QUALITY_MIN", "55"))
+    # The claimed employee must beat every other employee by this much.
+    face_margin_min: float = float(os.getenv("FACE_MARGIN_MIN", "0.06"))
+    face_enroll_samples: int = int(os.getenv("FACE_ENROLL_SAMPLES", "3"))
     face_blur_min: float = float(os.getenv("FACE_BLUR_MIN", "42"))
 
     @property
