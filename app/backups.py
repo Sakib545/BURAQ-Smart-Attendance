@@ -24,6 +24,8 @@ from sqlalchemy import MetaData, delete, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import settings
+
+APP_VERSION = "9.19.0"
 from app import database
 
 logger = logging.getLogger(__name__)
@@ -148,7 +150,7 @@ def create_full_backup(target: Path | None = None) -> Path:
         "format": FORMAT,
         "version": VERSION,
         "created_at": now.isoformat(),
-        "app_version": "9.15.3",
+        "app_version": APP_VERSION,
         "source_database": database.database_kind(),
         "table_counts": counts,
         "tables": tables,
