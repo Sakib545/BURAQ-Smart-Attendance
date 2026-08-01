@@ -1,13 +1,3 @@
-
-## v9.16.0 — Easy Duty & Payroll UI
-
-- Existing features, routes, permissions, database and WhatsApp flow remain compatible.
-- Duty assignment now supports Start Date + End Date with Today, Tomorrow, This Week and This Month shortcuts.
-- Morning, Evening, Night and Custom presets are available; custom time fields appear only when needed.
-- Weekly recurring duty remains available under Advanced options.
-- Payroll uses manual OT only, as required by BURAQ policy. Attendance still supplies duty, present, absent and paid-leave metrics.
-- Forms, helper text, mobile layout and action hierarchy were simplified for HR users.
-
 # BURAQ Smart Attendance v8.0 Enterprise — Phase 1
 
 This build keeps the existing WhatsApp registration, Face AI, GPS, liveness challenge, attendance, employee import, secure settings, backup and Railway support, and adds the first enterprise HR layer.
@@ -300,3 +290,14 @@ python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
 - Setup marker থাকলেও credential missing হলে new Admin তৈরির বদলে protected recovery error দেখায়।
 - `/ready` response-এ `admin_setup_complete` status পাওয়া যায়।
 - Super Admin Settings থেকে current password যাচাই করে login email ও password পরিবর্তন করতে পারে।
+
+## v9.17 Easy Duty Management
+
+- Added a dedicated `/duty` page and separate Duty sidebar menu.
+- Select all employees or choose individual employees with search.
+- Assign duty using Start Date and End Date.
+- Sunday–Thursday use one regular schedule.
+- Friday has a separate start/end time and note.
+- Saturday is kept off automatically.
+- Existing duties in the selected range are updated safely.
+- Advanced reminder logs and legacy weekly tools remain available at `/duty-schedules`.
