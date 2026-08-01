@@ -131,5 +131,14 @@ def detect_duplicate(candidate: dict, previous_rows: Iterable[dict], thresholds:
             score = max(score, 0.93)
         if score > best.score:
             best = DuplicateResult(round(score, 6), "accept", int(row["id"]), *[round(x, 6) for x in components])
-    decision = "reject" if best.score >= thresholds.reject_at else "pending" if best.score >= thresholds.accept_below else "accept"
+    # Identity/pose similarity is expected for every new selfie of the same
+    # employee. Require strong image-hash evidence before calling it reused.
+    if best.hash_score >= 0.94:
+        decision = "reject"
+    elif best.hash_score >= 0.88 and best.score >= thresholds.reject_at:
+        decision = "reject"
+    elif best.hash_score >= 0.84 and best.score >= thresholds.accept_below:
+        decision = "pending"
+    else:
+        decision = "accept"
     return DuplicateResult(best.score, decision, best.matched_fingerprint_id, best.hash_score, best.face_score, best.pose_score, best.landmark_score)

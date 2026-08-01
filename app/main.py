@@ -33,7 +33,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.19.0"
+APP_VERSION = "9.19.1"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -1905,5 +1905,9 @@ def verify(hub_mode: str | None = Query(None, alias="hub.mode"), hub_verify_toke
     raise HTTPException(403, "Webhook verification failed")
 
 @app.post("/webhook/whatsapp")
-async def webhook(request: Request):
-    payload=await request.json(); processed=await handle(payload); return {"status":"ok","processed":processed}
+async def webhook(request: Request, background_tasks: BackgroundTasks):
+    payload = await request.json()
+    # Meta needs an immediate 2xx. Download and Face AI continue only after the
+    # acknowledgement, preventing Meta retries and lost selfie responses.
+    background_tasks.add_task(handle, payload)
+    return {"status": "accepted"}

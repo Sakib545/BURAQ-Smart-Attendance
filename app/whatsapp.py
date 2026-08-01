@@ -38,19 +38,22 @@ async def download_media(media_id: str):
     if not token or not media_id:
         return None
     headers = {"Authorization": f"Bearer {token}"}
-    try:
-        async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
-            meta = await client.get(f"https://graph.facebook.com/{api_version}/{media_id}", headers=headers)
-            meta.raise_for_status()
-            media_url = meta.json().get("url")
-            if not media_url:
-                return None
-            data = await client.get(media_url, headers=headers)
-            data.raise_for_status()
-            return data.content
-    except Exception:
-        logger.exception("Could not download WhatsApp media %s", media_id)
-        return None
+    for attempt in range(1, 4):
+        try:
+            async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+                meta = await client.get(f"https://graph.facebook.com/{api_version}/{media_id}", headers=headers)
+                meta.raise_for_status()
+                media_url = meta.json().get("url")
+                if not media_url:
+                    raise RuntimeError("Meta did not return a media URL")
+                data = await client.get(media_url, headers=headers)
+                data.raise_for_status()
+                return data.content
+        except Exception:
+            logger.exception("Could not download WhatsApp media %s attempt=%s", media_id, attempt)
+            if attempt < 3:
+                await asyncio.sleep(attempt)
+    return None
 
 
 async def send_text(to: str, text: str):
@@ -147,6 +150,21 @@ async def send_guided_response(phone: str, response: str):
     return result
 
 
+async def send_guided_response_with_retry(phone: str, response: str):
+    result = {"sent": False, "reason": "not attempted"}
+    for attempt in range(1, 4):
+        result = await send_guided_response(phone, response)
+        if result.get("sent"):
+            return result
+        status_code = int(result.get("status_code") or 0)
+        if 400 <= status_code < 500:
+            break
+        if attempt < 3:
+            await asyncio.sleep(attempt)
+    logger.error("WhatsApp response failed phone=%s result=%s", phone, result)
+    return result
+
+
 async def send_approval_flow(phone: str, name: str, staff_id: str):
     await send_text(phone, f"✅ আপনার BURAQ Attendance registration Admin approve করেছেন।\n\nনাম: {name}\nStaff ID: {staff_id}\n\n📸 পরবর্তী ধাপ: সামনে তাকিয়ে ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।")
 
@@ -187,8 +205,15 @@ async def handle(payload: dict):
                     await send_guided_response(phone, response)
                 elif typ == "image":
                     media_id = message.get("image", {}).get("id", "")
-                    image_bytes = await download_media(media_id)
-                    await send_guided_response(phone, receive_image(phone, media_id, image_bytes))
+                    try:
+                        image_bytes = await download_media(media_id)
+                        # OpenCV/Face AI is CPU-heavy. Running it in a worker
+                        # thread keeps webhook and Railway healthcheck responsive.
+                        response = await asyncio.to_thread(receive_image, phone, media_id, image_bytes)
+                    except Exception:
+                        logger.exception("Selfie processing failed phone=%s media_id=%s", phone, media_id)
+                        response = "⚠️ Selfie processing সাময়িকভাবে ব্যর্থ হয়েছে। একটি নতুন live selfie আবার পাঠান।"
+                    await send_guided_response_with_retry(phone, response)
                 else:
                     await send_text(phone, "এই message type এখনো supported নয়। Menu খুলতে লিখুন: Menu")
                 processed += 1
