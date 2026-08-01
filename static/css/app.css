@@ -181,6 +181,8 @@ table td,
 
 /* --- 3. Shell ----------------------------------------------------------- */
 
+.scrim { display: none; }
+
 .shell {
   min-height: 100vh;
   display: grid;
@@ -1091,6 +1093,7 @@ tbody tr:last-child td { border-bottom: 0; }
   [data-drawer="open"] .sidebar { transform: none; }
 
   [data-drawer="open"] .scrim {
+    display: block;
     position: fixed;
     inset: 0;
     background: rgba(10, 20, 16, .45);
