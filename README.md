@@ -301,3 +301,12 @@ python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
 - Saturday is kept off automatically.
 - Existing duties in the selected range are updated safely.
 - Advanced reminder logs and legacy weekly tools remain available at `/duty-schedules`.
+
+
+## v9.17.1 Duty Hotfix
+
+- Saturday now uses the regular duty schedule.
+- Friday remains a separate special duty schedule.
+- Select All reliably selects every active employee.
+- Clear resets employee selection, search, dates, times, office and notes.
+- Preview text and bulk duty creation now match the corrected weekly rules.

@@ -31,7 +31,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.17.0", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.17.1", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -240,7 +240,7 @@ def startup():
     if get_setting("admin_password_hash") and not get_setting("admin_setup_completed"):
         set_setting("admin_setup_completed","1")
     imported = import_employees()
-    logger.info("BURAQ v9.15.3 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v9.17.1 started database=%s employees_synced=%s", database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
@@ -258,7 +258,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.15.3"}
+    return {"status": "ok", "service": settings.app_name, "version": "9.17.1"}
 
 
 @app.get("/ready")
@@ -275,7 +275,7 @@ def ready():
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
         "admin_setup_complete": setup_ok,
-        "version": "9.15.3",
+        "version": "9.17.1",
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -1497,24 +1497,66 @@ def duty_management_page(request: Request, saved: str="", error: str=""):
             <div class='actions duty-shortcuts'><button type='button' class='btn secondary' data-range='today'>Today</button><button type='button' class='btn secondary' data-range='week'>This Week</button><button type='button' class='btn secondary' data-range='month'>This Month</button></div>
           </section>
           <section class='card duty-section'>
-            <div class='card-head'><div><div class='eyebrow'>Step 3</div><h2>Weekly Duty Schedule</h2><p class='sub'>Sunday–Thursday একই duty; Friday আলাদা। Saturday off থাকবে।</p></div></div>
+            <div class='card-head'><div><div class='eyebrow'>Step 3</div><h2>Weekly Duty Schedule</h2><p class='sub'>Friday আলাদা special duty; Sunday–Thursday এবং Saturday regular duty।</p></div></div>
             <div class='schedule-grid'>
-              <div class='schedule-card regular'><div class='schedule-days'>Sunday · Monday · Tuesday · Wednesday · Thursday</div><h3>Regular Duty</h3><div class='two'><div><label>Start Time</label><input type='time' name='regular_start' value='08:00' required></div><div><label>End Time</label><input type='time' name='regular_end' value='16:00' required></div></div><label>Office</label><input name='office_name' value='BURAQ Office' required><label>Note (optional)</label><input name='regular_note' placeholder='Regular duty'></div>
+              <div class='schedule-card regular'><div class='schedule-days'>Sunday · Monday · Tuesday · Wednesday · Thursday · Saturday</div><h3>Regular Duty</h3><div class='two'><div><label>Start Time</label><input type='time' name='regular_start' value='08:00' required></div><div><label>End Time</label><input type='time' name='regular_end' value='16:00' required></div></div><label>Office</label><input name='office_name' value='BURAQ Office' required><label>Note (optional)</label><input name='regular_note' placeholder='Regular duty'></div>
               <div class='schedule-card friday'><div class='schedule-days'>Friday · Special Day</div><h3>Friday Duty</h3><div class='two'><div><label>Start Time</label><input type='time' name='friday_start' value='16:00' required></div><div><label>End Time</label><input type='time' name='friday_end' value='22:00' required></div></div><label>Friday Note (optional)</label><input name='friday_note' value='Friday duty'></div>
             </div>
-            <label class='employee-pick saturday-off'><input type='checkbox' checked disabled><span><b>Saturday Off</b><small>Saturday-তে কোনো duty তৈরি হবে না।</small></span></label>
           </section>
           <section class='duty-actionbar'><div><b id='dutySummary'>Select employees and date range</b><div class='sub'>Existing duty থাকলে নতুন সময় দিয়ে update হবে।</div></div><div class='actions'><button type='button' class='btn secondary' id='previewDutyBtn'>Preview</button><button class='btn' type='submit'>Save Duty</button></div></section>
         </form>"""
     rows=''.join(f"<tr><td><b>{escape(r['duty_date'])}</b></td><td>{escape(r['staff_id'])} - {escape(r['name'])}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{escape(r['note'] or '—')}</td></tr>" for r in upcoming) or '<tr><td colspan=5>No upcoming duty assigned.</td></tr>'
     notice="<div class='notice'>Duty assigned successfully.</div>" if saved else (f"<div class='notice bad'>{escape(error)}</div>" if error else '')
-    body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty Management</div><h2>Manage Employee Duty</h2><div class='sub'>All employees, date range, regular schedule and separate Friday duty—সব এক page-এ।</div></div><div class='actions'><span class='pill'>Total {total}</span><span class='pill'>Assigned {assigned_n}</span><span class='pill'>Unassigned {unassigned}</span></div></div>{manage}<div class='section-gap'></div><div class='card' style='overflow:auto'><div class='card-head'><div><div class='eyebrow'>Assigned Duty</div><h2>Upcoming Duty List</h2></div><a class='btn secondary' href='/duty-schedules'>Advanced / Reminder Log</a></div><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th></tr></thead><tbody>{rows}</tbody></table></div>"""
+    body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty Management</div><h2>Manage Employee Duty</h2><div class='sub'>All employees, date range, regular schedule and separate Friday duty—সব এক page-এ। Saturday regular duty থাকবে।</div></div><div class='actions'><span class='pill'>Total {total}</span><span class='pill'>Assigned {assigned_n}</span><span class='pill'>Unassigned {unassigned}</span></div></div>{manage}<div class='section-gap'></div><div class='card' style='overflow:auto'><div class='card-head'><div><div class='eyebrow'>Assigned Duty</div><h2>Upcoming Duty List</h2></div><a class='btn secondary' href='/duty-schedules'>Advanced / Reminder Log</a></div><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th></tr></thead><tbody>{rows}</tbody></table></div>"""
     extra="""<style>
 .duty-section{margin-top:16px}.duty-search{display:flex;gap:12px;align-items:center;margin:14px 0}.duty-search input{flex:1}.employee-pick-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-height:360px;overflow:auto;padding:2px}.employee-pick{display:flex;gap:10px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);cursor:pointer}.employee-pick input{width:auto}.employee-pick span{display:grid;gap:2px}.employee-pick small{color:var(--muted)}.employee-pick:has(input:checked){border-color:var(--brand);background:rgba(8,127,91,.1)}.schedule-grid{display:grid;grid-template-columns:2fr 1fr;gap:14px}.schedule-card{padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}.schedule-card.friday{border-color:#7aa7ff;background:rgba(55,111,255,.08)}.schedule-days{font-size:12px;font-weight:850;color:var(--brand);text-transform:uppercase;letter-spacing:.06em}.friday .schedule-days{color:#376fff}.saturday-off{margin-top:12px}.duty-shortcuts{margin-top:12px}.duty-actionbar{position:sticky;bottom:12px;z-index:8;margin-top:16px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:var(--shadow);display:flex;justify-content:space-between;align-items:center;gap:12px}
 @media(max-width:900px){.employee-pick-grid{grid-template-columns:1fr 1fr}.schedule-grid{grid-template-columns:1fr}}
 @media(max-width:600px){.employee-pick-grid{grid-template-columns:1fr}.duty-actionbar{align-items:stretch;flex-direction:column}.duty-actionbar .actions{width:100%}.duty-actionbar .btn{flex:1}}
 </style><script>
-(function(){const boxes=[...document.querySelectorAll("input[name='employee_ids']")],count=document.getElementById('selectedDutyCount'),summary=document.getElementById('dutySummary'),search=document.getElementById('employeeDutySearch'),start=document.getElementById('dutyStartDate'),end=document.getElementById('dutyEndDate');function update(){const n=boxes.filter(x=>x.checked).length;count.textContent=n+' selected';summary.textContent=n?`${n} employee · ${start.value||'—'} to ${end.value||'—'}`:'Select employees and date range'}boxes.forEach(x=>x.addEventListener('change',update));start?.addEventListener('change',update);end?.addEventListener('change',update);document.getElementById('selectAllBtn')?.addEventListener('click',()=>{boxes.filter(x=>x.closest('.employee-pick').style.display!=='none').forEach(x=>x.checked=true);update()});document.getElementById('clearAllBtn')?.addEventListener('click',()=>{boxes.forEach(x=>x.checked=false);update()});search?.addEventListener('input',()=>{const q=search.value.toLowerCase();document.querySelectorAll('.employee-pick-grid .employee-pick').forEach(el=>el.style.display=el.dataset.search.includes(q)?'flex':'none')});document.querySelectorAll('[data-range]').forEach(b=>b.addEventListener('click',()=>{const now=new Date(),iso=d=>d.toISOString().slice(0,10);let a=new Date(now),z=new Date(now);if(b.dataset.range==='week'){const day=(now.getDay()+6)%7;a.setDate(now.getDate()-day);z=new Date(a);z.setDate(a.getDate()+6)}if(b.dataset.range==='month'){a=new Date(now.getFullYear(),now.getMonth(),1);z=new Date(now.getFullYear(),now.getMonth()+1,0)}start.value=iso(a);end.value=iso(z);update()}));document.getElementById('previewDutyBtn')?.addEventListener('click',()=>alert(summary.textContent+'\nRegular: Sunday–Thursday\nFriday: separate duty\nSaturday: off'));document.getElementById('bulkDutyForm')?.addEventListener('submit',e=>{if(!boxes.some(x=>x.checked)){e.preventDefault();alert('Select at least one employee.')}else if(end.value<start.value){e.preventDefault();alert('End Date cannot be earlier than Start Date.')}});update()})();
+document.addEventListener('DOMContentLoaded',()=>{
+  const form=document.getElementById('bulkDutyForm');
+  if(!form) return;
+  const boxes=Array.from(form.querySelectorAll("input[name='employee_ids']"));
+  const count=document.getElementById('selectedDutyCount');
+  const summary=document.getElementById('dutySummary');
+  const search=document.getElementById('employeeDutySearch');
+  const start=document.getElementById('dutyStartDate');
+  const end=document.getElementById('dutyEndDate');
+  const defaults={start:start.value,end:end.value,regularStart:form.regular_start.value,regularEnd:form.regular_end.value,fridayStart:form.friday_start.value,fridayEnd:form.friday_end.value,office:form.office_name.value,regularNote:form.regular_note.value,fridayNote:form.friday_note.value};
+  function update(){
+    const n=boxes.filter(x=>x.checked).length;
+    if(count) count.textContent=`${n} selected`;
+    if(summary) summary.textContent=n?`${n} employee · ${start.value||'—'} to ${end.value||'—'}`:'Select employees and date range';
+  }
+  function showAll(){form.querySelectorAll('.employee-pick-grid .employee-pick').forEach(el=>el.style.display='flex');}
+  boxes.forEach(x=>x.addEventListener('change',update));
+  start.addEventListener('change',update); end.addEventListener('change',update);
+  document.getElementById('selectAllBtn')?.addEventListener('click',()=>{boxes.forEach(x=>x.checked=true);update();});
+  document.getElementById('clearAllBtn')?.addEventListener('click',()=>{
+    boxes.forEach(x=>x.checked=false); search.value=''; showAll();
+    start.value=defaults.start; end.value=defaults.end;
+    form.regular_start.value=defaults.regularStart; form.regular_end.value=defaults.regularEnd;
+    form.friday_start.value=defaults.fridayStart; form.friday_end.value=defaults.fridayEnd;
+    form.office_name.value=defaults.office; form.regular_note.value=defaults.regularNote; form.friday_note.value=defaults.fridayNote;
+    update();
+  });
+  search.addEventListener('input',()=>{const q=search.value.trim().toLowerCase();form.querySelectorAll('.employee-pick-grid .employee-pick').forEach(el=>{el.style.display=el.dataset.search.includes(q)?'flex':'none';});});
+  document.querySelectorAll('[data-range]').forEach(b=>b.addEventListener('click',()=>{
+    const now=new Date(),iso=d=>{const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`};
+    let a=new Date(now),z=new Date(now);
+    if(b.dataset.range==='week'){const day=(now.getDay()+6)%7;a.setDate(now.getDate()-day);z=new Date(a);z.setDate(a.getDate()+6)}
+    if(b.dataset.range==='month'){a=new Date(now.getFullYear(),now.getMonth(),1);z=new Date(now.getFullYear(),now.getMonth()+1,0)}
+    start.value=iso(a);end.value=iso(z);update();
+  }));
+  document.getElementById('previewDutyBtn')?.addEventListener('click',()=>alert(`${summary.textContent}
+Regular: Sunday–Thursday + Saturday
+Friday: separate duty`));
+  form.addEventListener('submit',e=>{
+    if(!boxes.some(x=>x.checked)){e.preventDefault();alert('Select at least one employee.');return;}
+    if(!start.value||!end.value||end.value<start.value){e.preventDefault();alert('End Date cannot be earlier than Start Date.');}
+  });
+  update();
+});
 </script>"""
     response=layout("Duty Management",body,request,"duty")
     return HTMLResponse(response.body.decode().replace('</body>',extra+'</body>'))
@@ -1538,13 +1580,12 @@ def save_bulk_duty(request: Request, employee_ids: list[int]=Form(...), start_da
         current=start
         while current<=end:
             weekday=current.weekday()
-            if weekday!=5: # Saturday off
-                is_friday=weekday==4
-                st,et=(friday_start,friday_end) if is_friday else (regular_start,regular_end)
-                note=(friday_note if is_friday else regular_note).strip() or ('Friday duty' if is_friday else 'Regular duty')
-                for employee_id in selected:
-                    c.execute("INSERT INTO custom_duties(employee_id,duty_date,start_time,end_time,office_name,note,created_by) VALUES(?,?,?,?,?,?,?) ON CONFLICT(employee_id,duty_date) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time,office_name=excluded.office_name,note=excluded.note,is_active=excluded.is_active,updated_at=CURRENT_TIMESTAMP",(employee_id,current.isoformat(),st,et,office_name.strip() or 'BURAQ Office',note,actor)); created+=1
-                    c.execute("DELETE FROM duty_reminder_logs WHERE employee_id=? AND duty_date=?",(employee_id,current.isoformat()))
+            is_friday=weekday==4
+            st,et=(friday_start,friday_end) if is_friday else (regular_start,regular_end)
+            note=(friday_note if is_friday else regular_note).strip() or ('Friday duty' if is_friday else 'Regular duty')
+            for employee_id in selected:
+                c.execute("INSERT INTO custom_duties(employee_id,duty_date,start_time,end_time,office_name,note,created_by) VALUES(?,?,?,?,?,?,?) ON CONFLICT(employee_id,duty_date) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time,office_name=excluded.office_name,note=excluded.note,is_active=excluded.is_active,updated_at=CURRENT_TIMESTAMP",(employee_id,current.isoformat(),st,et,office_name.strip() or 'BURAQ Office',note,actor)); created+=1
+                c.execute("DELETE FROM duty_reminder_logs WHERE employee_id=? AND duty_date=?",(employee_id,current.isoformat()))
             current+=timedelta(days=1)
         audit(request,'bulk_assign','duty',f'{len(selected)} employees',f'{start_date} to {end_date}; {created} duty rows',db=c)
     return RedirectResponse('/duty?saved=1',303)
