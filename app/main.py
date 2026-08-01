@@ -31,7 +31,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.18.2", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.18.4", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -791,7 +791,7 @@ def employees_page(request: Request, q: str = "", department: str = "", shift: s
         reg='ok' if r['registration_status']=='approved' else 'warn'; face='ok' if r['face_count']>=3 else 'bad'
         actions=f"<a class='btn secondary' href='/employees/{r['id']}'>Profile</a>"
         if has_permission(request,'duty_view'): actions += f"<a class='btn secondary' href='/employees/{r['id']}/duty'>Duty</a>"
-        if can_reset: actions += f"<form method='post' action='/employees/{r['id']}/reset-face' style='display:inline'><button class='btn danger'>Reset Face</button></form>"
+        if can_reset: actions += f"<a class='btn danger' href='/employees/{r['id']}/reset'>Reset</a>"
         tr.append(f"<tr><td><input class='checkbox' type='checkbox' name='employee_ids' value='{r['id']}'></td><td><div style='display:flex;gap:9px;align-items:center'><span class='avatar'>{escape(initials)}</span><span><b>{escape(r['name'])}</b><br><span class='sub'>{escape(r['staff_id'])}</span></span></div></td><td>{escape(r['designation'] or '—')}</td><td>{escape(r['department'] or '—')}</td><td>{escape(r['shift'])}</td><td><span class='status {reg}'>{escape(r['registration_status'])}</span><br><span class='status {face}' style='margin-top:5px'>{r['face_count']}/3 Face</span></td><td>{escape(r['last_attendance'] or 'Never')}</td><td><div class='table-actions'>{actions}</div></td></tr>")
     depopts=''.join(f"<option {'selected' if department==d['department'] else ''}>{escape(d['department'])}</option>" for d in deps)
     add=''
@@ -995,17 +995,75 @@ def add_employee_note(request: Request, employee_id: int, note_type: str=Form('g
         audit(request,'employee_note_added','employee',str(employee_id),note_type,db=c)
     return RedirectResponse(f'/employees/{employee_id}',303)
 
-@app.post("/employees/{employee_id}/reset-face")
-def reset_employee_face(request: Request, employee_id: int):
+@app.get("/employees/{employee_id}/reset", response_class=HTMLResponse)
+def employee_reset_page(request: Request, employee_id: int):
     require_permission(request, "face_reset")
     with get_db() as c:
+        employee=c.execute("SELECT id,staff_id,name,registration_status,whatsapp_phone,phone FROM employees WHERE id=?",(employee_id,)).fetchone()
+    if not employee:
+        raise HTTPException(404,"Employee not found")
+    can_reset_all = request.session.get("role") == "super_admin" and bool(request.session.get("admin"))
+    reset_all_card = ""
+    if can_reset_all:
+        reset_all_card=f"""<div class='card' style='border-color:#fecaca'>
+        <div class='eyebrow' style='color:#b91c1c'>Danger zone</div><h3>Reset All</h3>
+        <p class='sub'>Attendance, leave, payroll, performance, duty, face data and onboarding history for this employee will be permanently removed. The employee master record and Basic Salary field remain available for setup again.</p>
+        <form method='post' action='/employees/{employee_id}/reset-all'>
+          <label>Type RESET ALL to confirm</label><input name='confirmation' autocomplete='off' placeholder='RESET ALL' required>
+          <button class='btn danger'>Reset All</button>
+        </form></div>"""
+    body=f"""<div class='hero'><div><div class='eyebrow'>Employee reset</div><h2>{escape(employee['name'])}</h2><div class='sub'>{escape(employee['staff_id'])} · {escape(employee['registration_status'])}</div></div><a class='btn secondary' href='/employees'>Back</a></div>
+    <div class='two'><div class='card'><div class='eyebrow'>Recommended</div><h3>Reset</h3>
+    <p class='sub'>Restarts WhatsApp registration and Face AI setup only. Employee profile, attendance, leave, payroll, performance and duty history stay unchanged.</p>
+    <form method='post' action='/employees/{employee_id}/reset-registration'><button class='btn'>Reset</button></form></div>{reset_all_card}</div>"""
+    return layout("Reset Employee",body,request,"employees")
+
+@app.post("/employees/{employee_id}/reset-registration")
+def reset_employee_registration(request: Request, employee_id: int, background_tasks: BackgroundTasks):
+    require_permission(request, "face_reset")
+    notify_phone=None
+    with get_db() as c:
+        employee=c.execute("SELECT staff_id,name,whatsapp_phone,phone FROM employees WHERE id=?",(employee_id,)).fetchone()
+        if not employee: raise HTTPException(404,"Employee not found")
+        notify_phone=employee["whatsapp_phone"] or employee["phone"]
+        for phone in {employee["whatsapp_phone"], employee["phone"]}:
+            if phone: c.execute("DELETE FROM conversation_states WHERE phone=?",(re.sub(r"\D","",phone),))
+        c.execute("DELETE FROM face_samples WHERE employee_id=?",(employee_id,))
+        c.execute("DELETE FROM face_profiles WHERE employee_id=?",(employee_id,))
+        c.execute("DELETE FROM pending_registrations WHERE employee_id=?",(employee_id,))
+        c.execute("UPDATE employees SET registration_status='unregistered',whatsapp_phone=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",(employee_id,))
+        if notify_phone:
+            normalized=re.sub(r"\D","",notify_phone)
+            c.execute("INSERT INTO conversation_states(phone,state) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET state=excluded.state,updated_at=CURRENT_TIMESTAMP",(normalized,"awaiting_staff_id"))
+        audit(request,'employee_registration_reset','employee',str(employee_id),'face and WhatsApp onboarding reset',db=c)
+    if notify_phone:
+        background_tasks.add_task(send_text,notify_phone,"🔄 আপনার BURAQ Attendance registration reset করা হয়েছে।\n\nআবার শুরু করতে আপনার Staff ID পাঠান।")
+    return RedirectResponse(f"/employees/{employee_id}?reset=registration",303)
+
+@app.post("/employees/{employee_id}/reset-all")
+def reset_employee_all(request: Request, employee_id: int, confirmation: str=Form(...)):
+    require_super_admin(request)
+    if confirmation.strip().upper() != "RESET ALL":
+        return RedirectResponse(f"/employees/{employee_id}/reset?error=confirmation",303)
+    with get_db() as c:
         employee=c.execute("SELECT whatsapp_phone,phone FROM employees WHERE id=?",(employee_id,)).fetchone()
-        c.execute("DELETE FROM face_samples WHERE employee_id=?",(employee_id,)); c.execute("DELETE FROM face_profiles WHERE employee_id=?",(employee_id,))
-        if employee:
-            phone=employee["whatsapp_phone"] or employee["phone"]
-            if phone: c.execute("INSERT INTO conversation_states(phone,state) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET state=excluded.state,updated_at=CURRENT_TIMESTAMP",(phone,"awaiting_face_registration"))
-        audit(request,'face_reset','employee',str(employee_id),db=c)
-    return RedirectResponse(f"/employees/{employee_id}",303)
+        if not employee: raise HTTPException(404,"Employee not found")
+        payroll_rows=c.execute("SELECT id FROM payroll_records WHERE employee_id=?",(employee_id,)).fetchall()
+        for row in payroll_rows:
+            c.execute("DELETE FROM payroll_change_logs WHERE payroll_id=?",(row['id'],))
+        # Delete dependent records in a safe order. The employee master row is preserved.
+        for table in ("attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
+            c.execute(f"DELETE FROM {table} WHERE employee_id=?",(employee_id,))
+        for phone in {employee["whatsapp_phone"], employee["phone"]}:
+            if phone: c.execute("DELETE FROM conversation_states WHERE phone=?",(re.sub(r"\D","",phone),))
+        c.execute("UPDATE employees SET registration_status='unregistered',whatsapp_phone=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",(employee_id,))
+        audit(request,'employee_all_reset','employee',str(employee_id),'all employee operational history reset; master record preserved',db=c)
+    return RedirectResponse(f"/employees/{employee_id}?reset=all",303)
+
+# Backward-compatible endpoint for older bookmarks/forms.
+@app.post("/employees/{employee_id}/reset-face")
+def reset_employee_face_legacy(request: Request, employee_id: int, background_tasks: BackgroundTasks):
+    return reset_employee_registration(request,employee_id,background_tasks)
 
 @app.get("/pending", response_class=HTMLResponse)
 def pending_page(request: Request):
