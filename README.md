@@ -1,3 +1,13 @@
+
+## v9.16.0 — Easy Duty & Payroll UI
+
+- Existing features, routes, permissions, database and WhatsApp flow remain compatible.
+- Duty assignment now supports Start Date + End Date with Today, Tomorrow, This Week and This Month shortcuts.
+- Morning, Evening, Night and Custom presets are available; custom time fields appear only when needed.
+- Weekly recurring duty remains available under Advanced options.
+- Payroll uses manual OT only, as required by BURAQ policy. Attendance still supplies duty, present, absent and paid-leave metrics.
+- Forms, helper text, mobile layout and action hierarchy were simplified for HR users.
+
 # BURAQ Smart Attendance v8.0 Enterprise — Phase 1
 
 This build keeps the existing WhatsApp registration, Face AI, GPS, liveness challenge, attendance, employee import, secure settings, backup and Railway support, and adds the first enterprise HR layer.

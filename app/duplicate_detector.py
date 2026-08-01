@@ -45,7 +45,7 @@ def _gray(image_bytes: bytes) -> np.ndarray:
 
 
 def _bits_to_hex(bits: np.ndarray) -> str:
-    return "".join(f"{int(x):x}" for x in np.packbits(bits.astype(np.uint8)))
+    return "".join(f"{int(x):02x}" for x in np.packbits(bits.astype(np.uint8)))
 
 
 def ahash(image_bytes: bytes, size: int = 8) -> str:
