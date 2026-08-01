@@ -505,14 +505,14 @@ def dashboard(request: Request):
     if has_permission(request,'attendance_edit'): quick.append(("/attendance","◎","Mark Attendance"))
     if has_permission(request,'duty_view'): quick.append(("/duty","▣","Assign Duty"))
     if has_permission(request,'leave_view'): quick.append(("/hr-operations","☂","Add Leave"))
-    if has_permission(request,'payroll_view'): quick.append(("/payroll","৳","Run Payroll"))
+    if has_permission(request,'payroll_view'): quick.append(("/payroll", ui.icon("banknote"), "Run Payroll"))
     if has_permission(request,'reports_view'): quick.append(("/reports","◔","View Reports"))
     quick_html=''.join(f"<a href='{url}'><span class='qicon'>{icon}</span><span>{label}</span></a>" for url,icon,label in quick)
     pending_items=[]
     if has_permission(request,'leave_view'): pending_items.append(("/hr-operations","♧","Pending Leaves",f"{pending_leave} leave requests",pending_leave))
     if has_permission(request,'approvals_view'): pending_items.append(("/pending","▣","Pending Approvals",f"{pending_registration} approvals",pending_registration))
     if has_permission(request,'attendance_edit'): pending_items.append(("/hr-operations","▤","Attendance Corrections",f"{pending_correction} correction requests",pending_correction))
-    if has_permission(request,'payroll_view'): pending_items.append(("/payroll","৳","Payroll Not Prepared",now.strftime('%B %Y'),payroll_pending))
+    if has_permission(request,'payroll_view'): pending_items.append(("/payroll", ui.icon("banknote"), "Payroll Not Prepared",now.strftime('%B %Y'),payroll_pending))
     pending_html=''.join(f"<a class='pending-item' href='{url}'><span class='pending-icon'>{icon}</span><span><b>{title}</b><div class='sub'>{subtitle}</div></span><span class='count-chip'>{count}</span><span>›</span></a>" for url,icon,title,subtitle,count in pending_items)
     body=f"""
     <div class='dashboard-head'>

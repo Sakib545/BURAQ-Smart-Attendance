@@ -699,9 +699,6 @@ th, td {
 }
 
 thead th {
-  position: sticky;
-  top: var(--topbar-h);
-  z-index: 2;
   background: var(--surface);
   color: var(--muted);
   font-size: 11px;
@@ -709,6 +706,12 @@ thead th {
   letter-spacing: .07em;
   text-transform: uppercase;
   border-bottom: 1px solid var(--rule-strong);
+}
+
+.sticky-head thead th {
+  position: sticky;
+  top: var(--topbar-h);
+  z-index: 2;
 }
 
 tbody tr:hover { background: var(--surface-2); }
@@ -784,7 +787,7 @@ tbody tr:last-child td { border-bottom: 0; }
   width: 100%;
   max-width: 42px;
   background: var(--present);
-  border-radius: var(--r-sm) var(--r-sm) 2px 2px;
+  border-radius: 4px 4px 2px 2px;
   position: relative;
   display: flex;
   justify-content: center;
@@ -1068,7 +1071,7 @@ tbody tr:last-child td { border-bottom: 0; }
 
 /* --- 13. Mobile ---------------------------------------------------------- */
 
-.mobile-menu, .mobile-panel, .tabbar { display: none; }
+.mobile-menu, .mobile-panel, .tabbar, .menu-btn { display: none; }
 
 @media (max-width: 1240px) {
   .dashboard-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -1123,7 +1126,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .searchbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-search { width: 100%; }
   .today-strip { display: none; }
-  thead th { top: 0; }
+  .sticky-head thead th { top: 0; }
 
   .tabbar {
     position: fixed;
@@ -1181,5 +1184,5 @@ tbody tr:last-child td { border-bottom: 0; }
   .page { padding: 0; max-width: none; }
   .card, .hero { border: 1px solid #ccc; box-shadow: none; break-inside: avoid; }
   body { background: #fff; color: #000; font-size: 11pt; }
-  thead th { position: static; }
+  .sticky-head thead th { position: static; }
 }

@@ -33,7 +33,7 @@
         <div class="nav-label">{{ group.label }}</div>
         <nav class="side-nav">
           {% for item in group.entries %}
-          <a href="{{ item.url }}" class="{{ 'active' if item.key == active else '' }}"{% if item.key == active %} aria-current="page"{% endif %}>
+          <a href="{{ item.url }}" title="{{ item.label }}" class="{{ 'active' if item.key == active else '' }}"{% if item.key == active %} aria-current="page"{% endif %}>
             {{ icon(item.icon) }}<span>{{ item.label }}</span>
           </a>
           {% endfor %}
