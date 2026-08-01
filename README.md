@@ -310,3 +310,10 @@ python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
 - Select All reliably selects every active employee.
 - Clear resets employee selection, search, dates, times, office and notes.
 - Preview text and bulk duty creation now match the corrected weekly rules.
+
+## v9.18 Dashboard UI
+- Dashboard redesigned to match the approved clean green-and-white layout.
+- Added five KPI cards, 7-day trend, workforce readiness, live attendance, pending work, and quick actions.
+- Sidebar simplified into direct module links based on permissions.
+- Removed non-essential global subtitle text and payroll calculation formula from the visible UI.
+- Existing attendance, duty, payroll, permission, WhatsApp, and Face AI logic remains unchanged.

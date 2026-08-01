@@ -31,7 +31,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.17.1", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.18.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -68,18 +68,38 @@ a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px
 @media(max-width:900px){.summary-strip{grid-template-columns:1fr 1fr}.shell{grid-template-columns:1fr}.sidebar{display:none}.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}.mobile-menu{display:block}.page{padding:16px}.topbar{padding:0 16px}}
 @media(max-width:700px){.control-grid{grid-template-columns:1fr}.profile-hero{grid-template-columns:1fr}.facts{grid-template-columns:1fr 1fr}.salary-breakdown{grid-template-columns:1fr 1fr}.searchbar{grid-template-columns:1fr}.calendar{gap:4px}.cal-day{min-height:58px;padding:5px}}
 @media(max-width:540px){.grid{grid-template-columns:1fr}.topbar{height:auto;padding:13px 16px;gap:10px}.title{font-size:22px}}
+
+/* v9.18 clean dashboard system */
+.dashboard-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:24px}.dashboard-head h1{font-size:30px;line-height:1.08;margin:0 0 8px;letter-spacing:-.8px}.dashboard-date{font-size:14px;color:var(--muted);font-weight:650}.dashboard-tools{display:flex;gap:10px;align-items:center}.dashboard-search{width:270px;margin:0;background:var(--panel)}
+.dashboard-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}.dashboard-kpi{padding:20px;min-height:138px}.dashboard-kpi .metric{font-size:30px}.dashboard-kpi .metric-foot{min-height:18px}.kpi-row{display:flex;gap:12px;align-items:center}.kpi-symbol{width:43px;height:43px;border-radius:50%;display:grid;place-items:center;font-size:20px;font-weight:800}.kpi-green{background:#e7f8f1;color:#07875e}.kpi-orange{background:#fff2e7;color:#e66a00}.kpi-red{background:#ffecef;color:#e11d48}.kpi-purple{background:#f3eefe;color:#7c3aed}.kpi-blue{background:#eaf2ff;color:#2563eb}.mini-line{height:5px;background:#edf1ef;border-radius:999px;margin-top:13px;overflow:hidden}.mini-line span{display:block;height:100%;border-radius:999px}.dashboard-main-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:16px}.dashboard-panel{min-height:290px}.readiness-wrap{display:grid;grid-template-columns:190px 1fr;align-items:center;gap:22px;padding:10px 12px}.donut{--pct:0;position:relative;width:160px;height:160px;border-radius:50%;background:conic-gradient(var(--brand) calc(var(--pct)*1%),#e7ecea 0);display:grid;place-items:center}.donut:after{content:'';position:absolute;width:116px;height:116px;background:var(--panel);border-radius:50%}.donut-value{position:relative;z-index:1;text-align:center}.donut-value b{display:block;font-size:34px}.legend-list{display:grid;gap:14px}.legend-row{display:grid;grid-template-columns:12px 1fr auto;gap:10px;align-items:center}.legend-dot{width:10px;height:10px;border-radius:50%}.dashboard-table{font-size:13px}.dashboard-table td,.dashboard-table th{padding:10px 8px}.status-badge{display:inline-flex;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:800}.status-present{background:#dcfce7;color:#15803d}.status-absent{background:#ffe4e6;color:#be123c}.status-leave{background:#f3e8ff;color:#7e22ce}.pending-list{display:grid}.pending-item{display:grid;grid-template-columns:42px 1fr auto 20px;align-items:center;gap:12px;padding:15px 0;border-bottom:1px solid var(--line);text-decoration:none}.pending-icon{width:39px;height:39px;border-radius:50%;display:grid;place-items:center;background:var(--panel2)}.count-chip{min-width:29px;text-align:center;background:#e8f8f2;color:var(--brand);padding:5px 8px;border-radius:999px;font-size:12px;font-weight:850}.dashboard-quick{display:grid;grid-template-columns:repeat(6,1fr);gap:12px}.dashboard-quick a{min-height:96px;padding:17px 10px;text-align:center;border:1px solid var(--line);background:var(--panel);border-radius:14px;text-decoration:none;font-weight:750;display:grid;place-items:center;gap:7px;box-shadow:var(--shadow)}.dashboard-quick .qicon{font-size:24px}.dashboard-quick a:hover{border-color:var(--brand);transform:translateY(-2px)}
+.topbar .sub{display:none}.topbar{height:64px}.side-sub.brand-sub{margin-bottom:28px}.sidebar .logo{font-size:21px}.page{max-width:1500px}.card{box-shadow:0 4px 18px rgba(22,59,49,.055)}
+@media(max-width:1150px){.dashboard-kpis{grid-template-columns:repeat(3,1fr)}.dashboard-quick{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:900px){.dashboard-main-grid{grid-template-columns:1fr}.dashboard-head{flex-direction:column}.dashboard-search{width:100%}.dashboard-kpis{grid-template-columns:1fr 1fr}.readiness-wrap{grid-template-columns:1fr;justify-items:center}.dashboard-quick{grid-template-columns:1fr 1fr}}
+@media(max-width:540px){.dashboard-kpis{grid-template-columns:1fr}.dashboard-quick{grid-template-columns:1fr 1fr}.dashboard-head h1{font-size:25px}}
+
 </style>
 """
 
 def layout(title: str, body: str, request: Request | None = None, active: str = ""):
     if request is not None and logged_in(request):
         role = request.session.get("role", "super_admin")
-        group={"performance":"employees","pending":"admin","duplicates":"admin","reports":"attendance","operations":"attendance","hr":"admin","audit":"admin","settings":"admin"}.get(active,active)
-        nav=[("dashboard","Dashboard","/dashboard",has_permission(request,"dashboard_view")),("employees","Employees","/employees",has_permission(request,"employees_view") or has_permission(request,"performance_view")),("attendance","Attendance","/attendance",any(has_permission(request,p) for p in ("reports_view","leave_view","attendance_edit"))),("duty","Duty","/duty",has_permission(request,"duty_view")),("payroll","Payroll","/payroll",has_permission(request,"payroll_view")),("admin","Admin","/admin",any(has_permission(request,p) for p in ("approvals_view","user_accounts_view","audit_view","settings_view","shift_manage","department_manage")))]
+        group={"pending":"admin","duplicates":"admin","operations":"leave","hr":"users","audit":"users"}.get(active,active)
+        nav=[
+            ("dashboard","⌂  Dashboard","/dashboard",has_permission(request,"dashboard_view")),
+            ("employees","♙  Employees","/employees",has_permission(request,"employees_view") or has_permission(request,"performance_view")),
+            ("attendance","◷  Attendance","/attendance",any(has_permission(request,p) for p in ("reports_view","leave_view","attendance_edit"))),
+            ("duty","▣  Duty","/duty",has_permission(request,"duty_view")),
+            ("leave","▢  Leave","/hr-operations",has_permission(request,"leave_view")),
+            ("payroll","৳  Payroll","/payroll",has_permission(request,"payroll_view")),
+            ("performance","⌁  Performance","/performance",has_permission(request,"performance_view")),
+            ("reports","▤  Reports","/reports",has_permission(request,"reports_view")),
+            ("users","♧  Users","/hr-accounts",has_permission(request,"user_accounts_view")),
+            ("settings","⚙  Settings","/settings",has_permission(request,"settings_view")),
+        ]
         links = "".join(f"<a class='{"active" if group==k else ""}' href='{u}'>{label}</a>" for k,label,u,visible in nav if visible)
         user_name = escape(str(request.session.get("user_name", "Admin")))
         role_label = escape(role.replace("_", " ").title())
-        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ Smart Attendance</div><div class='side-sub'>Simple Workforce Control Center</div><nav class='side-nav'>{links}<a href='/logout'>Logout</a></nav><div class='side-account'><b>{user_name}</b><div class='side-sub'>{role_label}</div></div></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div><div class='sub'>Everything organized in five simple sections</div></div><div class='actions'><details class='mobile-menu'><summary class='btn secondary'>☰ Menu</summary><div class='mobile-panel'>{links}<a href='/logout'>Logout</a></div></details><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></div></header><div class='page'>{body}</div></main></div>"
+        body = f"<div class='shell'><aside class='sidebar'><div class='logo'>BURAQ</div><div class='side-sub brand-sub'>Smart Attendance</div><nav class='side-nav'>{links}</nav><div class='side-account'><b>{user_name}</b><div class='side-sub'>{role_label} • Online</div></div><a class='btn secondary' style='margin-top:10px;text-align:center' href='/logout'>Logout</a></aside><main class='main'><header class='topbar'><div><div class='title'>{escape(title)}</div></div><div class='actions'><details class='mobile-menu'><summary class='btn secondary'>☰ Menu</summary><div class='mobile-panel'>{links}<a href='/logout'>Logout</a></div></details><button id='themeToggle' class='btn secondary' type='button'>◐ Theme</button></div></header><div class='page'>{body}</div></main></div>"
     script = """<script>(function(){const root=document.documentElement;const saved=localStorage.getItem('buraq-theme');if(saved)root.dataset.theme=saved;document.getElementById('themeToggle')?.addEventListener('click',()=>{const next=root.dataset.theme==='dark'?'light':'dark';root.dataset.theme=next;localStorage.setItem('buraq-theme',next);});})();</script>"""
     return HTMLResponse(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{escape(title)}</title>{CSS}</head><body>{body}{script}</body></html>")
 
@@ -364,73 +384,78 @@ def dashboard(request: Request):
     week_days = [(now.date() - timedelta(days=i)) for i in range(6, -1, -1)]
     with get_db() as c:
         workforce = c.execute("SELECT COUNT(*) employees,SUM(CASE WHEN registration_status='approved' THEN 1 ELSE 0 END) registered FROM employees").fetchone()
-        employees = workforce["employees"]; registered = int(workforce["registered"] or 0)
-        pending_registration = c.execute("SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"]
+        employees = int(workforce["employees"] or 0); registered = int(workforce["registered"] or 0)
+        pending_registration = int(c.execute("SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"] or 0)
         daily = c.execute("""SELECT SUM(CASE WHEN check_in IS NOT NULL THEN 1 ELSE 0 END) present,
             SUM(CASE WHEN check_out IS NOT NULL THEN 1 ELSE 0 END) checked_out,
             SUM(CASE WHEN late_minutes>0 THEN 1 ELSE 0 END) late,
             COALESCE(SUM(overtime_minutes),0) overtime FROM attendance WHERE work_date=?""",(today,)).fetchone()
         present=int(daily["present"] or 0); checked_out=int(daily["checked_out"] or 0); late=int(daily["late"] or 0); overtime=int(daily["overtime"] or 0)
-        on_leave = c.execute("SELECT COUNT(DISTINCT employee_id) c FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?", (today,today)).fetchone()["c"]
-        pending_leave = c.execute("SELECT COUNT(*) c FROM leave_requests WHERE status='pending'").fetchone()["c"]
-        pending_correction = c.execute("SELECT COUNT(*) c FROM attendance_corrections WHERE status='pending'").fetchone()["c"]
-        # `check_in`/`check_out` are text while `created_at` is a PostgreSQL
-        # timestamp.  Sort by the portable creation timestamp instead of
-        # mixing the column types in a COALESCE expression.
-        recent = c.execute("SELECT a.work_date,a.check_in,a.check_out,a.late_minutes,a.overtime_minutes,e.staff_id,e.name,e.department FROM attendance a JOIN employees e ON e.id=a.employee_id ORDER BY a.created_at DESC LIMIT 10").fetchall()
+        on_leave = int(c.execute("SELECT COUNT(DISTINCT employee_id) c FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?", (today,today)).fetchone()["c"] or 0)
+        pending_leave = int(c.execute("SELECT COUNT(*) c FROM leave_requests WHERE status='pending'").fetchone()["c"] or 0)
+        pending_correction = int(c.execute("SELECT COUNT(*) c FROM attendance_corrections WHERE status='pending'").fetchone()["c"] or 0)
         week_counts=c.execute("SELECT work_date,COUNT(*) c FROM attendance WHERE work_date>=? AND work_date<=? AND check_in IS NOT NULL GROUP BY work_date",(week_days[0].isoformat(),week_days[-1].isoformat())).fetchall()
-        by_day={r['work_date']:r['c'] for r in week_counts}; weekly=[(day,by_day.get(day.isoformat(),0)) for day in week_days]
-    absent = max(employees - present - on_leave, 0)
-    attendance_rate = round((present / employees * 100), 1) if employees else 0
-    cfg, db = configured(), database_ok()
-    warning = database_warning()
-    can_whatsapp = has_permission(request, "whatsapp_settings")
-    can_export = has_permission(request, "reports_export")
-    can_approvals = has_permission(request, "approvals_view")
-    can_operations = has_permission(request, "leave_view")
-    max_week = max([v for _,v in weekly] + [1])
-    chart = ''.join(f"<div class='bar-wrap'><div class='bar' style='height:{max(8, int(v/max_week*150))}px'><span class='bar-value'>{v}</span></div><div class='bar-label'>{d.strftime('%a')}</div></div>" for d,v in weekly)
-    timeline = ''
-    for r in recent:
-        event_time = (r['check_out'] or r['check_in'] or '')
-        event_label = 'Checked out' if r['check_out'] else 'Checked in'
-        initials = ''.join(x[0] for x in str(r['name']).split()[:2]).upper() or 'E'
-        badge = 'Late' if r['late_minutes'] else ('OT' if r['overtime_minutes'] else 'On time')
-        timeline += f"<div class='timeline-item'><div class='avatar'>{escape(initials)}</div><div><b>{escape(r['name'])}</b><div class='sub'>{escape(r['staff_id'])} • {event_label} • {escape((event_time[11:16] if len(event_time)>15 else event_time) or '-')}</div></div><span class='pill'>{badge}</span></div>"
-    if not timeline: timeline = "<div class='notice'>আজ এখনো কোনো attendance activity নেই।</div>"
+        live_rows=c.execute("""SELECT e.name,e.staff_id,a.check_in,a.check_out,
+            CASE WHEN l.employee_id IS NOT NULL THEN 'leave' WHEN a.check_in IS NOT NULL THEN 'present' ELSE 'absent' END status
+            FROM employees e
+            LEFT JOIN attendance a ON a.employee_id=e.id AND a.work_date=?
+            LEFT JOIN (SELECT DISTINCT employee_id FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?) l ON l.employee_id=e.id
+            WHERE e.is_active=1 ORDER BY CASE WHEN a.check_in IS NOT NULL THEN 0 ELSE 1 END,e.name LIMIT 5""",(today,today,today)).fetchall()
+    absent=max(employees-present-on_leave,0)
+    attendance_rate=round((present/employees*100),1) if employees else 0
+    by_day={str(r['work_date']):int(r['c']) for r in week_counts}; weekly=[(d,by_day.get(d.isoformat(),0)) for d in week_days]
+    max_week=max([v for _,v in weekly]+[1])
+    chart=''.join(f"<div class='bar-wrap'><div class='bar' style='height:{max(8,int(v/max_week*145))}px'><span class='bar-value'>{v}</span></div><div class='bar-label'>{d.strftime('%a')}</div></div>" for d,v in weekly)
+    live_table=''
+    for r in live_rows:
+        initials=''.join(x[0] for x in str(r['name']).split()[:2]).upper() or 'E'
+        status=str(r['status']); cls={'present':'status-present','leave':'status-leave'}.get(status,'status-absent')
+        live_table += f"<tr><td><div class='kpi-row'><span class='avatar'>{escape(initials)}</span><span><b>{escape(str(r['name']))}</b><div class='sub'>{escape(str(r['staff_id']))}</div></span></div></td><td><span class='status-badge {cls}'>{status.title()}</span></td><td>{escape(str(r['check_in'] or '—'))}</td><td>{escape(str(r['check_out'] or '—'))}</td></tr>"
+    readiness_pct=attendance_rate
+    pending_total=pending_registration+pending_leave+pending_correction
+    payroll_pending=0
+    name=escape(str(request.session.get('user_name','Admin')))
+    role=escape(str(request.session.get('role','super_admin')).replace('_',' ').title())
     quick=[]
-    if has_permission(request,'employees_view'): quick.append("<a class='quick-link' href='/employees'>👥 Employee Directory</a>")
-    if can_approvals: quick.append(f"<a class='quick-link' href='/pending'>✅ Registration Approvals <span class='pill'>{pending_registration}</span></a>")
-    if can_operations: quick.append(f"<a class='quick-link' href='/attendance'>🗂 Attendance Center <span class='pill'>{pending_leave+pending_correction}</span></a>")
-    if has_permission(request,'reports_view'): quick.append("<a class='quick-link' href='/reports'>📊 Open Reports</a>")
-    if has_permission(request,'user_accounts_view'): quick.append("<a class='quick-link' href='/hr-accounts'>🔐 User & Permissions</a>")
-    if has_permission(request,'settings_view'): quick.append("<a class='quick-link' href='/settings'>⚙️ System Settings</a>")
-    system_note = f"<div class='notice' style='background:#fef3c7;color:#92400e'>{escape(warning)}</div>" if warning else ''
+    if has_permission(request,'employees_add'): quick.append(("/employees","♙","Add Employee"))
+    if has_permission(request,'attendance_edit'): quick.append(("/attendance","◎","Mark Attendance"))
+    if has_permission(request,'duty_view'): quick.append(("/duty","▣","Assign Duty"))
+    if has_permission(request,'leave_view'): quick.append(("/hr-operations","☂","Add Leave"))
+    if has_permission(request,'payroll_view'): quick.append(("/payroll","৳","Run Payroll"))
+    if has_permission(request,'reports_view'): quick.append(("/reports","◔","View Reports"))
+    quick_html=''.join(f"<a href='{url}'><span class='qicon'>{icon}</span><span>{label}</span></a>" for url,icon,label in quick)
+    pending_items=[]
+    if has_permission(request,'leave_view'): pending_items.append(("/hr-operations","♧","Pending Leaves",f"{pending_leave} leave requests",pending_leave))
+    if has_permission(request,'approvals_view'): pending_items.append(("/pending","▣","Pending Approvals",f"{pending_registration} approvals",pending_registration))
+    if has_permission(request,'attendance_edit'): pending_items.append(("/hr-operations","▤","Attendance Corrections",f"{pending_correction} correction requests",pending_correction))
+    if has_permission(request,'payroll_view'): pending_items.append(("/payroll","৳","Payroll Not Prepared",now.strftime('%B %Y'),payroll_pending))
+    pending_html=''.join(f"<a class='pending-item' href='{url}'><span class='pending-icon'>{icon}</span><span><b>{title}</b><div class='sub'>{subtitle}</div></span><span class='count-chip'>{count}</span><span>›</span></a>" for url,icon,title,subtitle,count in pending_items)
     body=f"""
-    <section class='hero'><div><div class='eyebrow'>BURAQ Control Center</div><h2>Good {('morning' if now.hour<12 else 'afternoon' if now.hour<17 else 'evening')}, {escape(str(request.session.get('user_name','Admin')))}</h2><div class='sub'>Live workforce overview for {now.strftime('%A, %d %B %Y')}</div></div><div><span class='status {'ok' if db else 'bad'}'>{'All systems operational' if db else 'System attention required'}</span></div></section>
-    <div class='grid'>
-      <div class='card metric-card'><div class='card-head'><span class='metric-label'>Present Today</span><span class='kpi-icon'>✓</span></div><div class='metric'>{present}</div><div class='metric-foot'>{attendance_rate}% of workforce</div></div>
-      <div class='card metric-card'><div class='card-head'><span class='metric-label'>Late Today</span><span class='kpi-icon'>◷</span></div><div class='metric'>{late}</div><div class='metric-foot'>Needs HR visibility</div></div>
-      <div class='card metric-card'><div class='card-head'><span class='metric-label'>Absent</span><span class='kpi-icon'>!</span></div><div class='metric'>{absent}</div><div class='metric-foot'>{on_leave} employee(s) on leave</div></div>
-      <div class='card metric-card'><div class='card-head'><span class='metric-label'>Overtime</span><span class='kpi-icon'>↗</span></div><div class='metric'>{overtime}m</div><div class='metric-foot'>{checked_out} check-outs completed</div></div>
+    <div class='dashboard-head'>
+      <div><h1>Welcome back,<br>{name} <span class='status ok' style='vertical-align:middle'>{role}</span></h1><div class='dashboard-date'>▣ &nbsp;{now.strftime('%A')} • {now.strftime('%d %B %Y')}</div></div>
+      <div class='dashboard-tools'><input class='dashboard-search' type='search' placeholder='Search anything...' aria-label='Search'><button class='btn secondary'>⌕</button></div>
+    </div>
+    <div class='dashboard-kpis'>
+      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-green'>♙</span><div><div class='metric-label'>Present Today</div><div class='metric'>{present}</div></div></div><div class='metric-foot'>{attendance_rate}% of workforce</div><div class='mini-line'><span style='width:{attendance_rate}%;background:#10b981'></span></div></div>
+      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-orange'>◷</span><div><div class='metric-label'>Late Today</div><div class='metric'>{late}</div></div></div><div class='metric-foot'>{'Need attention' if late else 'No late attendance'}</div><div class='mini-line'><span style='width:{min(100,late*10)}%;background:#f97316'></span></div></div>
+      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-red'>♙</span><div><div class='metric-label'>Absent</div><div class='metric'>{absent}</div></div></div><div class='metric-foot'>{round(absent/employees*100,1) if employees else 0}% of workforce</div><div class='mini-line'><span style='width:{round(absent/employees*100,1) if employees else 0}%;background:#ef476f'></span></div></div>
+      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-purple'>☂</span><div><div class='metric-label'>On Leave</div><div class='metric'>{on_leave}</div></div></div><div class='metric-foot'>{round(on_leave/employees*100,1) if employees else 0}% of workforce</div><div class='mini-line'><span style='width:{round(on_leave/employees*100,1) if employees else 0}%;background:#8b5cf6'></span></div></div>
+      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-blue'>◷</span><div><div class='metric-label'>Overtime (Today)</div><div class='metric'>{overtime}m</div></div></div><div class='metric-foot'>{checked_out} check-outs</div></div>
     </div>
     <div class='section-gap'></div>
-    <div class='two'>
-      <div class='card'><div class='card-head'><div><h3>7-Day Attendance Trend</h3><div class='sub'>Daily checked-in employees</div></div>{"<a class='btn secondary' href='/reports'>View report</a>" if has_permission(request,'reports_view') else ''}</div><div class='chart'>{chart}</div></div>
-      <div class='card'><div class='card-head'><div><h3>Workforce Readiness</h3><div class='sub'>Registration and attendance coverage</div></div><span class='pill'>{employees} employees</span></div><p class='sub'>WhatsApp registered</p><div class='progress'><span style='width:{(registered/employees*100 if employees else 0):.1f}%'></span></div><p><b>{registered}</b> of {employees}</p><p class='sub'>Today attendance</p><div class='progress'><span style='width:{attendance_rate}%'></span></div><p><b>{present}</b> checked in • <b>{checked_out}</b> checked out</p></div>
+    <div class='dashboard-main-grid'>
+      <div class='card dashboard-panel'><div class='card-head'><h3>7-Day Attendance Trend</h3>{"<a class='btn secondary' href='/reports'>View Report</a>" if has_permission(request,'reports_view') else ''}</div><div class='chart'>{chart}</div></div>
+      <div class='card dashboard-panel'><div class='card-head'><h3>Workforce Readiness</h3></div><div class='readiness-wrap'><div class='donut' style='--pct:{readiness_pct}'><div class='donut-value'><b>{round(readiness_pct)}%</b><span class='sub'>Today</span></div></div><div class='legend-list'><div class='legend-row'><span class='legend-dot' style='background:#dfe6e3'></span><span>Registered</span><b>{registered}</b></div><div class='legend-row'><span class='legend-dot' style='background:#079669'></span><span>Present</span><b>{present}</b></div><div class='legend-row'><span class='legend-dot' style='background:#ef476f'></span><span>Absent</span><b>{absent}</b></div><div class='legend-row'><span class='legend-dot' style='background:#8b5cf6'></span><span>On Leave</span><b>{on_leave}</b></div></div></div><div class='sub'>{present} of {employees} employees present today</div></div>
     </div>
     <div class='section-gap'></div>
-    <div class='two'>
-      <div class='card'><div class='card-head'><div><h3>Live Attendance Timeline</h3><div class='sub'>Most recent employee activity</div></div>{"<a class='btn secondary' href='/export/attendance.csv'>Export</a>" if can_export else ''}</div><div class='timeline'>{timeline}</div></div>
-      <div style='display:grid;gap:16px'>
-        <div class='card'><div class='card-head'><h3>Pending Work</h3><span class='pill'>{pending_registration+pending_leave+pending_correction}</span></div><div class='health-list'><div class='health-row'><span>Registration approvals</span><b>{pending_registration}</b></div><div class='health-row'><span>Leave requests</span><b>{pending_leave}</b></div><div class='health-row'><span>Attendance corrections</span><b>{pending_correction}</b></div></div></div>
-        <div class='card'><h3>Quick Actions</h3><div class='quick-grid'>{''.join(quick)}</div></div>
-      </div>
+    <div class='dashboard-main-grid'>
+      <div class='card'><div class='card-head'><h3>Live Attendance</h3><a class='btn secondary' href='/employees'>View All</a></div><div style='overflow:auto'><table class='dashboard-table'><thead><tr><th>Employee</th><th>Status</th><th>Check In</th><th>Check Out</th></tr></thead><tbody>{live_table or '<tr><td colspan=4>No employee records.</td></tr>'}</tbody></table></div></div>
+      <div class='card'><div class='card-head'><h3>Pending Work</h3><span class='pill'>{pending_total}</span></div><div class='pending-list'>{pending_html or '<div class="sub">No pending work.</div>'}</div></div>
     </div>
     <div class='section-gap'></div>
-    <div class='card'><div class='card-head'><div><h3>System Health</h3><div class='sub'>Production services and integrations</div></div><span class='status {'ok' if db and cfg else 'warn'}'>{'Healthy' if db and cfg else 'Attention'}</span></div>{system_note}<div class='grid'><div><span class='health-dot'></span> <b>Database</b><div class='sub'>{escape(database_kind())}</div></div><div><span class='health-dot' style='background:{'#15803d' if cfg else '#b45309'}'></span> <b>WhatsApp</b><div class='sub'>{'Connected' if cfg else 'Setup needed'}</div></div><div><span class='health-dot'></span> <b>Webhook</b><div class='sub'>Active</div></div><div><span class='health-dot'></span> <b>Face AI</b><div class='sub'>Ready</div></div></div></div>
+    <h3 style='margin:2px 0 14px'>Quick Actions</h3><div class='dashboard-quick'>{quick_html}</div>
     """
-    return layout("Control Center", body, request, "dashboard")
+    return layout("Dashboard", body, request, "dashboard")
 
 @app.get("/attendance", response_class=HTMLResponse)
 def attendance_center(request: Request):
@@ -1130,8 +1155,8 @@ def payroll_page(request: Request, month: str="", saved: str="", error: str=""):
         table.append(f"<tr><td><b>{escape(r['staff_id'])}</b><br><span class='sub'>{escape(r['name'])}</span></td><td>{_money(r['fixed_salary'])}</td><td>{r['overtime_hours']:.2f} × {_money(r['overtime_rate'])}<br><b>{_money(r['overtime_amount'])}</b></td><td>{_money(r['bonus'])}</td><td>{_money(total_ded)}</td><td><b>{_money(r['net_salary'])}</b></td><td><span class='status {state}'>{escape(r['payment_status'])}</span></td><td>{controls}</td></tr>")
     gross=sum(float(r['net_salary']) for r in rows); paid=sum(float(r['net_salary']) for r in rows if r['payment_status']=='paid')
     export_buttons=(f"<form method='post' action='/payroll/bulk-prepare' style='display:inline'><input type='hidden' name='month' value='{month}'><button class='btn'>Prepare All Employees</button></form>" if can_manage else "")+(f"<a class='btn secondary' href='/payroll/export.xlsx?month={month}'>Excel</a><a class='btn secondary' href='/payroll/export.pdf?month={month}'>PDF</a>" if can_export else "")+("<a class='btn secondary' href='/settings/payroll-backup'>Backup</a>" if request.session.get('role')=='super_admin' else "")
-    body=f"""{notices}<div class='hero'><div><div class='eyebrow'>Private HR Module</div><h2>Salary & Payroll</h2><div class='sub'>Employees cannot access this page or its exports.</div></div><div class='actions'>{export_buttons}</div></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><div style='max-width:220px'><label>Salary Month</label><input type='month' name='month' value='{month}'></div><button class='btn'>Open Month</button></form></div><div class='grid'><div class='card'><div class='sub'>Employees</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Net Payroll</div><div class='metric'>৳{_money(gross)}</div></div><div class='card'><div class='sub'>Paid</div><div class='metric'>৳{_money(paid)}</div></div><div class='card'><div class='sub'>Unpaid</div><div class='metric'>৳{_money(gross-paid)}</div></div></div><div class='section-gap'></div><div class='two'>{form}<div class='card'><h2>Calculation</h2><div class='code'>Per Day = Fixed Salary ÷ Scheduled Duty Days\nAbsent = Scheduled - Worked - Paid Leave\nNet = Fixed + Overtime + Bonus - Absent Deduction - Other Deduction</div><p class='sub'>Approved leave is paid and does not reduce salary. Employees cannot view payroll.</p></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>{escape(month)} Salary Sheet</h2><table><thead><tr><th>Employee</th><th>Fixed</th><th>Overtime</th><th>Bonus</th><th>Other Deduction</th><th>Net</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(table) or '<tr><td colspan=8>No salary records for this month.</td></tr>'}</tbody></table></div>"""
-    return layout("Private Payroll",body,request,"payroll")
+    body=f"""{notices}<div class='hero'><div><h2>Salary & Payroll</h2></div><div class='actions'>{export_buttons}</div></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><div style='max-width:220px'><label>Salary Month</label><input type='month' name='month' value='{month}'></div><button class='btn'>Open Month</button></form></div><div class='grid'><div class='card'><div class='sub'>Employees</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Net Payroll</div><div class='metric'>৳{_money(gross)}</div></div><div class='card'><div class='sub'>Paid</div><div class='metric'>৳{_money(paid)}</div></div><div class='card'><div class='sub'>Unpaid</div><div class='metric'>৳{_money(gross-paid)}</div></div></div><div class='section-gap'></div><div class='two'>{form}<div class='card'><h2>Payroll Status</h2><div class='health-list'><div class='health-row'><span>Month</span><b>{escape(month)}</b></div><div class='health-row'><span>Employees</span><b>{len(rows)}</b></div><div class='health-row'><span>Net Payroll</span><b>৳{_money(gross)}</b></div><div class='health-row'><span>Paid</span><b>৳{_money(paid)}</b></div></div></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>{escape(month)} Salary Sheet</h2><table><thead><tr><th>Employee</th><th>Fixed</th><th>Overtime</th><th>Bonus</th><th>Other Deduction</th><th>Net</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(table) or '<tr><td colspan=8>No salary records for this month.</td></tr>'}</tbody></table></div>"""
+    return layout("Payroll",body,request,"payroll")
 
 @app.post("/payroll")
 def save_payroll(request: Request, employee_id: int=Form(...), salary_month: str=Form(...), fixed_salary: float=Form(...), overtime_hours: float=Form(0), overtime_rate: float=Form(0), overtime_mode: str=Form("auto"), bonus: float=Form(0), advance: float=Form(0), fine: float=Form(0), deduction: float=Form(0), adjustment_reason: str=Form(""), note: str=Form(""), return_month: str=Form(""), profile_employee_id: int=Form(0)):
