@@ -57,13 +57,26 @@ async def request_context(request: Request, call_next):
     logger.info("request_id=%s method=%s path=%s status=%s duration_ms=%s", request_id, request.method, request.url.path, response.status_code, duration_ms)
     return response
 
+def nav_badges(request: Request) -> dict:
+    """Counts shown next to sidebar items. Never allowed to break a page."""
+    if not has_permission(request, "approvals_view"):
+        return {}
+    try:
+        with get_db() as c:
+            waiting = c.execute("SELECT COUNT(*) c FROM attendance_fingerprints WHERE review_status='pending'").fetchone()["c"]
+        return {"duplicates": int(waiting or 0)}
+    except Exception:
+        logger.warning("nav badge count failed", exc_info=True)
+        return {}
+
+
 def layout(title: str, body: str, request: Request | None = None, active: str = ""):
     """Wrap route markup in the application shell."""
     chrome = request is not None and logged_in(request)
     nav_groups: list = []
     user_name = role_label = today_line = ""
     if chrome:
-        nav_groups = ui.build_nav(lambda flag: has_permission(request, flag))
+        nav_groups = ui.build_nav(lambda flag: has_permission(request, flag), nav_badges(request))
         user_name = str(request.session.get("user_name", "Admin"))
         role_label = str(request.session.get("role", "super_admin")).replace("_", " ").title()
         today_line = datetime.now(ZoneInfo(settings.timezone)).strftime("%a %d %b, %I:%M %p")
