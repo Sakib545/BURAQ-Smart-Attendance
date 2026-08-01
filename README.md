@@ -157,7 +157,7 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 
 ## v9.6 Private HR/Admin Payroll
 
-- HR/Admin manually enters fixed salary, overtime hours/rate, bonus, deduction and private notes.
+- HR/Admin manually enters basic salary, overtime hours/rate, bonus, deduction and private notes.
 - Net salary and overtime amount are calculated automatically.
 - Monthly paid/unpaid tracking, individual PDF payslips, monthly PDF report and styled Excel export.
 - `payroll_view`, `payroll_manage` and `payroll_export` permissions protect every page and download.
@@ -199,7 +199,7 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 - Fixed salary is divided by scheduled duty days to calculate the per-day salary.
 - Missed scheduled duties are deducted automatically; approved paid leave is excluded from absence.
 - The monthly Excel workbook includes every active employee in one file, with Summary and Salary Sheet tabs.
-- Salary Sheet shows scheduled, worked, leave and absent days alongside fixed salary, deductions, overtime, bonus, gross and net salary.
+- Salary Sheet shows scheduled, worked, leave and absent days alongside basic salary, deductions, overtime, bonus, gross and net salary.
 - Payroll management and exports remain private to authorized HR/Admin users.
 - v9.11.1 renames the monthly PDF to BURAQ Payment Sheet and displays the selected month prominently.
 - v9.11.2 sets both Excel tabs to centered A4 landscape, fitting each complete sheet onto one printed page.
