@@ -90,7 +90,9 @@ def log_face_event(
                     float(diagnostics.get("liveness_score", 0.0)),
                     diagnostics.get("liveness_verdict", ""),
                     json.dumps(diagnostics.get("liveness_components", {})),
-                    1 if diagnostics.get("liveness_model") else 0,
+                    # Must be a real bool: on Postgres this column is BOOLEAN and
+                    # an integer 0/1 is rejected outright. SQLite stores it as 1/0.
+                    bool(diagnostics.get("liveness_model")),
                     round(float(elapsed_ms), 2),
                 ),
             )
