@@ -1,3 +1,8 @@
+## v9.18.1 Dashboard PostgreSQL Hotfix
+
+- Fixed dashboard 500 error on Railway PostgreSQL caused by comparing a Boolean column with integer `1`.
+- No feature, database data, permission, attendance, duty, payroll, WhatsApp, or Face AI behavior changed.
+
 # BURAQ Smart Attendance v8.0 Enterprise — Phase 1
 
 This build keeps the existing WhatsApp registration, Face AI, GPS, liveness challenge, attendance, employee import, secure settings, backup and Railway support, and adds the first enterprise HR layer.

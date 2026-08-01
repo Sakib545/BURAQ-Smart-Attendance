@@ -400,7 +400,7 @@ def dashboard(request: Request):
             FROM employees e
             LEFT JOIN attendance a ON a.employee_id=e.id AND a.work_date=?
             LEFT JOIN (SELECT DISTINCT employee_id FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?) l ON l.employee_id=e.id
-            WHERE e.is_active=1 ORDER BY CASE WHEN a.check_in IS NOT NULL THEN 0 ELSE 1 END,e.name LIMIT 5""",(today,today,today)).fetchall()
+            WHERE e.is_active ORDER BY CASE WHEN a.check_in IS NOT NULL THEN 0 ELSE 1 END,e.name LIMIT 5""",(today,today,today)).fetchall()
     absent=max(employees-present-on_leave,0)
     attendance_rate=round((present/employees*100),1) if employees else 0
     by_day={str(r['work_date']):int(r['c']) for r in week_counts}; weekly=[(d,by_day.get(d.isoformat(),0)) for d in week_days]
