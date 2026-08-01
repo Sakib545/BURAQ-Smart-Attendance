@@ -31,3 +31,10 @@ def test_new_image_is_accepted():
     second=make_fingerprint(image_bytes(2),[0.0,1.0],{"pose":"right","yaw_score":.4,"landmark_signature":[.8,.9]})
     old={"id":2,**first,"embedding":"[1.0,0.0]","landmarks":"[0.1,0.2]"}
     assert detect_duplicate(second,[old],DuplicateThresholds()).decision=="accept"
+
+
+def test_same_person_new_photo_is_not_rejected():
+    first=make_fingerprint(image_bytes(11),[1.0,0.0],{"pose":"straight","yaw_score":0.01,"landmark_signature":[.2,.3]})
+    second=make_fingerprint(image_bytes(22),[.999,.045],{"pose":"straight","yaw_score":0.03,"landmark_signature":[.23,.28]})
+    old={"id":9,**first,"embedding":"[1.0,0.0]","landmarks":"[0.2,0.3]"}
+    assert detect_duplicate(second,[old],DuplicateThresholds()).decision == "accept"

@@ -311,7 +311,9 @@ def receive_image(phone, media_id, image_bytes=None):
     with get_db() as c:
         rows = c.execute("SELECT embedding FROM face_samples WHERE employee_id=? ORDER BY id", (employee["id"],)).fetchall()
     score = best_match(candidate, [json.loads(r["embedding"]) for r in rows])
-    threshold = 0.46
+    threshold = settings.face_match_threshold
+    if quality < settings.face_quality_min:
+        return f"❌ Selfie quality কম ({quality:.0f}%)। ভালো আলোতে ক্যামেরার কাছে এসে নতুন selfie দিন।"
     if score < threshold:
         return f"🚫 Face Verification Failed\n\nনিবন্ধিত মুখের সঙ্গে মিল পাওয়া যায়নি।\nMatch score: {score*100:.1f}%\n\nশুধু নিজের বর্তমান selfie পাঠান।"
     action = "check_in" if parts[0] == "checkin_selfie" else "check_out"
@@ -320,9 +322,13 @@ def receive_image(phone, media_id, image_bytes=None):
         settings.duplicate_hash_weight, settings.duplicate_face_weight,
         settings.duplicate_pose_weight, settings.duplicate_landmark_weight)
     with get_db() as c:
+        # Exact hashes are checked globally to stop one employee reusing another
+        # employee's saved image. Near-duplicate scoring is limited to the same
+        # employee, otherwise normal faces of two people can create false alerts.
         exact = c.execute("""SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints
             WHERE phash=? OR ahash=? OR dhash=? ORDER BY id DESC LIMIT 100""",(fingerprint["phash"],fingerprint["ahash"],fingerprint["dhash"])).fetchall()
-        recent = c.execute("SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints ORDER BY id DESC LIMIT 600").fetchall()
+        recent = c.execute("""SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints
+            WHERE employee_id=? ORDER BY id DESC LIMIT 120""", (employee["id"],)).fetchall()
         seen=set(); prior=[]
         for row in [*exact,*recent]:
             if row['id'] not in seen:

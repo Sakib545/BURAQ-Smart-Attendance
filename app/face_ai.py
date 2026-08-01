@@ -208,9 +208,9 @@ def _pose_from_face(face) -> tuple[str, float]:
     eye_distance = max(abs(left_eye_x - right_eye_x), 1.0)
     yaw = (nose_x - eye_mid_x) / eye_distance
     # Thresholds intentionally moderate so employees do not need an extreme turn.
-    if yaw <= -0.18:
+    if yaw <= -0.22:
         return "left", float(yaw)
-    if yaw >= 0.18:
+    if yaw >= 0.22:
         return "right", float(yaw)
     return "straight", float(yaw)
 
@@ -262,8 +262,16 @@ def extract_embedding(image_bytes: bytes, required_pose: str | None = None):
         raise FaceAIError("মুখ align করা যায়নি। সামনে সোজা তাকিয়ে আবার selfie দিন।")
 
     blur = _blur_score(aligned)
-    if blur < 35:
-        raise FaceAIError("ছবিটি ঝাপসা। ফোন স্থির রেখে আবার selfie দিন।")
+    blur_min = float(os.getenv("FACE_BLUR_MIN", "42"))
+    if blur < blur_min:
+        raise FaceAIError(f"ছবিটি ঝাপসা (quality {blur:.0f})। ফোন স্থির রেখে ভালো আলোতে আবার selfie দিন।")
+
+    gray_aligned = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
+    brightness = float(gray_aligned.mean())
+    if brightness < 48:
+        raise FaceAIError("মুখে আলো কম। উজ্জ্বল জায়গায় দাঁড়িয়ে আবার selfie দিন।")
+    if brightness > 225:
+        raise FaceAIError("ছবিতে অতিরিক্ত আলো পড়েছে। আলো একটু কমিয়ে আবার selfie দিন।")
 
     feature = recognizer.feature(aligned)
     if feature is None:
@@ -283,6 +291,7 @@ def extract_embedding(image_bytes: bytes, required_pose: str | None = None):
         "faces": len(valid),
         "confidence": round(confidence * 100.0, 1),
         "blur": round(blur, 1),
+        "brightness": round(brightness, 1),
         "face_ratio": round(ratio * 100.0, 1),
         "pose": pose,
         "yaw_score": round(yaw_score, 3),

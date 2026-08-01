@@ -34,12 +34,15 @@ class Settings:
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     allow_temp_db_fallback: bool = os.getenv("ALLOW_TEMP_DB_FALLBACK", "false").strip().lower() in {"1","true","yes","on"}
     require_secure_secrets: bool = os.getenv("REQUIRE_SECURE_SECRETS", "true").strip().lower() in {"1","true","yes","on"}
-    duplicate_accept_below: float = float(os.getenv("DUPLICATE_ACCEPT_BELOW", "0.70"))
-    duplicate_reject_at: float = float(os.getenv("DUPLICATE_REJECT_AT", "0.90"))
-    duplicate_hash_weight: float = float(os.getenv("DUPLICATE_HASH_WEIGHT", "0.45"))
-    duplicate_face_weight: float = float(os.getenv("DUPLICATE_FACE_WEIGHT", "0.25"))
+    duplicate_accept_below: float = float(os.getenv("DUPLICATE_ACCEPT_BELOW", "0.76"))
+    duplicate_reject_at: float = float(os.getenv("DUPLICATE_REJECT_AT", "0.91"))
+    duplicate_hash_weight: float = float(os.getenv("DUPLICATE_HASH_WEIGHT", "0.55"))
+    duplicate_face_weight: float = float(os.getenv("DUPLICATE_FACE_WEIGHT", "0.10"))
     duplicate_pose_weight: float = float(os.getenv("DUPLICATE_POSE_WEIGHT", "0.15"))
-    duplicate_landmark_weight: float = float(os.getenv("DUPLICATE_LANDMARK_WEIGHT", "0.15"))
+    duplicate_landmark_weight: float = float(os.getenv("DUPLICATE_LANDMARK_WEIGHT", "0.20"))
+    face_match_threshold: float = float(os.getenv("FACE_MATCH_THRESHOLD", "0.48"))
+    face_quality_min: float = float(os.getenv("FACE_QUALITY_MIN", "45"))
+    face_blur_min: float = float(os.getenv("FACE_BLUR_MIN", "42"))
 
     @property
     def is_postgres(self) -> bool:

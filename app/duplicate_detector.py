@@ -18,12 +18,12 @@ from app.face_ai import similarity
 
 @dataclass(frozen=True)
 class DuplicateThresholds:
-    accept_below: float = 0.70
-    reject_at: float = 0.90
-    hash_weight: float = 0.45
-    face_weight: float = 0.25
+    accept_below: float = 0.76
+    reject_at: float = 0.91
+    hash_weight: float = 0.55
+    face_weight: float = 0.10
     pose_weight: float = 0.15
-    landmark_weight: float = 0.15
+    landmark_weight: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,8 @@ def _gray(image_bytes: bytes) -> np.ndarray:
 
 
 def _bits_to_hex(bits: np.ndarray) -> str:
-    return "".join(f"{int(x):x}" for x in np.packbits(bits.astype(np.uint8)))
+    """Return a fixed-width hash; bytes.hex preserves leading zero bytes."""
+    return np.packbits(bits.astype(np.uint8)).tobytes().hex()
 
 
 def ahash(image_bytes: bytes, size: int = 8) -> str:
@@ -110,8 +111,13 @@ def detect_duplicate(candidate: dict, previous_rows: Iterable[dict], thresholds:
     for row in previous_rows:
         components = compare(candidate, row)
         score = float(np.dot(weights, np.asarray(components)))
-        # Exact-looking hash evidence is intentionally decisive.
-        if components[0] >= 0.97: score = max(score, 0.96)
+        # Exact/near-exact image evidence is decisive. Face similarity alone is
+        # deliberately weak because every genuine selfie of the same employee
+        # should have a similar identity embedding.
+        if components[0] >= 0.985:
+            score = max(score, 0.98)
+        elif components[0] >= 0.94 and components[2] >= 0.90 and components[3] >= 0.90:
+            score = max(score, 0.93)
         if score > best.score:
             best = DuplicateResult(round(score, 6), "accept", int(row["id"]), *[round(x, 6) for x in components])
     decision = "reject" if best.score >= thresholds.reject_at else "pending" if best.score >= thresholds.accept_below else "accept"

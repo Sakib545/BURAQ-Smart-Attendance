@@ -31,7 +31,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.18.4", docs_url=None, redoc_url=None)
+app = FastAPI(title=settings.app_name, version="9.19.0", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 @app.middleware("http")
@@ -76,6 +76,16 @@ a{color:inherit}.shell{min-height:100vh;display:grid;grid-template-columns:250px
 @media(max-width:1150px){.dashboard-kpis{grid-template-columns:repeat(3,1fr)}.dashboard-quick{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:900px){.dashboard-main-grid{grid-template-columns:1fr}.dashboard-head{flex-direction:column}.dashboard-search{width:100%}.dashboard-kpis{grid-template-columns:1fr 1fr}.readiness-wrap{grid-template-columns:1fr;justify-items:center}.dashboard-quick{grid-template-columns:1fr 1fr}}
 @media(max-width:540px){.dashboard-kpis{grid-template-columns:1fr}.dashboard-quick{grid-template-columns:1fr 1fr}.dashboard-head h1{font-size:25px}}
+
+/* v9.19 usability polish: visual-only, no workflow changes */
+body{line-height:1.5}.sidebar{box-shadow:8px 0 30px rgba(4,44,32,.08)}.side-nav a{display:flex;align-items:center;min-height:43px;transition:background .16s ease,transform .16s ease}.side-nav a:hover{transform:translateX(2px)}
+.topbar{backdrop-filter:saturate(140%) blur(12px);background:color-mix(in srgb,var(--panel) 94%,transparent)}.page{padding-top:30px}.card,.hero{transition:border-color .16s ease,box-shadow .16s ease}.card:hover{border-color:color-mix(in srgb,var(--brand) 24%,var(--line))}
+.btn{min-height:40px;display:inline-flex;align-items:center;justify-content:center;gap:7px;transition:transform .14s ease,background .14s ease,box-shadow .14s ease}.btn:hover{transform:translateY(-1px);box-shadow:0 7px 18px rgba(8,127,91,.14)}.btn:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,a:focus-visible{outline:3px solid color-mix(in srgb,var(--brand) 30%,transparent);outline-offset:2px}
+input,select,textarea{min-height:43px;transition:border-color .14s ease,box-shadow .14s ease}input:focus,select:focus,textarea:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(8,127,91,.10)}
+table{background:var(--panel)}thead th{position:sticky;top:63px;z-index:2;background:var(--panel2);font-size:12px;text-transform:uppercase;letter-spacing:.035em}tbody tr{transition:background .12s ease}tbody tr:hover{background:color-mix(in srgb,var(--brand) 5%,var(--panel))}.notice{border:1px solid color-mix(in srgb,#0891b2 25%,var(--line))}
+.hero{padding:22px 24px}.hero .sub{max-width:720px}.metric{font-variant-numeric:tabular-nums}.actions{align-items:center}.status,.pill,.tag{white-space:nowrap}.empty-state{padding:34px;text-align:center;color:var(--muted)}
+@media(max-width:900px){.searchbar{grid-template-columns:1fr 1fr}.hero{align-items:flex-start;flex-direction:column}}
+@media(max-width:560px){.searchbar{grid-template-columns:1fr}.card{padding:16px}.hero{padding:18px}.actions>.btn{flex:1}.table-actions .btn{flex:1 1 auto}thead th{top:63px}}
 
 </style>
 """
