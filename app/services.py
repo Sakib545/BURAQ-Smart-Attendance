@@ -16,7 +16,7 @@ from app.database import get_db
 
 
 
-LIVENESS_CHALLENGE_TTL_SECONDS = 120
+LIVENESS_CHALLENGE_TTL_SECONDS = 300
 POSE_LABELS = {
     "straight": "সোজা সামনে তাকান",
     "left": "মাথা সামান্য বাম দিকে ঘুরিয়ে তাকান",
@@ -24,11 +24,18 @@ POSE_LABELS = {
 }
 
 def new_liveness_challenge():
-    pose = random.choice(tuple(POSE_LABELS))
+    pose = "any" if settings.simple_face_mode else random.choice(tuple(POSE_LABELS))
     issued_at = int(time_module.time())
     return pose, issued_at
 
 def liveness_prompt(pose):
+    if settings.simple_face_mode:
+        return (
+            "📸 Face Verification\n\n"
+            "👉 ক্যামেরার দিকে স্বাভাবিকভাবে তাকিয়ে একটি নতুন selfie পাঠান।\n"
+            "⏳ সময়: ৫ মিনিট\n"
+            "⚠️ ছবিতে শুধু আপনার মুখ রাখুন।"
+        )
     return (
         "🛡️ Live Selfie Challenge\n\n"
         f"👉 {POSE_LABELS.get(pose, 'সোজা সামনে তাকান')}\n"
@@ -218,7 +225,7 @@ def save_face_reference(employee, media_id, image_bytes):
 
     # Ask for a different angle each time. Without this every sample tends to be
     # the same straight-on shot, and the gallery has no tolerance for head turn.
-    wanted_pose = ENROLL_POSES[index] if index < len(ENROLL_POSES) else "any"
+    wanted_pose = "any" if settings.simple_face_mode else (ENROLL_POSES[index] if index < len(ENROLL_POSES) else "any")
 
     def record(decision, reason, **extra):
         log_face_event(employee_id=employee["id"], stage="enroll", action="sample_%d" % (index + 1),
@@ -231,23 +238,24 @@ def save_face_reference(employee, media_id, image_bytes):
         record("rejected", str(exc).splitlines()[0][:200])
         return "\u274c Face Registration হয়নি।\n%s" % exc
 
-    if diagnostics.get("liveness_verdict") == "spoof":
+    if not settings.simple_face_mode and diagnostics.get("liveness_verdict") == "spoof":
         record("rejected", "liveness", diagnostics=diagnostics)
         return "\U0001f6ab ছবিটি স্ক্রিন বা ছাপানো ছবি বলে মনে হচ্ছে। সরাসরি ক্যামেরার সামনে থেকে live selfie দিন।"
 
-    if quality < settings.face_enroll_quality_min:
+    enroll_quality_min = min(settings.face_enroll_quality_min, 35.0) if settings.simple_face_mode else settings.face_enroll_quality_min
+    if quality < enroll_quality_min:
         record("rejected", "quality", quality=quality, diagnostics=diagnostics)
         return ("\u274c এই selfie-এর মান কম (%.0f%%, দরকার %.0f%%)।\n"
                 "Registration-এর ছবি সারাজীবন ব্যবহার হবে, তাই ভালো আলোতে ক্যামেরার কাছ থেকে আবার তুলুন।"
-                % (quality, settings.face_enroll_quality_min))
+                % (quality, enroll_quality_min))
 
     with get_db() as c:
         if existing:
             score = gallery_score(embedding, existing)
-            if score < 0.42:
+            if score < (0.38 if settings.simple_face_mode else 0.42):
                 record("rejected", "identity_mismatch", match_score=score, quality=quality, diagnostics=diagnostics)
                 return "\u274c আগের selfie-এর সঙ্গে এই মুখ মিলছে না। একই employee নিজের selfie দিন।"
-            if best_match(embedding, existing) > 0.985:
+            if not settings.simple_face_mode and best_match(embedding, existing) > 0.985:
                 record("rejected", "identical_sample", match_score=score, quality=quality, diagnostics=diagnostics)
                 return "\u26a0\ufe0f একই বা প্রায় একই selfie আবার পাঠানো হয়েছে। ফোন/মুখের angle সামান্য বদলে নতুন live selfie দিন।"
 
@@ -271,7 +279,7 @@ def save_face_reference(employee, media_id, image_bytes):
     record("accepted", "sample_stored", quality=quality, diagnostics=diagnostics)
     if count < target:
         set_state(employee["whatsapp_phone"] or employee["phone"], "awaiting_face_registration")
-        next_pose = ENROLL_POSES[count] if count < len(ENROLL_POSES) else "any"
+        next_pose = "any" if settings.simple_face_mode else (ENROLL_POSES[count] if count < len(ENROLL_POSES) else "any")
         guidance = ENROLL_POSE_PROMPT.get(next_pose, "স্বাভাবিকভাবে")
         return ("\u2705 Selfie %d/%d গ্রহণ করা হয়েছে।\n\U0001f50e Face quality: %.1f%%\n"
                 "\U0001f4d0 Face area: %.1f%%\n\nএবার %s পরের selfie তুলুন।"
@@ -411,7 +419,8 @@ def receive_image(phone, media_id, image_bytes=None):
                        elapsed_ms=(time_module.perf_counter() - started) * 1000)
 
     try:
-        candidate, quality, diagnostics = extract_embedding(image_bytes, required_pose=challenge_pose)
+        required_pose = None if settings.simple_face_mode else challenge_pose
+        candidate, quality, diagnostics = extract_embedding(image_bytes, required_pose=required_pose)
     except FaceAIError as exc:
         record("rejected", str(exc).splitlines()[0][:200])
         return "\u274c Live Face Verification Failed\n%s\n\n\u23f3 Challenge শেষ হওয়ার আগে আবার চেষ্টা করুন।" % exc
@@ -422,18 +431,19 @@ def receive_image(phone, media_id, image_bytes=None):
     score = gallery_score(candidate, own_samples)
     impostor_score, impostor_id = best_impostor(candidate, load_impostor_gallery(employee["id"]))
     margin = score - impostor_score
-    threshold = settings.face_match_threshold
+    threshold = min(settings.face_match_threshold, 0.44) if settings.simple_face_mode else settings.face_match_threshold
 
     # Only a confident spoof reading blocks attendance. The passive signals are
     # heuristics; until they have been tuned against logged data, a borderline
     # reading is recorded for review rather than used to turn someone away.
-    if diagnostics.get("liveness_verdict") == "spoof":
+    if not settings.simple_face_mode and diagnostics.get("liveness_verdict") == "spoof":
         record("rejected", "liveness", score, impostor_score, impostor_id, quality, diagnostics)
         return ("\U0001f6ab Live Face Verification Failed\n\n"
                 "ছবিটি স্ক্রিন বা ছাপানো ছবি থেকে তোলা বলে মনে হচ্ছে।\n"
                 "সরাসরি ক্যামেরার সামনে দাঁড়িয়ে নতুন selfie দিন।")
 
-    if quality < settings.face_quality_min:
+    quality_min = min(settings.face_quality_min, 30.0) if settings.simple_face_mode else settings.face_quality_min
+    if quality < quality_min:
         record("rejected", "quality", score, impostor_score, impostor_id, quality, diagnostics)
         return "\u274c Selfie quality কম (%.0f%%)। ভালো আলোতে ক্যামেরার কাছে এসে নতুন selfie দিন।" % quality
 
@@ -444,7 +454,7 @@ def receive_image(phone, media_id, image_bytes=None):
 
     # Beating the threshold is not enough when someone else in the workforce
     # matches almost as well — siblings and lookalikes fail exactly here.
-    if impostor_id is not None and margin < settings.face_margin_min:
+    if not settings.simple_face_mode and impostor_id is not None and margin < settings.face_margin_min:
         record("rejected", "margin", score, impostor_score, impostor_id, quality, diagnostics)
         return ("\U0001f6ab Face Verification Failed\n\nএই মুখ একাধিক employee profile-এর সঙ্গে "
                 "প্রায় সমানভাবে মিলছে, তাই নিশ্চিতভাবে শনাক্ত করা যায়নি।\n"
@@ -473,6 +483,11 @@ def receive_image(phone, media_id, image_bytes=None):
             if row['id'] not in seen:
                 seen.add(row['id']); prior.append(row)
     duplicate = detect_duplicate(fingerprint, prior, limits)
+    # With verified GPS plus a successful identity match, only near-exact image
+    # reuse should block attendance in simple mode.
+    if settings.simple_face_mode and duplicate.hash_score < 0.985:
+        duplicate = type(duplicate)(duplicate.score, "accept", duplicate.matched_fingerprint_id,
+            duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score)
     review_status = "pending" if duplicate.decision == "pending" else "none"
     with get_db() as c:
         c.execute("""INSERT INTO attendance_fingerprints(employee_id,action,media_id,phash,ahash,dhash,embedding,pose,yaw,landmarks,duplicate_score,hash_score,face_score,pose_score,landmark_score,matched_fingerprint_id,decision,review_status)
@@ -487,7 +502,8 @@ def receive_image(phone, media_id, image_bytes=None):
     with get_db() as c:
         c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)", (employee["id"], action, lat, lon, dist, media_id, 1))
     clear_state(phone)
-    return result + f"\n✅ Location Verified\n😊 Face Verified: {score*100:.1f}%\n🛡️ Live Challenge Verified: {POSE_LABELS.get(challenge_pose, challenge_pose)}"
+    verification = "Simple Face Verified" if settings.simple_face_mode else f"Live Challenge Verified: {POSE_LABELS.get(challenge_pose, challenge_pose)}"
+    return result + f"\n✅ Location Verified\n😊 Face Verified: {score*100:.1f}%\n🛡️ {verification}"
 
 
 def process(phone, text):

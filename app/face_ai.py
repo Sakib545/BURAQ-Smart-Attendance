@@ -299,15 +299,16 @@ def extract_embedding(image_bytes: bytes, required_pose: str | None = None):
         raise FaceAIError("মুখ align করা যায়নি। সামনে সোজা তাকিয়ে আবার selfie দিন।")
 
     blur = _blur_score(aligned)
-    blur_min = float(os.getenv("FACE_BLUR_MIN", "42"))
+    simple_mode = os.getenv("SIMPLE_FACE_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+    blur_min = min(float(os.getenv("FACE_BLUR_MIN", "42")), 25.0) if simple_mode else float(os.getenv("FACE_BLUR_MIN", "42"))
     if blur < blur_min:
         raise FaceAIError(f"ছবিটি ঝাপসা (quality {blur:.0f})। ফোন স্থির রেখে ভালো আলোতে আবার selfie দিন।")
 
     gray_aligned = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
     brightness = float(gray_aligned.mean())
-    if brightness < 48:
+    if brightness < (35 if simple_mode else 48):
         raise FaceAIError("মুখে আলো কম। উজ্জ্বল জায়গায় দাঁড়িয়ে আবার selfie দিন।")
-    if brightness > 225:
+    if brightness > (238 if simple_mode else 225):
         raise FaceAIError("ছবিতে অতিরিক্ত আলো পড়েছে। আলো একটু কমিয়ে আবার selfie দিন।")
 
     feature = recognizer.feature(aligned)

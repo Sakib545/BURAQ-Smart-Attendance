@@ -57,6 +57,9 @@ class Settings:
     face_adapt_min_margin: float = float(os.getenv("FACE_ADAPT_MIN_MARGIN", "0.12"))
     face_gallery_max: int = int(os.getenv("FACE_GALLERY_MAX", "8"))
     face_blur_min: float = float(os.getenv("FACE_BLUR_MIN", "42"))
+    # Location is the primary attendance boundary for BURAQ. In simple mode
+    # Face AI confirms identity without strict pose/passive-liveness gates.
+    simple_face_mode: bool = os.getenv("SIMPLE_FACE_MODE", "true").strip().lower() in {"1","true","yes","on"}
 
     @property
     def is_postgres(self) -> bool:
