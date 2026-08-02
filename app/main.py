@@ -34,7 +34,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.19.7"
+APP_VERSION = "9.19.9"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -116,6 +116,7 @@ PERMISSION_CATALOG = {
     "performance_view": ("Performance: View", "Performance review দেখবে"),
     "performance_manage": ("Performance: Create", "Performance review তৈরি করবে"),
     "face_reset": ("Face AI: Reset", "Employee face profile reset করবে"),
+    "face_security_view": ("Face Security: View", "Face verification, rejection ও spoof attempt দেখবে"),
     "approvals_view": ("Approvals: View", "Pending registration দেখবে"),
     "approvals_manage": ("Approvals: Approve/Reject", "Registration approve/reject করবে"),
     "reports_view": ("Reports: View", "Attendance report দেখবে"),
@@ -137,8 +138,8 @@ PERMISSION_CATALOG = {
     "user_accounts_manage": ("User Accounts: Manage", "Admin/HR account create, disable বা delete করবে"),
 }
 DEFAULT_ROLE_PERMISSIONS = {
-    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
-    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","face_security_view","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","face_security_view","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
     "hr_executive": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit"},
     "hr_officer": {"dashboard_view","employees_view","performance_view","reports_view","leave_view"},
     "viewer": {"dashboard_view","reports_view"},
@@ -502,6 +503,7 @@ def dashboard(request: Request):
             LEFT JOIN attendance a ON a.employee_id=e.id AND a.work_date=?
             LEFT JOIN (SELECT DISTINCT employee_id FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?) l ON l.employee_id=e.id
             WHERE e.is_active ORDER BY CASE WHEN a.check_in IS NOT NULL THEN 0 ELSE 1 END,e.name LIMIT 5""",(today,today,today)).fetchall()
+    face_today = face_security_summary(now)
     absent=max(employees-present-on_leave,0)
     attendance_rate=round((present/employees*100),1) if employees else 0
     by_day={str(r['work_date']):int(r['c']) for r in week_counts}; weekly=[(d,by_day.get(d.isoformat(),0)) for d in week_days]
@@ -525,6 +527,7 @@ def dashboard(request: Request):
     if has_permission(request,'payroll_view'): quick.append(("/payroll", ui.icon("banknote"), "Run Payroll"))
     if has_permission(request,'reports_view'): quick.append(("/reports","◔","View Reports"))
     if has_permission(request,'approvals_view'): quick.append(("/duplicates?review=pending", ui.icon("search"), "Selfie Review"))
+    if has_permission(request,'face_security_view'): quick.append(("/face-security", ui.icon("shield"), "Face Security"))
     quick_html=''.join(f"<a href='{url}'><span class='qicon'>{icon}</span><span>{label}</span></a>" for url,icon,label in quick)
     pending_items=[]
     if has_permission(request,'leave_view'): pending_items.append(("/hr-operations","♧","Pending Leaves",f"{pending_leave} leave requests",pending_leave))
@@ -544,6 +547,7 @@ def dashboard(request: Request):
       <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-red'>♙</span><div><div class='metric-label'>Absent</div><div class='metric'>{absent}</div></div></div><div class='metric-foot'>{round(absent/employees*100,1) if employees else 0}% of workforce</div><div class='mini-line'><span style='width:{round(absent/employees*100,1) if employees else 0}%;background:#ef476f'></span></div></div>
       <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-purple'>☂</span><div><div class='metric-label'>On Leave</div><div class='metric'>{on_leave}</div></div></div><div class='metric-foot'>{round(on_leave/employees*100,1) if employees else 0}% of workforce</div><div class='mini-line'><span style='width:{round(on_leave/employees*100,1) if employees else 0}%;background:#8b5cf6'></span></div></div>
       <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-blue'>◷</span><div><div class='metric-label'>Overtime (Today)</div><div class='metric'>{overtime}m</div></div></div><div class='metric-foot'>{checked_out} check-outs</div></div>
+      {f"<a class='card dashboard-kpi dashboard-kpi-link' href='/face-security'><div class='kpi-row'><span class='kpi-symbol kpi-red'>{ui.icon('shield')}</span><div><div class='metric-label'>Spoof Attempts Today</div><div class='metric'>{face_today['spoof']}</div></div></div><div class='metric-foot'>{face_today['checks']} face checks · {face_today['rejected']} rejected</div><div class='mini-line'><span style='width:{min(100,face_today['spoof']*20)}%;background:#ef476f'></span></div></a>" if has_permission(request,'face_security_view') else ''}
     </div>
     <div class='section-gap'></div>
     <div class='dashboard-main-grid'>
@@ -579,6 +583,7 @@ def admin_center(request: Request):
     cards=[]
     if has_permission(request,"approvals_view"):
         cards.extend([("✅","All Approvals","Registration, leave, correction and duplicate review in one place.","/approvals"),("🔎","Duplicate Review","Open duplicate attendance evidence directly.","/duplicates")])
+    if has_permission(request,"face_security_view"): cards.append(("◉","Face Security","Monitor verification decisions, liveness failures and spoof alerts.","/face-security"))
     if has_permission(request,"user_accounts_view"): cards.append(("👤","Users & Permissions","Manage HR accounts, roles and access permissions.","/hr-accounts"))
     if has_permission(request,"audit_view"): cards.append(("🧾","Activity Logs","See who changed attendance, payroll or system data.","/audit-logs"))
     if has_permission(request,"settings_view"): cards.append(("⚙️","Settings & Backup","WhatsApp connection, webhook, password and backups.","/settings"))
@@ -596,6 +601,96 @@ def approvals_center(request: Request):
     content=''.join(f"<a class='card control-card' href='{url}'><div class='control-icon'>{icon}</div><h3>{title}</h3><div class='sub'>{description}</div></a>" for icon,title,description,url in cards)
     body=f"<div class='hero'><div><div class='eyebrow'>Review Queue</div><h2>All Approvals</h2><div class='sub'>Choose the approval type instead of searching separate menus.</div></div></div><div class='control-grid'>{content}</div>"
     return layout("Approvals",body,request,"admin")
+
+
+def face_security_summary(now: datetime | None = None) -> dict[str, int]:
+    """Return today's Face AI totals without ever breaking the main dashboard."""
+    local_now = now or datetime.now(ZoneInfo(settings.timezone))
+    start = local_now.date().isoformat()
+    end = (local_now.date() + timedelta(days=1)).isoformat()
+    try:
+        with get_db() as c:
+            row = c.execute(
+                """SELECT COUNT(*) checks,
+                    SUM(CASE WHEN decision='accepted' THEN 1 ELSE 0 END) accepted,
+                    SUM(CASE WHEN decision='rejected' THEN 1 ELSE 0 END) rejected,
+                    SUM(CASE WHEN LOWER(COALESCE(reason,'')) LIKE '%liveness%'
+                              OR LOWER(COALESCE(liveness_verdict,'')) IN ('spoof','failed','fail')
+                             THEN 1 ELSE 0 END) spoof
+                   FROM face_events WHERE created_at>=? AND created_at<?""",
+                (start, end),
+            ).fetchone()
+        return {key: int(row[key] or 0) for key in ("checks", "accepted", "rejected", "spoof")}
+    except Exception:
+        logger.warning("face security summary failed", exc_info=True)
+        return {"checks": 0, "accepted": 0, "rejected": 0, "spoof": 0}
+
+
+@app.get("/face-security", response_class=HTMLResponse)
+def face_security_page(request: Request, view: str = "all"):
+    require_permission(request, "face_security_view")
+    if view not in {"all", "rejected", "spoof"}:
+        view = "all"
+    now = datetime.now(ZoneInfo(settings.timezone))
+    totals = face_security_summary(now)
+    since = (now.date() - timedelta(days=6)).isoformat()
+    clauses = ["f.created_at>=?"]
+    params: list = [since]
+    if view == "rejected":
+        clauses.append("f.decision='rejected'")
+    elif view == "spoof":
+        clauses.append("(LOWER(COALESCE(f.reason,'')) LIKE '%liveness%' OR LOWER(COALESCE(f.liveness_verdict,'')) IN ('spoof','failed','fail'))")
+    where = " AND ".join(clauses)
+    try:
+        with get_db() as c:
+            events = c.execute(
+                f"""SELECT f.*,e.name employee_name,e.staff_id
+                      FROM face_events f LEFT JOIN employees e ON e.id=f.employee_id
+                     WHERE {where} ORDER BY f.created_at DESC LIMIT 200""",
+                params,
+            ).fetchall()
+    except Exception:
+        logger.warning("face security events failed", exc_info=True)
+        events = []
+
+    rows = ""
+    for event in events:
+        decision = str(event["decision"] or "unknown").lower()
+        badge = "ok" if decision == "accepted" else ("bad" if decision == "rejected" else "warn")
+        employee = escape(str(event["employee_name"] or "Unknown employee"))
+        staff_id = escape(str(event["staff_id"] or "—"))
+        created = escape(str(event["created_at"] or "—").replace("T", " ")[:19])
+        stage = escape(str(event["stage"] or "—").replace("_", " ").title())
+        action = escape(str(event["action"] or "—").replace("_", " ").title())
+        reason = escape(str(event["reason"] or "—"))
+        liveness = escape(str(event["liveness_verdict"] or "—").replace("_", " ").title())
+        rows += f"""<tr><td><b>{created}</b></td><td><b>{employee}</b><div class='sub'>{staff_id}</div></td>
+        <td>{stage}<div class='sub'>{action}</div></td><td><span class='status {badge}'>{escape(decision.title())}</span></td>
+        <td>{float(event['match_score'] or 0):.3f}<div class='sub'>margin {float(event['margin'] or 0):.3f}</div></td>
+        <td>{float(event['quality'] or 0):.1f}</td><td>{liveness}<div class='sub'>{float(event['liveness_score'] or 0):.2f}</div></td>
+        <td>{reason}</td><td>{float(event['elapsed_ms'] or 0):.0f} ms</td></tr>"""
+
+    def tab(label: str, key: str, count: int | None = None) -> str:
+        active = " active" if view == key else ""
+        suffix = f" <span class='pill'>{count}</span>" if count is not None else ""
+        return f"<a class='btn secondary{active}' href='/face-security?view={key}'>{label}{suffix}</a>"
+
+    tabs = tab("All checks", "all", totals["checks"]) + tab("Rejected", "rejected", totals["rejected"]) + tab("Spoof alerts", "spoof", totals["spoof"])
+    review_link = "<a class='btn secondary' href='/duplicates?review=pending'>Open Selfie Review</a>" if has_permission(request, "approvals_view") else ""
+    body = f"""
+    <div class='hero'><div><div class='eyebrow'>Face AI Monitoring</div><h2>Face Security</h2>
+      <div class='sub'>Verification decisions, liveness failures and suspected spoof attempts in one place.</div></div>{review_link}</div>
+    <div class='dashboard-kpis face-security-kpis'>
+      <div class='card dashboard-kpi'><div class='metric-label'>Face Checks Today</div><div class='metric'>{totals['checks']}</div><div class='metric-foot'>All enrollment and attendance checks</div></div>
+      <div class='card dashboard-kpi'><div class='metric-label'>Verified Today</div><div class='metric'>{totals['accepted']}</div><div class='metric-foot'>Face verification accepted</div></div>
+      <div class='card dashboard-kpi'><div class='metric-label'>Rejected Today</div><div class='metric'>{totals['rejected']}</div><div class='metric-foot'>Needs attention or retry</div></div>
+      <div class='card dashboard-kpi'><div class='metric-label'>Spoof Alerts Today</div><div class='metric'>{totals['spoof']}</div><div class='metric-foot'>Liveness-related failures</div></div>
+    </div>
+    <div class='card section-gap'><div class='card-head'><div><h3>Security Event Log</h3><div class='sub'>Latest 200 events from the last 7 days</div></div><div class='actions'>{tabs}</div></div>
+      <div style='overflow:auto'><table class='dashboard-table'><thead><tr><th>Time</th><th>Employee</th><th>Stage / Action</th><th>Decision</th><th>Match</th><th>Quality</th><th>Liveness</th><th>Reason</th><th>Speed</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan="9"><div class="empty"><h3>No face security events</h3><div class="sub">New face checks will appear here automatically.</div></div></td></tr>'}</tbody></table></div></div>
+    """
+    return layout("Face Security", body, request, "face-security")
 
 @app.post("/test-message")
 async def test_message(request: Request, phone: str = Form(...), message: str = Form(...)):

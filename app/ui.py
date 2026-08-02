@@ -140,6 +140,7 @@ NAV_BLUEPRINT: list[tuple[str, list[tuple[str, str, str, str, str]]]] = [
     ]),
     ("Administration", [
         ("duplicates", "Selfie review", "/duplicates", "search", "approvals_view"),
+        ("face-security", "Face Security", "/face-security", "shield", "face_security_view"),
         ("reports", "Reports", "/reports", "file-text", "reports_view"),
         ("users", "User accounts", "/hr-accounts", "shield", "user_accounts_view"),
         ("settings", "Settings", "/settings", "sliders", "settings_view"),
