@@ -19,6 +19,13 @@ def test_paid_leave_has_no_deduction_and_half_day_is_supported():
     assert result['net_salary']==10000
 
 
+def test_no_duty_means_no_fixed_salary_payment():
+    result=calculate_payroll(PayrollInput(fixed_salary=15000,scheduled_units=0,worked_units=0))
+    assert result['absent_deduction']==15000
+    assert result['total_deduction']==15000
+    assert result['net_salary']==0
+
+
 def test_adjustments_require_reason():
     assert adjustment_reason_required(1,0,0,0)
     assert adjustment_reason_required(0,1,0,0)

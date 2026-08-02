@@ -37,7 +37,9 @@ def calculate_payroll(data: PayrollInput) -> dict:
     absent = max(scheduled - worked - paid - unpaid, Decimal("0"))
     fixed = money(data.fixed_salary)
     per_day = (fixed / scheduled).quantize(TWOPLACES, rounding=ROUND_HALF_UP) if scheduled else Decimal("0.00")
-    absent_deduction = (per_day * absent).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
+    # A fixed salary is payable against assigned/completed duty. With no duty
+    # at all, the employee does not receive the full fixed salary by accident.
+    absent_deduction = fixed if scheduled == 0 else (per_day * absent).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
     unpaid_leave_deduction = (per_day * unpaid).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
     overtime_amount = money(Decimal(str(data.overtime_hours or 0)) * Decimal(str(data.overtime_rate or 0)))
     bonus = money(data.bonus); advance = money(data.advance); fine = money(data.fine); other = money(data.other_deduction)

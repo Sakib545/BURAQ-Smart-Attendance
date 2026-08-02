@@ -34,7 +34,7 @@ from app.backups import backup_status, create_full_backup, inspect_backup, payro
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.19.3"
+APP_VERSION = "9.19.6"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -1503,28 +1503,52 @@ def _build_payslip_pdf(r) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet
-    out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
-    data=[["Salary Item","Amount (BDT)"],["Basic Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],[f"Absent deduction ({r['absent_duty_units']} days)",f"- {_money(r['absent_deduction'])}"],[f"Unpaid leave ({r['unpaid_leave_units']} days)",f"- {_money(r['unpaid_leave_deduction'])}"],["Salary advance",f"- {_money(r['advance_amount'])}"],["Fine",f"- {_money(r['fine_amount'])}"],["Other deduction",f"- {_money(r['deduction'])}"],["TOTAL DEDUCTION",f"- {_money(r['total_deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
-    table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#DCFCE7")),("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10)]))
-    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=45,bottomMargin=45)
-    doc.build([Paragraph("BURAQ Salary Statement",styles['Title']),Paragraph(f"Employee: {escape(str(r['name']))}<br/>Staff ID: {escape(str(r['staff_id']))}<br/>Department: {escape(str(r['department'] or '-'))}<br/>Salary month: {r['salary_month']}<br/>Payment status: {str(r['payment_status']).title()}",styles['Normal']),Spacer(1,18),table,Spacer(1,18),Paragraph("Confidential - generated for HR/Admin use only.",styles['Normal'])]); return out.getvalue()
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    def deduction(value):
+        amount=float(value or 0)
+        return "0.00" if abs(amount)<0.005 else f"- {_money(amount)}"
+
+    out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet()
+    styles['Title'].fontName=font; styles['Title'].fontSize=24; styles['Title'].leading=28; styles['Title'].textColor=colors.HexColor("#0D3B2E")
+    styles['Normal'].fontName=font
+    month_label=datetime.strptime(str(r['salary_month']),"%Y-%m").strftime("%B %Y").upper()
+    month_style=ParagraphStyle("Month",parent=styles['Heading1'],fontName=font,fontSize=20,leading=24,alignment=1,textColor=colors.HexColor("#087F5B"),spaceAfter=12)
+    muted=ParagraphStyle("Muted",parent=styles['Normal'],fontName=font,fontSize=9,textColor=colors.HexColor("#64748B"),alignment=1)
+
+    employee_data=[
+        ["Employee",str(r['name']),"Staff ID",str(r['staff_id'])],
+        ["Department",str(r['department'] or '-'),"Designation",str(r['designation'] or '-')],
+        ["Payment status",str(r['payment_status']).title(),"Currency","BDT"],
+    ]
+    employee_table=Table(employee_data,colWidths=[90,155,95,150])
+    employee_table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#F4F7F6")),("TEXTCOLOR",(0,0),(0,-1),colors.HexColor("#64748B")),("TEXTCOLOR",(2,0),(2,-1),colors.HexColor("#64748B")),("FONTNAME",(1,0),(1,-1),font),("FONTNAME",(3,0),(3,-1),font),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#D5E2DD")),("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+
+    duty_data=[
+        ["Scheduled Duty","Worked Duty","Paid Leave","Absent"],
+        [f"{float(r['scheduled_duty_days'] or 0):g} days",f"{float(r['worked_duty_days'] or 0):g} days",f"{float(r['paid_leave_days'] or 0):g} days",f"{float(r['absent_days'] or 0):g} days"],
+    ]
+    duty_table=Table(duty_data,colWidths=[122.5]*4)
+    duty_table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#E7F5EF")),("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#087F5B")),("ALIGN",(0,0),(-1,-1),"CENTER"),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#B7C8C2")),("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+
+    absence_label=("No duty completed deduction" if float(r['scheduled_duty_days'] or 0)<=0 else f"Absent deduction ({float(r['absent_duty_units'] or 0):g} days)")
+    data=[["Salary Item","Amount (BDT)"],["Basic Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours × {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],["GROSS SALARY",_money(r['gross_salary'])],[absence_label,deduction(r['absent_deduction'])],[f"Unpaid leave ({float(r['unpaid_leave_units'] or 0):g} days)",deduction(r['unpaid_leave_deduction'])],["Salary advance",deduction(r['advance_amount'])],["Fine",deduction(r['fine_amount'])],["Other deduction",deduction(r['deduction'])],["TOTAL DEDUCTION",deduction(r['total_deduction'])],["NET SALARY",_money(r['net_salary'])]]
+    table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,4),(-1,4),colors.HexColor("#F1F5F4")),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#D1FAE5")),("TEXTCOLOR",(0,-1),(-1,-1),colors.HexColor("#065F46")),("FONTNAME",(0,4),(-1,4),font),("FONTNAME",(0,-2),(-1,-1),font),("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=36,bottomMargin=36,title=f"BURAQ Payment Sheet - {month_label}")
+    doc.build([Paragraph("BURAQ PAYMENT SHEET",styles['Title']),Paragraph(month_label,month_style),employee_table,Spacer(1,14),duty_table,Spacer(1,14),table,Spacer(1,14),Paragraph("Confidential • Generated for HR/Admin use only",muted)]); return out.getvalue()
 
 @app.get("/payroll/{payroll_id}/payslip.pdf")
 def payroll_payslip(request: Request, payroll_id: int):
     require_permission(request,"payroll_export")
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet
     with get_db() as c: r=c.execute("SELECT p.*,e.staff_id,e.name,e.department,e.designation FROM payroll_records p JOIN employees e ON e.id=p.employee_id WHERE p.id=?",(payroll_id,)).fetchone()
     if not r: raise HTTPException(404,"Payroll not found")
-    out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
-    data=[["Salary Item","Amount (BDT)"],["Basic Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],[f"Absent deduction ({r['absent_duty_units']} days)",f"- {_money(r['absent_deduction'])}"],[f"Unpaid leave ({r['unpaid_leave_units']} days)",f"- {_money(r['unpaid_leave_deduction'])}"],["Salary advance",f"- {_money(r['advance_amount'])}"],["Fine",f"- {_money(r['fine_amount'])}"],["Other deduction",f"- {_money(r['deduction'])}"],["TOTAL DEDUCTION",f"- {_money(r['total_deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
-    table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#DCFCE7")),("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10)]))
-    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=45,bottomMargin=45)
-    doc.build([Paragraph("BURAQ Salary Statement",styles['Title']),Paragraph(f"Employee: {escape(str(r['name']))}<br/>Staff ID: {escape(str(r['staff_id']))}<br/>Department: {escape(str(r['department'] or '-'))}<br/>Salary month: {r['salary_month']}<br/>Payment status: {str(r['payment_status']).title()}",styles['Normal']),Spacer(1,18),table,Spacer(1,18),Paragraph("Confidential - generated for HR/Admin use only.",styles['Normal'])]); out.seek(0)
-    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payslip-{r['staff_id']}-{r['salary_month']}.pdf"})
+    payslip=dict(r)
+    if r['payment_status']=='draft':
+        calc=_calculate_employee_payroll(r['employee_id'],r['salary_month'],float(r['fixed_salary'] or 0),float(r['overtime_rate'] or 0),str(r['overtime_mode'] or 'auto'),float(r['overtime_hours'] or 0),float(r['bonus'] or 0),float(r['advance_amount'] or 0),float(r['fine_amount'] or 0),float(r['deduction'] or 0))
+        payslip.update(calc)
+        payslip.update({'scheduled_duty_days':calc['scheduled'],'worked_duty_days':calc['worked'],'paid_leave_days':calc['paid_leave'],'absent_days':calc['absent'],'absent_duty_units':calc['absent'],'unpaid_leave_units':calc['unpaid_leave']})
+    out=io.BytesIO(_build_payslip_pdf(payslip))
+    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payment-Sheet-{r['staff_id']}-{r['salary_month']}.pdf"})
 
 @app.get("/reports", response_class=HTMLResponse)
 def reports_page(request: Request, start_date: str = "", end_date: str = "", status: str = "", department: str = ""):

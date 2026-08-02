@@ -320,7 +320,17 @@ def extract_embedding(image_bytes: bytes, required_pose: str | None = None):
         raise FaceAIError("Face feature তৈরি হয়নি। আবার চেষ্টা করুন।")
     feature /= norm
 
-    spoof = liveness.analyse(detected_image, face)
+    # GPS is BURAQ's primary attendance boundary. Simple Face Mode avoids the
+    # expensive passive anti-spoof pipeline, whose heuristic OpenCV operations
+    # can fail on otherwise valid phone selfies. Identity matching and exact
+    # reused-image detection still run afterwards.
+    if simple_mode:
+        spoof = liveness.LivenessResult(0.0, "live", {"simple_mode": 1.0}, False)
+    else:
+        try:
+            spoof = liveness.analyse(detected_image, face)
+        except Exception:
+            spoof = liveness.LivenessResult(0.0, "review", {"analysis_error": 1.0}, False)
 
     size_score = min(100.0, ratio * 450.0)
     blur_score = min(100.0, blur / 2.0)
