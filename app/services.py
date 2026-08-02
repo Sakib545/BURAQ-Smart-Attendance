@@ -508,7 +508,10 @@ def receive_image(phone, media_id, image_bytes=None):
     lat, lon = float(parts[1]), float(parts[2]); dist = float(parts[3]) if len(parts) > 3 and parts[3] else None
     result = check_in(employee) if action == "check_in" else check_out(employee)
     with get_db() as c:
-        c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)", (employee["id"], action, lat, lon, dist, media_id, 1))
+        # Python bool works for PostgreSQL BOOLEAN and is stored as 1 by SQLite.
+        # Passing integer 1 made psycopg reject an otherwise valid selfie after
+        # attendance had already been recorded.
+        c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)", (employee["id"], action, lat, lon, dist, media_id, True))
     clear_state(phone)
     verification = "Simple Face Verified" if settings.simple_face_mode else f"Live Challenge Verified: {POSE_LABELS.get(challenge_pose, challenge_pose)}"
     return result + f"\n✅ Location Verified\n😊 Face Verified: {score*100:.1f}%\n🛡️ {verification}"
