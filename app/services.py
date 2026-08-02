@@ -654,7 +654,7 @@ def process(phone, text):
             return "তথ্য সঠিক হলে YES লিখুন, অথবা বাতিল করতে CANCEL লিখুন।"
         if value == "waiting_for_approval": return "⏳ আপনার registration এখনো Admin approval-এর অপেক্ষায় আছে।"
         if value == "awaiting_face_registration": return "📸 এখন ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।"
-        if value.endswith("_location"): return "📍 নিচের Send Location বাটন ব্যবহার করে বর্তমান Location পাঠান।"
+        if value.endswith("_location"): return "__REQUEST_LOCATION__"
         if value.startswith(("checkin_selfie:", "checkout_selfie:")):
             parts = value.split(":")
             pose = parts[4] if len(parts) > 4 else "straight"

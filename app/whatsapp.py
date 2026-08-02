@@ -142,7 +142,11 @@ async def send_menu(to: str, name: str | None = None):
 
 async def send_guided_response(phone: str, response: str):
     if response == "__REQUEST_LOCATION__":
-        return await send_location_request(phone)
+        result = await send_location_request(phone)
+        if result.get("sent"):
+            return result
+        logger.error("Native location request failed phone=%s result=%s", phone, result)
+        return await send_text(phone, "📍 নিচের attachment (+/📎) বাটন থেকে Location খুলে Current Location পাঠান।")
     result = await send_text(phone, response)
     if response.startswith("✅ Face Registration সম্পন্ন") or response.startswith("✅ Check In সফল") or response.startswith("✅ Check Out সফল"):
         employee = employee_by_phone(phone)
