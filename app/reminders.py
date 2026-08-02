@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.database import get_db
 from app.whatsapp import send_template
+from app.time_format import format_time_12h
 
 logger=logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ async def run_reminder_cycle():
         with get_db() as c:
             exists=c.execute("SELECT 1 FROM duty_reminder_logs WHERE employee_id=? AND duty_date=? AND reminder_type=?",(row['employee_id'],row_duty_date,kind)).fetchone()
         if exists: continue
-        values=[row['name'],row['start_time'],row['end_time'],row['office_name'] or 'BURAQ Office']
+        values=[row['name'],format_time_12h(row['start_time']),format_time_12h(row['end_time']),row['office_name'] or 'BURAQ Office']
         result=await send_template(phone,TEMPLATES[kind],values)
         if result.get('sent'):
             with get_db() as c:

@@ -12,6 +12,7 @@ from app.face_log import invalidate_gallery_cache, load_impostor_gallery, log_fa
 from app.duplicate_detector import DuplicateThresholds, detect_duplicate, make_fingerprint
 from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
 from app.database import get_db
+from app.time_format import format_time_12h
 
 
 
@@ -138,7 +139,7 @@ def duty_report(employee):
     by_date={r['duty_date']:r for r in custom}
     for offset in range(7):
         day=today+timedelta(days=offset); duty=by_date.get(day.isoformat()) or by_day.get(day.weekday())
-        if duty: days.append(f"{'⭐' if day.isoformat() in by_date else '📅'} {day.strftime('%a, %d %b')}: {duty['start_time']} - {duty['end_time']} ({duty['office_name'] or 'BURAQ Office'})")
+        if duty: days.append(f"{'⭐' if day.isoformat() in by_date else '📅'} {day.strftime('%a, %d %b')}: {format_time_12h(duty['start_time'])} - {format_time_12h(duty['end_time'])} ({duty['office_name'] or 'BURAQ Office'})")
     return "🗓️ আপনার Duty Schedule\n\n"+("\n".join(days) if days else "আগামী ৭ দিনে কোনো duty schedule নেই।")
 
 
