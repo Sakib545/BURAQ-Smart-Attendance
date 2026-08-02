@@ -17,7 +17,10 @@ from app.time_format import format_time_12h
 
 
 
-LIVENESS_CHALLENGE_TTL_SECONDS = 300
+# Allow for WhatsApp delivery/upload delay and Railway processing time. The
+# stricter flow stays shorter; GPS-backed Simple Face Mode gets ten minutes.
+LIVENESS_CHALLENGE_TTL_SECONDS = 600 if settings.simple_face_mode else 180
+LIVENESS_UPLOAD_GRACE_SECONDS = 45
 POSE_LABELS = {
     "straight": "সোজা সামনে তাকান",
     "left": "মাথা সামান্য বাম দিকে ঘুরিয়ে তাকান",
@@ -34,14 +37,14 @@ def liveness_prompt(pose):
         return (
             "📸 Face Verification\n\n"
             "👉 ক্যামেরার দিকে স্বাভাবিকভাবে তাকিয়ে একটি নতুন selfie পাঠান।\n"
-            "⏳ সময়: ৫ মিনিট\n"
+            "⏳ সময়: ১০ মিনিট\n"
             "⚠️ ছবিতে শুধু আপনার মুখ রাখুন।"
         )
     return (
         "🛡️ Live Selfie Challenge\n\n"
         f"👉 {POSE_LABELS.get(pose, 'সোজা সামনে তাকান')}\n"
         "📸 নির্দেশনাটি মেনে এখনই একটি নতুন selfie তুলে পাঠান।\n\n"
-        "⏳ সময়: ২ মিনিট\n"
+        "⏳ সময়: ৩ মিনিট\n"
         "⚠️ পুরোনো/gallery ছবি ব্যবহার করবেন না।"
     )
 
@@ -404,8 +407,9 @@ def receive_image(phone, media_id, image_bytes=None):
     parts = current["state"].split(":")
     challenge_pose = parts[4] if len(parts) > 4 else "straight"
     issued_at = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
-    age_seconds = int(time_module.time()) - issued_at if issued_at else LIVENESS_CHALLENGE_TTL_SECONDS + 1
-    if age_seconds > LIVENESS_CHALLENGE_TTL_SECONDS:
+    age_seconds = (int(time_module.time()) - issued_at if issued_at else
+                   LIVENESS_CHALLENGE_TTL_SECONDS + LIVENESS_UPLOAD_GRACE_SECONDS + 1)
+    if age_seconds > LIVENESS_CHALLENGE_TTL_SECONDS + LIVENESS_UPLOAD_GRACE_SECONDS:
         pose, new_issued_at = new_liveness_challenge()
         parts[4:] = [pose, str(new_issued_at)]
         set_state(phone, ":".join(parts))
