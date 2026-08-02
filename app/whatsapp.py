@@ -60,20 +60,20 @@ async def send_text(to: str, text: str):
     return await _send(to, {"type": "text", "text": {"preview_url": False, "body": text}})
 
 
-async def send_selfie_review_result(to: str, name: str, action: str, approved: bool, score: float):
-    """Notify an employee after HR resolves a pending duplicate-selfie review."""
+async def send_selfie_review_result(to: str, name: str, action: str, approved: bool, score: float, attendance_result: str = ""):
+    """Notify an employee after HR resolves a pending attendance selfie."""
     duty_action = "Check-in" if action == "check_in" else "Check-out"
     if approved:
         message = (
-            f"✅ Selfie Review Approved\n\n{name}, আপনার {duty_action} selfie Admin approve করেছেন।\n"
-            f"Review score: {score * 100:.1f}%\n\n"
-            f"Attendance সম্পন্ন করতে WhatsApp menu থেকে আবার {duty_action} নির্বাচন করে নতুন live selfie দিন।"
+            f"✅ Attendance Approved\n\n{name}, আপনার {duty_action} selfie Admin approve করেছেন।\n"
+            f"{attendance_result or 'Attendance সফলভাবে final হয়েছে।'}\n"
+            f"Security score: {score * 100:.1f}%"
         )
     else:
         message = (
-            f"❌ Selfie Review Rejected\n\n{name}, আপনার {duty_action} selfie Admin reject করেছেন।\n"
-            f"Review score: {score * 100:.1f}%\n\n"
-            "একই/পুরোনো ছবি ব্যবহার করবেন না। WhatsApp menu থেকে আবার চেষ্টা করে নতুন live selfie তুলুন।"
+            f"❌ Attendance Selfie Rejected\n\n{name}, আপনার {duty_action} selfie Admin reject করেছেন।\n"
+            f"Security score: {score * 100:.1f}%\n\n"
+            "Attendance record হয়নি। WhatsApp menu থেকে আবার চেষ্টা করে নতুন live selfie তুলুন।"
         )
     result = {"sent": False, "reason": "not attempted"}
     for attempt in range(1, 4):

@@ -1,11 +1,15 @@
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from math import asin, cos, radians, sin, sqrt
+import base64
+import io
 import re
 import json
 import logging
 import random
 import time as time_module
+
+from PIL import Image, ImageOps
 
 from app.face_ai import FaceAIError, extract_embedding, best_match, best_impostor, gallery_score
 from app.face_log import invalidate_gallery_cache, load_impostor_gallery, log_face_event
@@ -74,6 +78,20 @@ def set_state(phone, value):
 def clear_state(phone):
     with get_db() as c:
         c.execute("DELETE FROM conversation_states WHERE phone=?", (normalize_phone(phone),))
+
+
+def review_thumbnail(image_bytes: bytes) -> str:
+    """Return a small JPEG preview suitable for durable database storage."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((540, 675), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=68, optimize=True)
+        return base64.b64encode(output.getvalue()).decode("ascii")
+    except Exception:
+        logging.getLogger(__name__).warning("selfie review thumbnail failed", exc_info=True)
+        return ""
 
 
 def employee_by_phone(phone):
@@ -346,6 +364,102 @@ def check_out(employee):
     return message
 
 
+def _submitted_at_local(value) -> datetime:
+    if isinstance(value, datetime):
+        submitted = value
+    else:
+        submitted = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    local_zone = ZoneInfo(settings.timezone)
+    if submitted.tzinfo is None:
+        return submitted.replace(tzinfo=local_zone)
+    return submitted.astimezone(local_zone)
+
+
+def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
+    """Finalize one pending selfie at its original submission time.
+
+    The pending-row and attendance flags make the operation idempotent: a
+    second click cannot create a second attendance event.
+    """
+    with get_db() as c:
+        item = c.execute(
+            """SELECT e.*,f.id fingerprint_id,f.action fingerprint_action,
+                      f.media_id fingerprint_media_id,f.latitude fingerprint_latitude,
+                      f.longitude fingerprint_longitude,f.distance_meters fingerprint_distance,
+                      f.duplicate_score fingerprint_score,f.created_at fingerprint_created_at
+                 FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id
+                WHERE f.id=? AND f.review_status='pending' AND f.attendance_applied=?""",
+            (fingerprint_id, False),
+        ).fetchone()
+    if not item:
+        return None
+
+    submitted = _submitted_at_local(item["fingerprint_created_at"])
+    action = str(item["fingerprint_action"])
+    submitted_text = submitted.isoformat(timespec="seconds")
+
+    if action == "check_in":
+        work_date = submitted.date().isoformat()
+        start_dt, _ = duty_window(item, submitted.date())
+        late = max(0, int((submitted - start_dt).total_seconds() // 60))
+        with get_db() as c:
+            attendance = c.execute(
+                "SELECT * FROM attendance WHERE employee_id=? AND work_date=?",
+                (item["id"], work_date),
+            ).fetchone()
+            if attendance and attendance["check_in"]:
+                result = f"Check-in already recorded at {datetime.fromisoformat(str(attendance['check_in'])).strftime('%I:%M %p')}"
+            elif attendance:
+                c.execute("UPDATE attendance SET check_in=?,late_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                          (submitted_text, late, attendance["id"]))
+                result = f"Check-in approved at {submitted.strftime('%I:%M %p')}"
+            else:
+                c.execute("INSERT INTO attendance(employee_id,work_date,check_in,late_minutes) VALUES(?,?,?,?)",
+                          (item["id"], work_date, submitted_text, late))
+                result = f"Check-in approved at {submitted.strftime('%I:%M %p')}"
+            c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)",
+                      (item["id"], action, item["fingerprint_latitude"], item["fingerprint_longitude"], item["fingerprint_distance"], item["fingerprint_media_id"], True))
+            c.execute("UPDATE attendance_fingerprints SET review_status='approved',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP,attendance_applied=?,attendance_result=? WHERE id=? AND review_status='pending'",
+                      (actor, True, result, fingerprint_id))
+    elif action == "check_out":
+        today = submitted.date(); yesterday = today - timedelta(days=1)
+        with get_db() as c:
+            today_record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (item["id"], today.isoformat())).fetchone()
+            previous_record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (item["id"], yesterday.isoformat())).fetchone()
+        attendance = today_record if today_record and today_record["check_in"] and not today_record["check_out"] else None
+        duty_date = today
+        if not attendance and previous_record and previous_record["check_in"] and not previous_record["check_out"]:
+            _, previous_end = duty_window(item, yesterday)
+            if previous_end.date() > yesterday and submitted <= previous_end + timedelta(hours=12):
+                attendance = previous_record; duty_date = yesterday
+        if not attendance:
+            raise ValueError("Check-out approve করার আগে employee-এর Check-in approve করুন।")
+        _, end_dt = duty_window(item, duty_date)
+        checked_in = _submitted_at_local(attendance["check_in"])
+        worked = max(0, int((submitted - checked_in).total_seconds() // 60))
+        early = max(0, int((end_dt - submitted).total_seconds() // 60))
+        overtime = max(0, int((submitted - end_dt).total_seconds() // 60))
+        hours, minutes = divmod(worked, 60)
+        result = f"Check-out approved at {submitted.strftime('%I:%M %p')} · Worked {hours}h {minutes}m"
+        with get_db() as c:
+            c.execute("UPDATE attendance SET check_out=?,early_leave_minutes=?,overtime_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                      (submitted_text, early, overtime, attendance["id"]))
+            c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)",
+                      (item["id"], action, item["fingerprint_latitude"], item["fingerprint_longitude"], item["fingerprint_distance"], item["fingerprint_media_id"], True))
+            c.execute("UPDATE attendance_fingerprints SET review_status='approved',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP,attendance_applied=?,attendance_result=? WHERE id=? AND review_status='pending'",
+                      (actor, True, result, fingerprint_id))
+    else:
+        raise ValueError("Unknown attendance action")
+
+    return {
+        "phone": item["whatsapp_phone"] or item["phone"],
+        "name": item["name"],
+        "action": action,
+        "score": float(item["fingerprint_score"] or 0),
+        "result": result,
+    }
+
+
 def report(employee):
     with get_db() as c: rows = c.execute("SELECT * FROM attendance WHERE employee_id=? ORDER BY work_date DESC LIMIT 7", (employee["id"],)).fetchall()
     if not rows: return "ℹ️ কোনো attendance record নেই।"
@@ -375,6 +489,12 @@ def begin_attendance_action(phone, action):
     if not has_face(employee["id"]):
         set_state(phone, "awaiting_face_registration")
         return "📸 Attendance দেওয়ার আগে Face Registration সম্পন্ন করুন। এখন ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।"
+    with get_db() as c:
+        pending = c.execute("SELECT id,action,created_at FROM attendance_fingerprints WHERE employee_id=? AND review_status='pending' ORDER BY id DESC LIMIT 1", (employee["id"],)).fetchone()
+    if pending:
+        pending_label = "Check-in" if pending["action"] == "check_in" else "Check-out"
+        return (f"⏳ আপনার {pending_label} selfie এখনো Admin approval-এর অপেক্ষায় আছে।\n"
+                "সিদ্ধান্ত না হওয়া পর্যন্ত নতুন attendance selfie প্রয়োজন নেই।")
     set_state(phone, f"{action}_location")
     return "__REQUEST_LOCATION__"
 
@@ -467,7 +587,6 @@ def receive_image(phone, media_id, image_bytes=None):
 
     record("accepted", "verified" if diagnostics.get("liveness_verdict") == "live" else "verified_liveness_review",
            score, impostor_score, impostor_id, quality, diagnostics)
-    adapt_gallery(employee["id"], candidate, quality, score, margin, diagnostics, media_id)
 
     action = "check_in" if parts[0] == "checkin_selfie" else "check_out"
     try:
@@ -494,31 +613,31 @@ def receive_image(phone, media_id, image_bytes=None):
         if settings.simple_face_mode and duplicate.hash_score < 0.985:
             duplicate = type(duplicate)(duplicate.score, "accept", duplicate.matched_fingerprint_id,
                 duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score)
-        review_status = "pending" if duplicate.decision == "pending" else "none"
+        # Every valid attendance selfie requires an HR/Admin decision. The
+        # detector result remains a risk signal; it no longer auto-finalizes or
+        # auto-rejects attendance.
+        review_status = "pending"
+        lat, lon = float(parts[1]), float(parts[2])
+        dist = float(parts[3]) if len(parts) > 3 and parts[3] else None
+        image_data = review_thumbnail(image_bytes)
         with get_db() as c:
-            c.execute("""INSERT INTO attendance_fingerprints(employee_id,action,media_id,phash,ahash,dhash,embedding,pose,yaw,landmarks,duplicate_score,hash_score,face_score,pose_score,landmark_score,matched_fingerprint_id,decision,review_status)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (employee["id"], action, media_id, fingerprint["phash"], fingerprint["ahash"], fingerprint["dhash"], json.dumps(fingerprint["embedding"]), fingerprint["pose"], fingerprint["yaw"], json.dumps(fingerprint["landmarks"]), duplicate.score, duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score, duplicate.matched_fingerprint_id, duplicate.decision, review_status))
-        if duplicate.decision == "reject":
-            return f"🚫 Duplicate Selfie Rejected\nDuplicate score: {duplicate.score*100:.1f}%\nনতুন live selfie তুলে আবার পাঠান।"
-        if duplicate.decision == "pending":
-            clear_state(phone)
-            return f"⏳ Selfie Admin Review-এ পাঠানো হয়েছে।\nDuplicate score: {duplicate.score*100:.1f}%\nAdmin সিদ্ধান্ত দেওয়ার পর আবার চেষ্টা করুন।"
+            c.execute("""INSERT INTO attendance_fingerprints(employee_id,action,media_id,image_data,latitude,longitude,distance_meters,phash,ahash,dhash,embedding,pose,yaw,landmarks,duplicate_score,hash_score,face_score,pose_score,landmark_score,matched_fingerprint_id,decision,review_status)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (employee["id"], action, media_id, image_data, lat, lon, dist, fingerprint["phash"], fingerprint["ahash"], fingerprint["dhash"], json.dumps(fingerprint["embedding"]), fingerprint["pose"], fingerprint["yaw"], json.dumps(fingerprint["landmarks"]), duplicate.score, duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score, duplicate.matched_fingerprint_id, duplicate.decision, review_status))
+        clear_state(phone)
+        risk = "High duplicate risk" if duplicate.decision == "reject" else ("Needs duplicate review" if duplicate.decision == "pending" else "Security checks passed")
+        return (f"⏳ Selfie Admin Approval-এ পাঠানো হয়েছে।\n"
+                f"{risk} · Score: {duplicate.score*100:.1f}%\n\n"
+                "Admin approve করলে attendance final হবে এবং WhatsApp-এ confirmation পাবেন।")
     except Exception:
         # GPS and identity have already passed. In Simple Face Mode an optional
         # duplicate-analysis/database issue must not block valid attendance.
         logging.getLogger(__name__).exception("duplicate selfie analysis failed")
         if not settings.simple_face_mode:
             return "⚠️ Selfie verification সাময়িকভাবে সম্পন্ন হয়নি। Challenge শেষ হওয়ার আগে আবার চেষ্টা করুন।"
-    lat, lon = float(parts[1]), float(parts[2]); dist = float(parts[3]) if len(parts) > 3 and parts[3] else None
-    result = check_in(employee) if action == "check_in" else check_out(employee)
-    with get_db() as c:
-        # Python bool works for PostgreSQL BOOLEAN and is stored as 1 by SQLite.
-        # Passing integer 1 made psycopg reject an otherwise valid selfie after
-        # attendance had already been recorded.
-        c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)", (employee["id"], action, lat, lon, dist, media_id, True))
-    clear_state(phone)
-    verification = "Simple Face Verified" if settings.simple_face_mode else f"Live Challenge Verified: {POSE_LABELS.get(challenge_pose, challenge_pose)}"
-    return result + f"\n✅ Location Verified\n😊 Face Verified: {score*100:.1f}%\n🛡️ {verification}"
+    # The normal path always returns from the mandatory review block above.
+    # This fallback is reached only when duplicate analysis fails in strict
+    # mode, in which case attendance remains unrecorded.
+    return "⚠️ Selfie review তৈরি করা যায়নি। Challenge শেষ হওয়ার আগে আবার চেষ্টা করুন।"
 
 
 def process(phone, text):

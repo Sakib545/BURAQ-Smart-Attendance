@@ -15,13 +15,15 @@ Path("/tmp/buraq_v9_test.db").unlink(missing_ok=True)
 
 from fastapi.testclient import TestClient
 from app.main import app
+from app.database import get_db
+from app.services import approve_pending_attendance
 
 
 def test_liveness_and_readiness():
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "9.19.9"
+        assert health.json()["version"] == "9.20.0"
         assert health.headers.get("x-request-id")
 
         ready = client.get("/ready")
@@ -34,3 +36,30 @@ def test_login_page_is_available():
         response = client.get("/login")
         assert response.status_code == 200
         assert "BURAQ" in response.text
+
+
+def test_pending_selfie_approval_finalizes_once():
+    with TestClient(app):
+        with get_db() as db:
+            db.execute("DELETE FROM employees WHERE staff_id=?", ("TEST-PENDING-001",))
+            db.execute("INSERT INTO employees(staff_id,name,shift,registration_status) VALUES(?,?,?,?)",
+                       ("TEST-PENDING-001", "Pending Test", "morning", "approved"))
+            employee = db.execute("SELECT id FROM employees WHERE staff_id=?", ("TEST-PENDING-001",)).fetchone()
+            db.execute("""INSERT INTO attendance_fingerprints(
+                employee_id,action,media_id,image_data,latitude,longitude,distance_meters,
+                phash,ahash,dhash,embedding,decision,review_status,face_score,duplicate_score,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (employee["id"], "check_in", "test-media-001", "", 23.0, 90.0, 12.0,
+                 "p", "a", "d", "[]", "accept", "pending", 0.91, 0.02, "2026-08-02 09:02:00"))
+            fingerprint = db.execute("SELECT id FROM attendance_fingerprints WHERE media_id=?", ("test-media-001",)).fetchone()
+
+        approved = approve_pending_attendance(int(fingerprint["id"]), "test-admin")
+        assert approved and "Check-in" in approved["result"]
+        assert approve_pending_attendance(int(fingerprint["id"]), "test-admin") is None
+
+        with get_db() as db:
+            selfie = db.execute("SELECT review_status,attendance_applied FROM attendance_fingerprints WHERE id=?", (fingerprint["id"],)).fetchone()
+            attendance = db.execute("SELECT COUNT(*) c FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], "2026-08-02")).fetchone()
+        assert selfie["review_status"] == "approved"
+        assert bool(selfie["attendance_applied"]) is True
+        assert int(attendance["c"]) == 1

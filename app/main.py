@@ -31,10 +31,11 @@ from app.reminders import reminder_worker
 from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
+from app.services import approve_pending_attendance
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.19.9"
+APP_VERSION = "9.20.0"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -547,6 +548,7 @@ def dashboard(request: Request):
       <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-red'>♙</span><div><div class='metric-label'>Absent</div><div class='metric'>{absent}</div></div></div><div class='metric-foot'>{round(absent/employees*100,1) if employees else 0}% of workforce</div><div class='mini-line'><span style='width:{round(absent/employees*100,1) if employees else 0}%;background:#ef476f'></span></div></div>
       <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-purple'>☂</span><div><div class='metric-label'>On Leave</div><div class='metric'>{on_leave}</div></div></div><div class='metric-foot'>{round(on_leave/employees*100,1) if employees else 0}% of workforce</div><div class='mini-line'><span style='width:{round(on_leave/employees*100,1) if employees else 0}%;background:#8b5cf6'></span></div></div>
       <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-blue'>◷</span><div><div class='metric-label'>Overtime (Today)</div><div class='metric'>{overtime}m</div></div></div><div class='metric-foot'>{checked_out} check-outs</div></div>
+      {f"<a class='card dashboard-kpi dashboard-kpi-link' href='/duplicates?review=pending'><div class='kpi-row'><span class='kpi-symbol kpi-orange'>{ui.icon('user')}</span><div><div class='metric-label'>Pending Selfies</div><div class='metric'>{pending_selfie}</div></div></div><div class='metric-foot'>Waiting for HR/Admin approval</div><div class='mini-line'><span style='width:{min(100,pending_selfie*12)}%;background:#f97316'></span></div></a>" if has_permission(request,'approvals_view') else ''}
       {f"<a class='card dashboard-kpi dashboard-kpi-link' href='/face-security'><div class='kpi-row'><span class='kpi-symbol kpi-red'>{ui.icon('shield')}</span><div><div class='metric-label'>Spoof Attempts Today</div><div class='metric'>{face_today['spoof']}</div></div></div><div class='metric-foot'>{face_today['checks']} face checks · {face_today['rejected']} rejected</div><div class='mini-line'><span style='width:{min(100,face_today['spoof']*20)}%;background:#ef476f'></span></div></a>" if has_permission(request,'face_security_view') else ''}
     </div>
     <div class='section-gap'></div>
@@ -1960,7 +1962,7 @@ def delete_custom_duty(request: Request, duty_id: int):
     return RedirectResponse('/duty-schedules',303)
 
 @app.get("/duplicates")
-def duplicate_analysis(request: Request, decision: str="", review: str="", scope: str=""):
+def duplicate_analysis(request: Request, decision: str="", review: str="", scope: str="", saved: str="", error: str=""):
     require_permission(request, "approvals_view")
     # Land on the queue that needs a decision. `scope=all` opens the history.
     if not decision and not review and scope != "all":
@@ -1968,55 +1970,95 @@ def duplicate_analysis(request: Request, decision: str="", review: str="", scope
     clauses, params = ["1=1"], []
     if decision in {"accept", "pending", "reject"}: clauses.append("f.decision=?"); params.append(decision)
     if review in {"none", "pending", "approved", "rejected"}: clauses.append("f.review_status=?"); params.append(review)
+    image_field = "f.image_data" if review == "pending" and scope != "all" else "NULL AS image_data"
+    row_limit = 60 if review == "pending" and scope != "all" else 300
     with get_db() as c:
-        rows = c.execute("SELECT f.*,e.staff_id,e.name FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id WHERE "+" AND ".join(clauses)+" ORDER BY CASE WHEN f.review_status='pending' THEN 0 ELSE 1 END, f.id DESC LIMIT 300", tuple(params)).fetchall()
+        rows = c.execute(f"""SELECT f.id,f.employee_id,f.action,f.media_id,{image_field},
+            f.latitude,f.longitude,f.distance_meters,f.duplicate_score,f.hash_score,f.face_score,
+            f.pose_score,f.landmark_score,f.matched_fingerprint_id,f.decision,f.review_status,
+            f.attendance_applied,f.attendance_result,f.reviewed_by,f.reviewed_at,f.created_at,
+            e.staff_id,e.name FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY CASE WHEN f.review_status='pending' THEN 0 ELSE 1 END, f.id DESC LIMIT {row_limit}""", tuple(params)).fetchall()
         waiting = int(c.execute("SELECT COUNT(*) c FROM attendance_fingerprints WHERE review_status='pending'").fetchone()["c"] or 0)
-    items=[]
     can_manage=has_permission(request,"approvals_manage")
-    for r in rows:
-        state="bad" if r["decision"]=="reject" else "warn" if r["decision"]=="pending" else "ok"
-        controls=""
-        if can_manage and r["review_status"]=="pending":
-            controls=f"<form method='post' action='/duplicates/{r['id']}/approve' style='display:inline'><button class='btn'>Approve</button></form> <form method='post' action='/duplicates/{r['id']}/reject' style='display:inline'><button class='btn danger'>Reject</button></form>"
-        items.append(f"<tr><td>#{r['id']}</td><td><b>{escape(r['name'])}</b><br><span class='sub'>{escape(r['staff_id'])}</span></td><td>{escape(r['action'])}</td><td><span class='status {state}'>{escape(r['decision'])}</span><br><span class='sub'>{escape(r['review_status'])}</span></td><td><b>{r['duplicate_score']*100:.1f}%</b></td><td>Hash {r['hash_score']*100:.0f}%<br>Face {r['face_score']*100:.0f}%<br>Pose {r['pose_score']*100:.0f}%<br>Landmark {r['landmark_score']*100:.0f}%</td><td>{'#'+str(r['matched_fingerprint_id']) if r['matched_fingerprint_id'] else '—'}</td><td>{escape(str(r['created_at']))}</td><td>{controls}</td></tr>")
     thresholds=f"Accept &lt; {settings.duplicate_accept_below:.2f} • Review {settings.duplicate_accept_below:.2f}–{settings.duplicate_reject_at:.2f} • Reject ≥ {settings.duplicate_reject_at:.2f}"
     tabs=[("Needs review", "/duplicates?review=pending", review=="pending" and scope!="all", waiting),
           ("Approved", "/duplicates?review=approved", review=="approved", None),
           ("Rejected", "/duplicates?review=rejected", review=="rejected", None),
           ("All selfies", "/duplicates?scope=all", scope=="all", None)]
     tab_html="".join(f"<a class='tab{' active' if active else ''}' href='{url}'>{label}{f' ({count})' if count else ''}</a>" for label,url,active,count in tabs)
-    empty="<div class='empty-state'>এই তালিকায় কিছু নেই। নতুন selfie review-এ এলে এখানে দেখা যাবে।</div>"
-    table=f"<div style='overflow:auto'><table><thead><tr><th>ID</th><th>Employee</th><th>Action</th><th>Status</th><th>Score</th><th>Signals</th><th>Matched</th><th>Time</th><th>Decision</th></tr></thead><tbody>{''.join(items)}</tbody></table></div>" if items else empty
+    empty="<div class='empty-state'>এই তালিকায় কিছু নেই। নতুন attendance selfie এলে এখানে দেখা যাবে।</div>"
+    if review == "pending" and scope != "all":
+        cards=[]
+        for r in rows:
+            risk_state="bad" if r["decision"]=="reject" else "warn" if r["decision"]=="pending" else "ok"
+            risk_label="High duplicate risk" if r["decision"]=="reject" else "Needs review" if r["decision"]=="pending" else "Security clear"
+            initials=escape("".join(part[:1] for part in str(r["name"]).split()[:2]).upper() or "E")
+            photo=(f"<img src='data:image/jpeg;base64,{r['image_data']}' alt='{escape(str(r['name']))} attendance selfie' loading='lazy'>" if r["image_data"] else f"<div class='review-photo-fallback'>{initials}<span>Preview unavailable</span></div>")
+            location=(f"Verified · {float(r['distance_meters']):.0f} m" if r["distance_meters"] is not None else "Verified · office radius not configured")
+            action_label="Check in" if r["action"]=="check_in" else "Check out"
+            submitted=escape(str(r["created_at"]).replace("T"," ")[:19])
+            controls=""
+            if can_manage:
+                controls=f"""<div class='review-actions'>
+                  <form method='post' action='/duplicates/{r['id']}/approve'><button class='btn' type='submit'>✓ Approve attendance</button></form>
+                  <form method='post' action='/duplicates/{r['id']}/reject' onsubmit=\"return confirm('Reject this selfie and ask the employee to try again?')\"><button class='btn danger' type='submit'>✕ Reject &amp; ask again</button></form>
+                </div>"""
+            cards.append(f"""<article class='card selfie-review-card'>
+              <div class='review-card-head'><div><div class='eyebrow'>Pending review · #{r['id']}</div><h3>{escape(str(r['name']))}</h3><div class='sub'>{escape(str(r['staff_id']))} · {action_label}</div></div><span class='status {risk_state}'>{risk_label}</span></div>
+              <div class='review-card-grid'><div class='review-photo'>{photo}</div><div class='review-details'>
+                <div class='review-facts'><div><span>Submitted</span><b>{submitted}</b></div><div><span>Face match</span><b>{float(r['face_score'] or 0)*100:.1f}%</b></div><div><span>Location</span><b>{location}</b></div><div><span>Duplicate score</span><b>{float(r['duplicate_score'] or 0)*100:.1f}%</b></div><div><span>Pose / Landmark</span><b>{float(r['pose_score'] or 0)*100:.0f}% / {float(r['landmark_score'] or 0)*100:.0f}%</b></div><div><span>Matched selfie</span><b>{'#'+str(r['matched_fingerprint_id']) if r['matched_fingerprint_id'] else 'None'}</b></div></div>
+                {controls}<div class='sub'>Approve করলে submitted time অনুযায়ী attendance final হবে এবং employee WhatsApp confirmation পাবে।</div>
+              </div></div></article>""")
+        content=f"<div class='selfie-review-grid'>{''.join(cards)}</div>" if cards else empty
+    else:
+        history=[]
+        for r in rows:
+            state="bad" if r["review_status"]=="rejected" else "warn" if r["review_status"]=="pending" else "ok"
+            applied="Final" if r["attendance_applied"] else ("Rejected" if r["review_status"]=="rejected" else "Not final")
+            history.append(f"<tr><td>#{r['id']}</td><td><b>{escape(str(r['name']))}</b><br><span class='sub'>{escape(str(r['staff_id']))}</span></td><td>{'Check in' if r['action']=='check_in' else 'Check out'}</td><td><span class='status {state}'>{escape(str(r['review_status']).title())}</span><div class='sub'>{applied}</div></td><td>{float(r['face_score'] or 0)*100:.1f}%</td><td>{float(r['duplicate_score'] or 0)*100:.1f}%</td><td>{escape(str(r['attendance_result'] or '—'))}</td><td>{escape(str(r['created_at']))}</td></tr>")
+        content=f"<div style='overflow:auto'><table><thead><tr><th>ID</th><th>Employee</th><th>Action</th><th>Status</th><th>Face</th><th>Duplicate</th><th>Attendance result</th><th>Submitted</th></tr></thead><tbody>{''.join(history)}</tbody></table></div>" if history else empty
+    notice = "<div class='notice'>Attendance selfie approved and finalized.</div>" if saved=="approved" else ("<div class='notice'>Selfie rejected; employee notification queued.</div>" if saved=="rejected" else ("<div class='notice bad'>Check-out approve করার আগে ওই employee-এর pending Check-in approve করুন।</div>" if error else ""))
     body=f"""<div class='hero'>
-      <div><div class='eyebrow'>Security</div><h2>Selfie Review</h2><div class='sub'>{thresholds}</div></div>
+      <div><div class='eyebrow'>Attendance Approval</div><h2>Pending Selfies</h2><div class='sub'>প্রতিটি valid attendance selfie HR/Admin approve করার পর final হবে। · {thresholds}</div></div>
       <span class='pill'>{waiting} waiting</span>
     </div>
-    <div class='tabs'>{tab_html}</div>
-    <div class='card'>{table}</div>"""
+    {notice}<div class='tabs'>{tab_html}</div>{content}"""
     return layout("Selfie Review", body, request, "duplicates")
 
 @app.post("/duplicates/{fingerprint_id}/{action}")
 def review_duplicate(request: Request, fingerprint_id: int, action: str, background_tasks: BackgroundTasks):
     require_permission(request,"approvals_manage")
     if action not in {"approve","reject"}: raise HTTPException(400,"Invalid action")
-    status="approved" if action=="approve" else "rejected"
     actor=str(request.session.get("hr_id") or "super_admin")
     notify=None
-    with get_db() as c:
-        row=c.execute("""SELECT f.id,f.action,f.duplicate_score,e.name,
-            COALESCE(NULLIF(e.whatsapp_phone,''),NULLIF(e.phone,'')) notification_phone
-            FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id
-            WHERE f.id=? AND f.review_status='pending'""",(fingerprint_id,)).fetchone()
-        if not row: raise HTTPException(404,"Pending fingerprint not found")
-        c.execute("UPDATE attendance_fingerprints SET review_status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(status,actor,fingerprint_id))
-        if row["notification_phone"]:
-            notify=(row["notification_phone"],row["name"],row["action"],status=="approved",float(row["duplicate_score"] or 0))
+    if action == "approve":
+        try:
+            approved = approve_pending_attendance(fingerprint_id, actor)
+        except ValueError:
+            return RedirectResponse("/duplicates?review=pending&error=checkin-first",303)
+        if not approved: raise HTTPException(404,"Pending selfie not found or already reviewed")
+        if approved["phone"]:
+            notify=(approved["phone"],approved["name"],approved["action"],True,approved["score"],approved["result"])
+        status="approved"
+    else:
+        status="rejected"
+        with get_db() as c:
+            row=c.execute("""SELECT f.id,f.action,f.duplicate_score,e.name,
+                COALESCE(NULLIF(e.whatsapp_phone,''),NULLIF(e.phone,'')) notification_phone
+                FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id
+                WHERE f.id=? AND f.review_status='pending'""",(fingerprint_id,)).fetchone()
+            if not row: raise HTTPException(404,"Pending selfie not found or already reviewed")
+            c.execute("UPDATE attendance_fingerprints SET review_status='rejected',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP,attendance_result='Rejected by HR/Admin' WHERE id=? AND review_status='pending'",(actor,fingerprint_id))
+            if row["notification_phone"]:
+                notify=(row["notification_phone"],row["name"],row["action"],False,float(row["duplicate_score"] or 0),"")
     audit(request,action,"attendance_fingerprint",str(fingerprint_id),status)
     if notify:
         background_tasks.add_task(send_selfie_review_result,*notify)
     else:
         logger.warning("Selfie review notification skipped: employee phone missing fingerprint=%s",fingerprint_id)
-    return RedirectResponse("/duplicates?review=pending",303)
+    return RedirectResponse(f"/duplicates?review=pending&saved={status}",303)
 
 @app.get("/webhook/whatsapp", response_class=PlainTextResponse)
 def verify(hub_mode: str | None = Query(None, alias="hub.mode"), hub_verify_token: str | None = Query(None, alias="hub.verify_token"), hub_challenge: str | None = Query(None, alias="hub.challenge")):

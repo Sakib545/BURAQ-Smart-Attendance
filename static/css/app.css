@@ -743,6 +743,23 @@ tbody tr:last-child td { border-bottom: 0; }
 .dashboard-kpi-link:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--brand) 28%, var(--rule)); }
 .face-security-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 16px; }
 
+.selfie-review-grid { display: grid; gap: 14px; }
+.selfie-review-card { padding: 18px; }
+.review-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.review-card-head h3 { margin: 3px 0; }
+.review-card-grid { display: grid; grid-template-columns: minmax(190px, 280px) minmax(0, 1fr); gap: 18px; align-items: start; }
+.review-photo { aspect-ratio: 4 / 5; overflow: hidden; border: 1px solid var(--rule); border-radius: var(--r-md); background: var(--surface-2); }
+.review-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.review-photo-fallback { width: 100%; height: 100%; display: grid; place-content: center; gap: 8px; text-align: center; color: var(--muted); font-size: 30px; font-weight: 600; }
+.review-photo-fallback span { font-size: 12px; font-weight: 400; }
+.review-details { display: grid; gap: 14px; }
+.review-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; }
+.review-facts > div { display: grid; gap: 4px; padding: 10px 0; border-bottom: 1px solid var(--rule); }
+.review-facts span { color: var(--muted); font-size: 12px; }
+.review-facts b { font-size: 13.5px; }
+.review-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.review-actions form { margin: 0; }
+
 .kpi-row { display: flex; gap: 11px; align-items: center; }
 
 .kpi-symbol {
@@ -1164,6 +1181,7 @@ tbody tr:last-child td { border-bottom: 0; }
 
 @media (max-width: 820px) {
   .face-security-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .review-card-grid { grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); }
 }
 
 @media (max-width: 620px) {
@@ -1174,6 +1192,10 @@ tbody tr:last-child td { border-bottom: 0; }
   .actions > .btn { flex: 1; }
   .calendar { gap: 3px; }
   .cal-day { min-height: 50px; padding: 4px; }
+  .review-card-grid, .review-facts { grid-template-columns: minmax(0, 1fr); }
+  .review-photo { max-height: 420px; }
+  .review-actions { align-items: stretch; }
+  .review-actions form, .review-actions .btn { width: 100%; }
 }
 
 /* --- 14. Motion + print --------------------------------------------------- */

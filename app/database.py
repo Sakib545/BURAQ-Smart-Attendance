@@ -289,22 +289,26 @@ def apply_feature_migrations() -> None:
         """CREATE TABLE IF NOT EXISTS attendance_fingerprints(
             id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, action TEXT NOT NULL,
             media_id TEXT, phash TEXT NOT NULL, ahash TEXT NOT NULL, dhash TEXT NOT NULL,
+            image_data TEXT, latitude REAL, longitude REAL, distance_meters REAL,
             embedding TEXT NOT NULL, pose TEXT, yaw REAL NOT NULL DEFAULT 0, landmarks TEXT,
             duplicate_score REAL NOT NULL DEFAULT 0, hash_score REAL NOT NULL DEFAULT 0,
             face_score REAL NOT NULL DEFAULT 0, pose_score REAL NOT NULL DEFAULT 0,
             landmark_score REAL NOT NULL DEFAULT 0, matched_fingerprint_id INTEGER,
             decision TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'none', reviewed_by TEXT,
-            reviewed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT, attendance_applied INTEGER NOT NULL DEFAULT 0,
+            attendance_result TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(employee_id) REFERENCES employees(id), FOREIGN KEY(matched_fingerprint_id) REFERENCES attendance_fingerprints(id)
         )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS attendance_fingerprints(
             id BIGSERIAL PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id), action TEXT NOT NULL,
             media_id TEXT, phash TEXT NOT NULL, ahash TEXT NOT NULL, dhash TEXT NOT NULL,
+            image_data TEXT, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION, distance_meters DOUBLE PRECISION,
             embedding TEXT NOT NULL, pose TEXT, yaw DOUBLE PRECISION NOT NULL DEFAULT 0, landmarks TEXT,
             duplicate_score DOUBLE PRECISION NOT NULL DEFAULT 0, hash_score DOUBLE PRECISION NOT NULL DEFAULT 0,
             face_score DOUBLE PRECISION NOT NULL DEFAULT 0, pose_score DOUBLE PRECISION NOT NULL DEFAULT 0,
             landmark_score DOUBLE PRECISION NOT NULL DEFAULT 0, matched_fingerprint_id BIGINT REFERENCES attendance_fingerprints(id),
             decision TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'none', reviewed_by TEXT,
-            reviewed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            reviewed_at TIMESTAMPTZ, attendance_applied BOOLEAN NOT NULL DEFAULT FALSE,
+            attendance_result TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""",
         "CREATE INDEX IF NOT EXISTS ix_attendance_fingerprints_employee_created ON attendance_fingerprints(employee_id, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_attendance_fingerprints_review ON attendance_fingerprints(decision, review_status)",
@@ -397,7 +401,11 @@ def apply_feature_migrations() -> None:
     sqlite = _active_url.startswith("sqlite")
     real = "REAL NOT NULL DEFAULT 0" if sqlite else "DOUBLE PRECISION NOT NULL DEFAULT 0"
     fingerprint_columns = [
-        ("media_id", "TEXT"), ("pose", "TEXT"), ("yaw", real),
+        ("media_id", "TEXT"), ("image_data", "TEXT"),
+        ("latitude", "REAL" if sqlite else "DOUBLE PRECISION"),
+        ("longitude", "REAL" if sqlite else "DOUBLE PRECISION"),
+        ("distance_meters", "REAL" if sqlite else "DOUBLE PRECISION"),
+        ("pose", "TEXT"), ("yaw", real),
         ("landmarks", "TEXT"), ("duplicate_score", real),
         ("hash_score", real), ("face_score", real), ("pose_score", real),
         ("landmark_score", real),
@@ -406,6 +414,8 @@ def apply_feature_migrations() -> None:
         ("review_status", "TEXT NOT NULL DEFAULT 'none'"),
         ("reviewed_by", "TEXT"),
         ("reviewed_at", "TEXT" if sqlite else "TIMESTAMPTZ"),
+        ("attendance_applied", "INTEGER NOT NULL DEFAULT 0" if sqlite else "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("attendance_result", "TEXT"),
     ]
     existing_fingerprints = {col["name"] for col in inspect(engine).get_columns("attendance_fingerprints")}
     for column, definition in fingerprint_columns:
@@ -419,6 +429,7 @@ def apply_feature_migrations() -> None:
     mark_migration("v9.9-zero-touch-duty-reminders")
     mark_migration("v9.9.1-custom-duty")
     mark_migration("v9.19.7-fingerprint-schema-repair")
+    mark_migration("v9.20-mandatory-selfie-review")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.
