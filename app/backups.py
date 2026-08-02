@@ -25,7 +25,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import settings
 
-APP_VERSION = "9.20.0"
+APP_VERSION = "9.21.0"
 from app import database
 
 logger = logging.getLogger(__name__)

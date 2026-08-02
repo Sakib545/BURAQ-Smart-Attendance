@@ -354,12 +354,14 @@ def apply_feature_migrations() -> None:
         "CREATE INDEX IF NOT EXISTS ix_fingerprints_dhash ON attendance_fingerprints(dhash)",
         """CREATE TABLE IF NOT EXISTS duty_schedules(
             id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, weekday INTEGER NOT NULL,
-            start_time TEXT NOT NULL, end_time TEXT NOT NULL, office_name TEXT, is_active INTEGER NOT NULL DEFAULT 1,
+            start_time TEXT NOT NULL, end_time TEXT NOT NULL, break_minutes INTEGER NOT NULL DEFAULT 0,
+            office_name TEXT, is_active INTEGER NOT NULL DEFAULT 1,
             created_by TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(employee_id,weekday), FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
         )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS duty_schedules(
             id BIGSERIAL PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-            weekday INTEGER NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, office_name TEXT,
+            weekday INTEGER NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL,
+            break_minutes INTEGER NOT NULL DEFAULT 0, office_name TEXT,
             is_active BOOLEAN NOT NULL DEFAULT TRUE, created_by TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(employee_id,weekday)
@@ -378,13 +380,15 @@ def apply_feature_migrations() -> None:
         "CREATE INDEX IF NOT EXISTS ix_duty_reminders_date ON duty_reminder_logs(duty_date)",
         """CREATE TABLE IF NOT EXISTS custom_duties(
             id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, duty_date TEXT NOT NULL,
-            start_time TEXT NOT NULL, end_time TEXT NOT NULL, office_name TEXT, note TEXT,
+            start_time TEXT NOT NULL, end_time TEXT NOT NULL, break_minutes INTEGER NOT NULL DEFAULT 0,
+            office_name TEXT, note TEXT,
             is_active INTEGER NOT NULL DEFAULT 1, created_by TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(employee_id,duty_date), FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
         )""" if _active_url.startswith("sqlite") else """CREATE TABLE IF NOT EXISTS custom_duties(
             id BIGSERIAL PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-            duty_date TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, office_name TEXT, note TEXT,
+            duty_date TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL,
+            break_minutes INTEGER NOT NULL DEFAULT 0, office_name TEXT, note TEXT,
             is_active BOOLEAN NOT NULL DEFAULT TRUE, created_by TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(employee_id,duty_date)
@@ -423,6 +427,12 @@ def apply_feature_migrations() -> None:
             continue
         with engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE attendance_fingerprints ADD COLUMN {column} {definition}"))
+
+    for table_name in ("duty_schedules", "custom_duties"):
+        duty_columns = {col["name"] for col in inspect(engine).get_columns(table_name)}
+        if "break_minutes" not in duty_columns:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN break_minutes INTEGER NOT NULL DEFAULT 0"))
     mark_migration("v9.5-attendance-fingerprints")
     mark_migration("v9.6-private-payroll")
     mark_migration("v9.8-performance-optimization")
@@ -430,6 +440,7 @@ def apply_feature_migrations() -> None:
     mark_migration("v9.9.1-custom-duty")
     mark_migration("v9.19.7-fingerprint-schema-repair")
     mark_migration("v9.20-mandatory-selfie-review")
+    mark_migration("v9.21-duty-break-payroll")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.
@@ -460,6 +471,10 @@ def apply_feature_migrations() -> None:
         ("unpaid_leave_units", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("absent_duty_units", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("unpaid_leave_deduction", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("earned_basic_salary", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("late_minutes", "INTEGER NOT NULL DEFAULT 0"),
+        ("late_deduction", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("payable_duty_minutes", "INTEGER NOT NULL DEFAULT 0"),
         ("advance_amount", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("fine_amount", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("gross_salary", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
