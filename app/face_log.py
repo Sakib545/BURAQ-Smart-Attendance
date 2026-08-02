@@ -90,7 +90,7 @@ def log_face_event(
                     float(diagnostics.get("liveness_score", 0.0)),
                     diagnostics.get("liveness_verdict", ""),
                     json.dumps(diagnostics.get("liveness_components", {})),
-                    1 if diagnostics.get("liveness_model") else 0,
+                    bool(diagnostics.get("liveness_model")),
                     round(float(elapsed_ms), 2),
                 ),
             )

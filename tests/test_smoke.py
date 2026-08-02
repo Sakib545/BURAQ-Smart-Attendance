@@ -16,14 +16,15 @@ Path("/tmp/buraq_v9_test.db").unlink(missing_ok=True)
 from fastapi.testclient import TestClient
 from app.main import app
 from app.database import get_db
-from app.services import approve_pending_attendance
+from app.services import approve_pending_attendance, set_state, state
+from app.location_links import create_location_token, verify_location_token
 
 
 def test_liveness_and_readiness():
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "9.21.3"
+        assert health.json()["version"] == "9.22.0"
         assert health.headers.get("x-request-id")
 
         ready = client.get("/ready")
@@ -36,6 +37,56 @@ def test_login_page_is_available():
         response = client.get("/login")
         assert response.status_code == 200
         assert "BURAQ" in response.text
+
+
+def test_location_fallback_token_is_signed_and_scoped():
+    token = create_location_token(42, "checkin", 60)
+    payload = verify_location_token(token)
+    assert payload["employee_id"] == 42
+    assert payload["action"] == "checkin"
+
+    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    try:
+        verify_location_token(tampered)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Tampered location token was accepted")
+
+
+def test_location_fallback_accepts_once_and_closes_pending_state():
+    with TestClient(app) as client:
+        with get_db() as db:
+            db.execute("DELETE FROM employees WHERE staff_id=?", ("TEST-LOCATION-001",))
+            db.execute(
+                """INSERT INTO employees(staff_id,name,phone,whatsapp_phone,shift,registration_status)
+                   VALUES(?,?,?,?,?,?)""",
+                ("TEST-LOCATION-001", "Location Test", "8801700000001", "8801700000001", "morning", "approved"),
+            )
+            employee = db.execute(
+                "SELECT id FROM employees WHERE staff_id=?", ("TEST-LOCATION-001",)
+            ).fetchone()
+        set_state("8801700000001", "checkin_location")
+        token = create_location_token(employee["id"], "checkin", 60)
+
+        page = client.get("/attendance/location", params={"t": token})
+        assert page.status_code == 200
+        assert "Location Allow করুন" in page.text
+        assert "geolocation=(self)" in page.headers["permissions-policy"]
+
+        submitted = client.post(
+            "/attendance/location/submit",
+            json={"token": token, "latitude": 23.8103, "longitude": 90.4125},
+        )
+        assert submitted.status_code == 200
+        assert submitted.json()["ok"] is True
+        assert state("8801700000001")["state"].startswith("checkin_selfie:")
+
+        reused = client.post(
+            "/attendance/location/submit",
+            json={"token": token, "latitude": 23.8103, "longitude": 90.4125},
+        )
+        assert reused.status_code == 400
 
 
 def test_pending_selfie_approval_finalizes_once():

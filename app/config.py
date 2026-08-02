@@ -30,6 +30,7 @@ class Settings:
     whatsapp_access_token: str = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
     whatsapp_phone_number_id: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
     meta_api_version: str = os.getenv("META_API_VERSION", "v23.0")
+    public_base_url: str = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
     admin_api_key: str = os.getenv("ADMIN_API_KEY", "")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     allow_temp_db_fallback: bool = os.getenv("ALLOW_TEMP_DB_FALLBACK", "false").strip().lower() in {"1","true","yes","on"}

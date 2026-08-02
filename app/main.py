@@ -27,15 +27,16 @@ from app.database import database_kind, database_ok, database_warning, get_db, i
 from app.runtime import configured, get_setting, set_setting, import_environment_defaults, get_stored_setting, restore_stored_setting
 from app.employee_seed import import_employees
 from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_selfie_review_result, send_text
+from app.location_links import verify_location_token
 from app.reminders import reminder_worker
 from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
-from app.services import approve_pending_attendance
+from app.services import approve_pending_attendance, receive_location, state
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.21.3"
+APP_VERSION = "9.22.0"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -57,7 +58,7 @@ async def request_context(request: Request, call_next):
     response.headers["X-Response-Time-ms"] = str(duration_ms)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(self)"
     logger.info("request_id=%s method=%s path=%s status=%s duration_ms=%s", request_id, request.method, request.url.path, response.status_code, duration_ms)
     return response
 
@@ -2102,10 +2103,141 @@ def verify(hub_mode: str | None = Query(None, alias="hub.mode"), hub_verify_toke
         return hub_challenge or ""
     raise HTTPException(403, "Webhook verification failed")
 
+
+def _location_link_employee(token: str):
+    payload = verify_location_token(token)
+    with get_db() as c:
+        employee = c.execute(
+            """SELECT id,name,COALESCE(NULLIF(whatsapp_phone,''),NULLIF(phone,'')) AS attendance_phone
+               FROM employees WHERE id=? AND is_active""",
+            (payload["employee_id"],),
+        ).fetchone()
+    if not employee or not employee["attendance_phone"]:
+        raise ValueError("Employee is unavailable")
+    expected_state = f"{payload['action']}_location"
+    current = state(employee["attendance_phone"])
+    if not current or current["state"] != expected_state:
+        raise ValueError("Location is no longer pending")
+    return payload, employee
+
+
+@app.get("/attendance/location", response_class=HTMLResponse)
+def attendance_location_page(t: str = Query(..., min_length=20)):
+    try:
+        _, employee = _location_link_employee(t)
+        employee_name = escape(str(employee["name"]))
+        token_json = json.dumps(t)
+        content = f"""
+        <div class="card">
+          <div class="pin">📍</div>
+          <h1>Attendance Location</h1>
+          <p class="hello">{employee_name}, আপনার বর্তমান location যাচাই করুন।</p>
+          <div id="status" class="status">Location permission আসলে <b>Allow</b> দিন।</div>
+          <button id="allow" type="button">Location Allow করুন</button>
+          <p class="note">Location গ্রহণ হলে WhatsApp-এ ফিরে selfie পাঠাবেন।</p>
+        </div>
+        <script>
+          const token = {token_json};
+          const statusBox = document.getElementById('status');
+          const allowButton = document.getElementById('allow');
+          let requesting = false;
+          function message(text, kind = '') {{
+            statusBox.textContent = text;
+            statusBox.className = 'status ' + kind;
+          }}
+          async function submitLocation(position) {{
+            message('Location যাচাই হচ্ছে…', 'working');
+            try {{
+              const response = await fetch('/attendance/location/submit', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                  token,
+                  latitude: position.coords.latitude,
+                  longitude: position.coords.longitude,
+                  accuracy: position.coords.accuracy
+                }})
+              }});
+              const result = await response.json();
+              if (!response.ok || !result.ok) throw new Error(result.message || 'Location যাচাই হয়নি।');
+              message('✅ Location গ্রহণ হয়েছে। এখন WhatsApp-এ ফিরে selfie পাঠান।', 'success');
+              allowButton.hidden = true;
+            }} catch (error) {{
+              message('⚠️ ' + error.message, 'error');
+              allowButton.disabled = false;
+              requesting = false;
+            }}
+          }}
+          function requestLocation() {{
+            if (requesting) return;
+            if (!navigator.geolocation) {{
+              message('এই browser Location support করে না। Chrome দিয়ে linkটি খুলুন।', 'error');
+              return;
+            }}
+            requesting = true;
+            allowButton.disabled = true;
+            message('ফোনের Location permission-এ Allow দিন…', 'working');
+            navigator.geolocation.getCurrentPosition(submitLocation, error => {{
+              const help = error.code === 1
+                ? 'Location permission বন্ধ আছে। Browser/App Settings থেকে Location Allow করে আবার চাপুন।'
+                : 'Location পাওয়া যায়নি। GPS চালু করে আবার চেষ্টা করুন।';
+              message('⚠️ ' + help, 'error');
+              allowButton.disabled = false;
+              requesting = false;
+            }}, {{enableHighAccuracy: true, timeout: 20000, maximumAge: 0}});
+          }}
+          allowButton.addEventListener('click', requestLocation);
+          window.addEventListener('load', requestLocation);
+        </script>
+        """
+    except ValueError:
+        content = """
+        <div class="card">
+          <div class="pin">⚠️</div>
+          <h1>Linkটি আর কার্যকর নেই</h1>
+          <p class="hello">Location ইতোমধ্যে গ্রহণ হয়েছে অথবা linkটির সময় শেষ হয়েছে।</p>
+          <p class="note">WhatsApp menu থেকে Check In/Check Out আবার নির্বাচন করুন।</p>
+        </div>
+        """
+    page = f"""<!doctype html><html lang="bn"><head>
+      <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+      <title>BURAQ Attendance Location</title>
+      <style>
+        *{{box-sizing:border-box}} body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px;background:#f2f7f5;color:#10231d;font-family:system-ui,-apple-system,'Noto Sans Bengali',sans-serif}}
+        .card{{width:min(100%,430px);background:#fff;border:1px solid #dce8e3;border-radius:24px;padding:30px 24px;text-align:center;box-shadow:0 18px 55px rgba(16,67,50,.12)}}
+        .pin{{font-size:50px}} h1{{margin:8px 0;font-size:28px}} .hello{{font-size:17px;line-height:1.55;color:#465b54}}
+        .status{{margin:22px 0;padding:16px;border-radius:14px;background:#eef7f3;line-height:1.5}} .status.success{{background:#dcfce7;color:#166534}} .status.error{{background:#fff1f2;color:#9f1239}} .status.working{{background:#eff6ff;color:#1e40af}}
+        button{{width:100%;border:0;border-radius:14px;padding:16px;background:#07875f;color:#fff;font-size:18px;font-weight:750;cursor:pointer}} button:disabled{{opacity:.55}} .note{{margin:18px 0 0;color:#71827c;font-size:14px;line-height:1.5}}
+      </style></head><body>{content}</body></html>"""
+    return HTMLResponse(page, headers={"Cache-Control": "no-store, private"})
+
+
+@app.post("/attendance/location/submit")
+async def attendance_location_submit(request: Request):
+    try:
+        data = await request.json()
+        token = str(data.get("token") or "")
+        latitude = float(data.get("latitude"))
+        longitude = float(data.get("longitude"))
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            raise ValueError("Invalid coordinates")
+        _, employee = _location_link_employee(token)
+        response = receive_location(employee["attendance_phone"], latitude, longitude)
+        accepted = response.startswith("✅ Location গ্রহণ")
+        await send_text(employee["attendance_phone"], response)
+        if not accepted:
+            return JSONResponse({"ok": False, "message": response.replace("\n", " ")}, status_code=422)
+        return {"ok": True, "message": "Location accepted"}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return JSONResponse(
+            {"ok": False, "message": "Linkটির সময় শেষ হয়েছে অথবা Location আর pending নেই।"},
+            status_code=400,
+        )
+
 @app.post("/webhook/whatsapp")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
     # Meta needs an immediate 2xx. Download and Face AI continue only after the
     # acknowledgement, preventing Meta retries and lost selfie responses.
-    background_tasks.add_task(handle, payload)
+    background_tasks.add_task(handle, payload, settings.public_base_url or base_url(request))
     return {"status": "accepted"}

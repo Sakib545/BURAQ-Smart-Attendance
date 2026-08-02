@@ -1,10 +1,14 @@
 import asyncio
 import logging
+import os
 import httpx
+from urllib.parse import quote
+from app.location_links import create_location_token
 from app.runtime import get_setting
-from app.services import log, process, employee_by_phone, activate_known_phone, set_state, receive_location, receive_image
+from app.services import log, process, employee_by_phone, activate_known_phone, set_state, state, receive_location, receive_image
 
 logger = logging.getLogger(__name__)
+_location_fallback_jobs: dict[str, asyncio.Task] = {}
 
 
 def _credentials():
@@ -140,12 +144,50 @@ async def send_menu(to: str, name: str | None = None):
     })
 
 
-async def send_guided_response(phone: str, response: str):
+async def _send_location_fallback(phone: str, public_base_url: str, delay_seconds: int):
+    if delay_seconds:
+        await asyncio.sleep(delay_seconds)
+    current = state(phone)
+    current_state = str(current["state"]) if current else ""
+    if current_state not in {"checkin_location", "checkout_location"}:
+        return {"sent": False, "reason": "native location already received"}
+    employee = employee_by_phone(phone)
+    if not employee:
+        return {"sent": False, "reason": "employee not found"}
+    action = "checkin" if current_state.startswith("checkin") else "checkout"
+    token = create_location_token(employee["id"], action)
+    link = f"{public_base_url.rstrip('/')}/attendance/location?t={quote(token)}"
+    return await send_text(
+        phone,
+        "📍 WhatsApp Location কাজ না করলে নিচের secure link খুলুন।\n"
+        "Location permission-এ Allow দিন—location স্বয়ংক্রিয়ভাবে যাচাই হবে।\n\n"
+        f"{link}\n\n⏳ Linkটি ১০ মিনিটের জন্য কার্যকর।",
+    )
+
+
+def _schedule_location_fallback(phone: str, public_base_url: str):
+    previous = _location_fallback_jobs.get(phone)
+    if previous and not previous.done():
+        previous.cancel()
+    try:
+        delay = min(120, max(5, int(os.getenv("LOCATION_FALLBACK_DELAY_SECONDS", "45"))))
+    except ValueError:
+        delay = 45
+    task = asyncio.create_task(_send_location_fallback(phone, public_base_url, delay))
+    _location_fallback_jobs[phone] = task
+    task.add_done_callback(lambda completed: _location_fallback_jobs.pop(phone, None) if _location_fallback_jobs.get(phone) is completed else None)
+
+
+async def send_guided_response(phone: str, response: str, public_base_url: str = ""):
     if response == "__REQUEST_LOCATION__":
         result = await send_location_request(phone)
         if result.get("sent"):
+            if public_base_url:
+                _schedule_location_fallback(phone, public_base_url)
             return result
         logger.error("Native location request failed phone=%s result=%s", phone, result)
+        if public_base_url:
+            return await _send_location_fallback(phone, public_base_url, 0)
         return await send_text(phone, "📍 নিচের attachment (+/📎) বাটন থেকে Location খুলে Current Location পাঠান।")
     result = await send_text(phone, response)
     if response.startswith("✅ Face Registration সম্পন্ন") or response.startswith("✅ Check In সফল") or response.startswith("✅ Check Out সফল"):
@@ -154,10 +196,10 @@ async def send_guided_response(phone: str, response: str):
     return result
 
 
-async def send_guided_response_with_retry(phone: str, response: str):
+async def send_guided_response_with_retry(phone: str, response: str, public_base_url: str = ""):
     result = {"sent": False, "reason": "not attempted"}
     for attempt in range(1, 4):
-        result = await send_guided_response(phone, response)
+        result = await send_guided_response(phone, response, public_base_url)
         if result.get("sent"):
             return result
         status_code = int(result.get("status_code") or 0)
@@ -173,7 +215,7 @@ async def send_approval_flow(phone: str, name: str, staff_id: str):
     await send_text(phone, f"✅ আপনার BURAQ Attendance registration Admin approve করেছেন।\n\nনাম: {name}\nStaff ID: {staff_id}\n\n📸 পরবর্তী ধাপ: সামনে তাকিয়ে ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।")
 
 
-async def handle(payload: dict):
+async def handle(payload: dict, public_base_url: str = ""):
     processed = 0
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
@@ -202,11 +244,11 @@ async def handle(payload: dict):
                         set_state(phone,"awaiting_staff_id")
                         await send_text(phone,"👋 BURAQ Smart Attendance-এ স্বাগতম।\n\nআপনার WhatsApp নম্বর employee profile-এর সঙ্গে মেলেনি। শুধু Staff ID পাঠান।")
                 elif typ in {"text", "interactive"}:
-                    await send_guided_response(phone, process(phone, text))
+                    await send_guided_response(phone, process(phone, text), public_base_url)
                 elif typ == "location":
                     loc = message.get("location", {})
                     response = receive_location(phone, loc.get("latitude"), loc.get("longitude"))
-                    await send_guided_response(phone, response)
+                    await send_guided_response(phone, response, public_base_url)
                 elif typ == "image":
                     media_id = message.get("image", {}).get("id", "")
                     try:
@@ -217,7 +259,7 @@ async def handle(payload: dict):
                     except Exception:
                         logger.exception("Selfie processing failed phone=%s media_id=%s", phone, media_id)
                         response = "⚠️ Selfie processing সাময়িকভাবে ব্যর্থ হয়েছে। একটি নতুন live selfie আবার পাঠান।"
-                    await send_guided_response_with_retry(phone, response)
+                    await send_guided_response_with_retry(phone, response, public_base_url)
                 else:
                     await send_text(phone, "এই message type এখনো supported নয়। Menu খুলতে লিখুন: Menu")
                 processed += 1
