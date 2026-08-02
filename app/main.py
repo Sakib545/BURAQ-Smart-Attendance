@@ -35,7 +35,7 @@ from app.services import approve_pending_attendance
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.21.1"
+APP_VERSION = "9.21.2"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -514,7 +514,7 @@ def dashboard(request: Request):
     for r in live_rows:
         initials=''.join(x[0] for x in str(r['name']).split()[:2]).upper() or 'E'
         status=str(r['status']); cls={'present':'status-present','leave':'status-leave'}.get(status,'status-absent')
-        live_table += f"<tr><td><div class='kpi-row'><span class='avatar'>{escape(initials)}</span><span><b>{escape(str(r['name']))}</b><div class='sub'>{escape(str(r['staff_id']))}</div></span></div></td><td><span class='status-badge {cls}'>{status.title()}</span></td><td>{escape(str(r['check_in'] or '—'))}</td><td>{escape(str(r['check_out'] or '—'))}</td></tr>"
+        live_table += f"<tr><td><div class='kpi-row'><span class='avatar'>{escape(initials)}</span><span><b>{escape(str(r['name']))}</b><div class='sub'>{escape(str(r['staff_id']))}</div></span></div></td><td><span class='status-badge {cls}'>{status.title()}</span></td><td>{escape(format_time_12h(r['check_in']) or '—')}</td><td>{escape(format_time_12h(r['check_out']) or '—')}</td></tr>"
     readiness_pct=attendance_rate
     pending_total=pending_registration+pending_leave+pending_correction+pending_selfie
     payroll_pending=0
@@ -949,10 +949,10 @@ def employee_profile(request: Request, employee_id: int, month: str = ""):
     for day in range(1,last.day+1):
         ds=f'{month}-{day:02d}'; a=amap.get(ds); cls=''; detail=''
         if ds in leave_dates: cls='leave'; detail='Leave'
-        elif a: cls='late' if (a['late_minutes'] or 0)>0 else 'present'; detail=(a['check_in'] or '')[-5:]
+        elif a: cls='late' if (a['late_minutes'] or 0)>0 else 'present'; detail=format_time_12h(a['check_in'])
         elif ds<today and datetime.strptime(ds,'%Y-%m-%d').weekday()<5: cls='absent'; detail='Absent'
         cells.append(f"<div class='cal-day {cls}'><b>{day}</b><div class='sub' style='margin-top:9px'>{escape(detail)}</div></div>")
-    timeline=''.join(f"<div class='timeline-item'><span class='avatar'>{escape(str(a['work_date'])[-2:])}</span><div><b>{escape(a['work_date'])}</b><div class='sub'>In {escape((a['check_in'] or '—')[-8:-3])} • Out {escape((a['check_out'] or '—')[-8:-3])}</div></div><span class='pill'>{a['late_minutes'] or 0}m late • {a['overtime_minutes'] or 0}m OT</span></div>" for a in recent) or '<div class="sub">No attendance history</div>'
+    timeline=''.join(f"<div class='timeline-item'><span class='avatar'>{escape(str(a['work_date'])[-2:])}</span><div><b>{escape(a['work_date'])}</b><div class='sub'>In {escape(format_time_12h(a['check_in']) or '—')} • Out {escape(format_time_12h(a['check_out']) or '—')}</div></div><span class='pill'>{a['late_minutes'] or 0}m late • {a['overtime_minutes'] or 0}m OT</span></div>" for a in recent) or '<div class="sub">No attendance history</div>'
     notehtml=''.join(f"<div style='padding:12px 0;border-bottom:1px solid var(--line)'><span class='tag'>{escape(n['note_type'])}</span> <b>{escape(n['created_by'] or 'HR')}</b><div style='margin-top:6px'>{escape(n['note'])}</div><div class='sub'>{escape(str(n['created_at']))}</div></div>" for n in notes) or '<div class="sub">No HR notes</div>'
     edit=''
     if has_permission(request,'employees_edit'):
@@ -1689,7 +1689,7 @@ def reports_page(request: Request, start_date: str = "", end_date: str = "", sta
     with get_db() as c:
         deps = c.execute("SELECT DISTINCT department FROM employees WHERE department IS NOT NULL AND department<>'' ORDER BY department").fetchall()
     dep_options = ''.join(f"<option value='{escape(d['department'])}' {'selected' if department==d['department'] else ''}>{escape(d['department'])}</option>" for d in deps)
-    table_rows = ''.join(f"<tr><td>{escape(r['work_date'])}</td><td><b>{escape(r['staff_id'])}</b><div class='sub'>{escape(r['name'])}</div></td><td>{escape(r['department'] or '-')}</td><td>{escape(r['shift'])}</td><td>{escape((r['check_in'] or '-')[11:16] if r['check_in'] else '-')}</td><td>{escape((r['check_out'] or '-')[11:16] if r['check_out'] else '-')}</td><td>{r['late_minutes']}m</td><td>{r['overtime_minutes']}m</td><td>{escape(r['status'])}</td></tr>" for r in rows) or "<tr><td colspan='9'>No records found.</td></tr>"
+    table_rows = ''.join(f"<tr><td>{escape(r['work_date'])}</td><td><b>{escape(r['staff_id'])}</b><div class='sub'>{escape(r['name'])}</div></td><td>{escape(r['department'] or '-')}</td><td>{escape(r['shift'])}</td><td>{escape(format_time_12h(r['check_in']) or '-')}</td><td>{escape(format_time_12h(r['check_out']) or '-')}</td><td>{r['late_minutes']}m</td><td>{r['overtime_minutes']}m</td><td>{escape(r['status'])}</td></tr>" for r in rows) or "<tr><td colspan='9'>No records found.</td></tr>"
     q=f"start_date={start_date}&end_date={end_date}&status={status}&department={department}"
     exports=(f"<a class='btn secondary' href='/reports/export.csv?{q}'>CSV</a><a class='btn secondary' href='/reports/export.xlsx?{q}'>Excel</a><a class='btn secondary' href='/reports/export.pdf?{q}'>PDF</a>" if has_permission(request,'reports_export') else '')
     body=f"""<div class='card'><form method='get'><div class='grid'><div><label>From</label><input type='date' name='start_date' value='{start_date}'></div><div><label>To</label><input type='date' name='end_date' value='{end_date}'></div><div><label>Status</label><select name='status'><option value=''>All</option><option value='present' {'selected' if status=='present' else ''}>Present</option><option value='leave' {'selected' if status=='leave' else ''}>Leave</option><option value='absent' {'selected' if status=='absent' else ''}>Absent</option></select></div><div><label>Department</label><select name='department'><option value=''>All</option>{dep_options}</select></div></div><div class='actions'><button class='btn'>Apply</button>{exports}</div></form></div><div class='section-gap'></div><div class='grid'><div class='card'><div class='sub'>Records</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Late Records</div><div class='metric'>{sum(1 for r in rows if r['late_minutes']>0)}</div></div><div class='card'><div class='sub'>Overtime Minutes</div><div class='metric'>{sum(r['overtime_minutes'] for r in rows)}</div></div><div class='card'><div class='sub'>Leave Records</div><div class='metric'>{sum(1 for r in rows if r['status']=='leave')}</div></div></div><div class='section-gap'></div><div class='card'><h2>Attendance Report</h2><div style='overflow:auto'><table><thead><tr><th>Date</th><th>Employee</th><th>Department</th><th>Shift</th><th>In</th><th>Out</th><th>Late</th><th>OT</th><th>Status</th></tr></thead><tbody>{table_rows}</tbody></table></div></div>"""
@@ -1699,7 +1699,7 @@ def reports_page(request: Request, start_date: str = "", end_date: str = "", sta
 def report_csv(request: Request, start_date: str, end_date: str, status: str = "", department: str = ""):
     require_permission(request,"reports_export"); rows=_attendance_report_rows(start_date,end_date,status,department)
     out=io.StringIO(); w=csv.writer(out); w.writerow(["Date","Staff ID","Name","Department","Shift","Check In","Check Out","Late","Early Leave","Overtime","Status"])
-    for r in rows: w.writerow([r[k] for k in ["work_date","staff_id","name","department","shift","check_in","check_out","late_minutes","early_leave_minutes","overtime_minutes","status"]])
+    for r in rows: w.writerow([r['work_date'],r['staff_id'],r['name'],r['department'],r['shift'],format_time_12h(r['check_in']),format_time_12h(r['check_out']),r['late_minutes'],r['early_leave_minutes'],r['overtime_minutes'],r['status']])
     return StreamingResponse(io.BytesIO(out.getvalue().encode("utf-8-sig")),media_type="text/csv",headers={"Content-Disposition":f"attachment; filename=BURAQ-{start_date}-to-{end_date}.csv"})
 
 @app.get("/reports/export.xlsx")
@@ -1710,7 +1710,7 @@ def report_xlsx(request: Request, start_date: str, end_date: str, status: str = 
     rows=_attendance_report_rows(start_date,end_date,status,department); wb=Workbook(); ws=wb.active; ws.title="Attendance"
     headers=["Date","Staff ID","Name","Department","Shift","Check In","Check Out","Late","Early Leave","Overtime","Status"]; ws.append(headers)
     for c in ws[1]: c.font=Font(bold=True,color="FFFFFF"); c.fill=PatternFill("solid",fgColor="087F5B")
-    for r in rows: ws.append([r[k] for k in ["work_date","staff_id","name","department","shift","check_in","check_out","late_minutes","early_leave_minutes","overtime_minutes","status"]])
+    for r in rows: ws.append([r['work_date'],r['staff_id'],r['name'],r['department'],r['shift'],format_time_12h(r['check_in']),format_time_12h(r['check_out']),r['late_minutes'],r['early_leave_minutes'],r['overtime_minutes'],r['status']])
     for col in ws.columns: ws.column_dimensions[col[0].column_letter].width=min(max(len(str(x.value or "")) for x in col)+2,30)
     out=io.BytesIO(); wb.save(out); out.seek(0)
     return StreamingResponse(out,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f"attachment; filename=BURAQ-{start_date}-to-{end_date}.xlsx"})
@@ -1723,7 +1723,7 @@ def report_pdf(request: Request, start_date: str, end_date: str, status: str = "
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.styles import getSampleStyleSheet
     rows=_attendance_report_rows(start_date,end_date,status,department); out=io.BytesIO()
-    data=[["Date","Staff ID","Name","Department","Shift","In","Out","Late","OT","Status"]]+[[str(r[k] or "") for k in ["work_date","staff_id","name","department","shift","check_in","check_out","late_minutes","overtime_minutes","status"]] for r in rows]
+    data=[["Date","Staff ID","Name","Department","Shift","In","Out","Late","OT","Status"]]+[[str(r['work_date'] or ""),str(r['staff_id'] or ""),str(r['name'] or ""),str(r['department'] or ""),str(r['shift'] or ""),format_time_12h(r['check_in']),format_time_12h(r['check_out']),str(r['late_minutes'] or ""),str(r['overtime_minutes'] or ""),str(r['status'] or "")] for r in rows]
     doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=18,rightMargin=18,topMargin=18,bottomMargin=18); styles=getSampleStyleSheet(); table=Table(data,repeatRows=1)
     table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTSIZE",(0,0),(-1,-1),7),("GRID",(0,0),(-1,-1),.3,colors.grey)]))
     doc.build([Paragraph("BURAQ Attendance Report",styles["Title"]),Paragraph(f"{start_date} to {end_date}",styles["Normal"]),Spacer(1,8),table]); out.seek(0)

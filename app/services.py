@@ -464,7 +464,7 @@ def report(employee):
     with get_db() as c: rows = c.execute("SELECT * FROM attendance WHERE employee_id=? ORDER BY work_date DESC LIMIT 7", (employee["id"],)).fetchall()
     if not rows: return "ℹ️ কোনো attendance record নেই।"
     output = [f"📊 {employee['name']}-এর সর্বশেষ Attendance:"]
-    for row in rows: output.append(f"{row['work_date']} | In {row['check_in'][11:16] if row['check_in'] else '-'} | Out {row['check_out'][11:16] if row['check_out'] else '-'} | Late {row['late_minutes']}m | OT {row['overtime_minutes']}m")
+    for row in rows: output.append(f"{row['work_date']} | In {format_time_12h(row['check_in']) or '-'} | Out {format_time_12h(row['check_out']) or '-'} | Late {row['late_minutes']}m | OT {row['overtime_minutes']}m")
     return "\n".join(output)
 
 
