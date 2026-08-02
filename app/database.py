@@ -390,11 +390,35 @@ def apply_feature_migrations() -> None:
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
+
+    # Older v9.5 deployments may already have attendance_fingerprints with a
+    # smaller column set. CREATE TABLE IF NOT EXISTS does not upgrade that
+    # table, so later INSERTs could fail only when a selfie arrived.
+    sqlite = _active_url.startswith("sqlite")
+    real = "REAL NOT NULL DEFAULT 0" if sqlite else "DOUBLE PRECISION NOT NULL DEFAULT 0"
+    fingerprint_columns = [
+        ("media_id", "TEXT"), ("pose", "TEXT"), ("yaw", real),
+        ("landmarks", "TEXT"), ("duplicate_score", real),
+        ("hash_score", real), ("face_score", real), ("pose_score", real),
+        ("landmark_score", real),
+        ("matched_fingerprint_id", "INTEGER" if sqlite else "BIGINT"),
+        ("decision", "TEXT NOT NULL DEFAULT 'accept'"),
+        ("review_status", "TEXT NOT NULL DEFAULT 'none'"),
+        ("reviewed_by", "TEXT"),
+        ("reviewed_at", "TEXT" if sqlite else "TIMESTAMPTZ"),
+    ]
+    existing_fingerprints = {col["name"] for col in inspect(engine).get_columns("attendance_fingerprints")}
+    for column, definition in fingerprint_columns:
+        if column in existing_fingerprints:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE attendance_fingerprints ADD COLUMN {column} {definition}"))
     mark_migration("v9.5-attendance-fingerprints")
     mark_migration("v9.6-private-payroll")
     mark_migration("v9.8-performance-optimization")
     mark_migration("v9.9-zero-touch-duty-reminders")
     mark_migration("v9.9.1-custom-duty")
+    mark_migration("v9.19.7-fingerprint-schema-repair")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.

@@ -466,38 +466,45 @@ def receive_image(phone, media_id, image_bytes=None):
     adapt_gallery(employee["id"], candidate, quality, score, margin, diagnostics, media_id)
 
     action = "check_in" if parts[0] == "checkin_selfie" else "check_out"
-    fingerprint = make_fingerprint(image_bytes, candidate, diagnostics)
-    limits = DuplicateThresholds(settings.duplicate_accept_below, settings.duplicate_reject_at,
-        settings.duplicate_hash_weight, settings.duplicate_face_weight,
-        settings.duplicate_pose_weight, settings.duplicate_landmark_weight,
-        settings.duplicate_corroboration_gate)
-    with get_db() as c:
-        # Exact hashes are checked globally to stop one employee reusing another
-        # employee's saved image. Near-duplicate scoring is limited to the same
-        # employee, otherwise normal faces of two people can create false alerts.
-        exact = c.execute("""SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints
-            WHERE phash=? OR ahash=? OR dhash=? ORDER BY id DESC LIMIT 100""",(fingerprint["phash"],fingerprint["ahash"],fingerprint["dhash"])).fetchall()
-        recent = c.execute("""SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints
-            WHERE employee_id=? ORDER BY id DESC LIMIT 120""", (employee["id"],)).fetchall()
-        seen=set(); prior=[]
-        for row in [*exact,*recent]:
-            if row['id'] not in seen:
-                seen.add(row['id']); prior.append(row)
-    duplicate = detect_duplicate(fingerprint, prior, limits)
-    # With verified GPS plus a successful identity match, only near-exact image
-    # reuse should block attendance in simple mode.
-    if settings.simple_face_mode and duplicate.hash_score < 0.985:
-        duplicate = type(duplicate)(duplicate.score, "accept", duplicate.matched_fingerprint_id,
-            duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score)
-    review_status = "pending" if duplicate.decision == "pending" else "none"
-    with get_db() as c:
-        c.execute("""INSERT INTO attendance_fingerprints(employee_id,action,media_id,phash,ahash,dhash,embedding,pose,yaw,landmarks,duplicate_score,hash_score,face_score,pose_score,landmark_score,matched_fingerprint_id,decision,review_status)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (employee["id"], action, media_id, fingerprint["phash"], fingerprint["ahash"], fingerprint["dhash"], json.dumps(fingerprint["embedding"]), fingerprint["pose"], fingerprint["yaw"], json.dumps(fingerprint["landmarks"]), duplicate.score, duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score, duplicate.matched_fingerprint_id, duplicate.decision, review_status))
-    if duplicate.decision == "reject":
-        return f"🚫 Duplicate Selfie Rejected\nDuplicate score: {duplicate.score*100:.1f}%\nনতুন live selfie তুলে আবার পাঠান।"
-    if duplicate.decision == "pending":
-        clear_state(phone)
-        return f"⏳ Selfie Admin Review-এ পাঠানো হয়েছে।\nDuplicate score: {duplicate.score*100:.1f}%\nAdmin সিদ্ধান্ত দেওয়ার পর আবার চেষ্টা করুন।"
+    try:
+        fingerprint = make_fingerprint(image_bytes, candidate, diagnostics)
+        limits = DuplicateThresholds(settings.duplicate_accept_below, settings.duplicate_reject_at,
+            settings.duplicate_hash_weight, settings.duplicate_face_weight,
+            settings.duplicate_pose_weight, settings.duplicate_landmark_weight,
+            settings.duplicate_corroboration_gate)
+        with get_db() as c:
+            # Exact hashes are checked globally to stop one employee reusing another
+            # employee's saved image. Near-duplicate scoring is limited to the same
+            # employee, otherwise normal faces of two people can create false alerts.
+            exact = c.execute("""SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints
+                WHERE phash=? OR ahash=? OR dhash=? ORDER BY id DESC LIMIT 100""",(fingerprint["phash"],fingerprint["ahash"],fingerprint["dhash"])).fetchall()
+            recent = c.execute("""SELECT id,phash,ahash,dhash,embedding,pose,yaw,landmarks FROM attendance_fingerprints
+                WHERE employee_id=? ORDER BY id DESC LIMIT 120""", (employee["id"],)).fetchall()
+            seen=set(); prior=[]
+            for row in [*exact,*recent]:
+                if row['id'] not in seen:
+                    seen.add(row['id']); prior.append(row)
+        duplicate = detect_duplicate(fingerprint, prior, limits)
+        # With verified GPS plus a successful identity match, only near-exact image
+        # reuse should block attendance in simple mode.
+        if settings.simple_face_mode and duplicate.hash_score < 0.985:
+            duplicate = type(duplicate)(duplicate.score, "accept", duplicate.matched_fingerprint_id,
+                duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score)
+        review_status = "pending" if duplicate.decision == "pending" else "none"
+        with get_db() as c:
+            c.execute("""INSERT INTO attendance_fingerprints(employee_id,action,media_id,phash,ahash,dhash,embedding,pose,yaw,landmarks,duplicate_score,hash_score,face_score,pose_score,landmark_score,matched_fingerprint_id,decision,review_status)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (employee["id"], action, media_id, fingerprint["phash"], fingerprint["ahash"], fingerprint["dhash"], json.dumps(fingerprint["embedding"]), fingerprint["pose"], fingerprint["yaw"], json.dumps(fingerprint["landmarks"]), duplicate.score, duplicate.hash_score, duplicate.face_score, duplicate.pose_score, duplicate.landmark_score, duplicate.matched_fingerprint_id, duplicate.decision, review_status))
+        if duplicate.decision == "reject":
+            return f"🚫 Duplicate Selfie Rejected\nDuplicate score: {duplicate.score*100:.1f}%\nনতুন live selfie তুলে আবার পাঠান।"
+        if duplicate.decision == "pending":
+            clear_state(phone)
+            return f"⏳ Selfie Admin Review-এ পাঠানো হয়েছে।\nDuplicate score: {duplicate.score*100:.1f}%\nAdmin সিদ্ধান্ত দেওয়ার পর আবার চেষ্টা করুন।"
+    except Exception:
+        # GPS and identity have already passed. In Simple Face Mode an optional
+        # duplicate-analysis/database issue must not block valid attendance.
+        logging.getLogger(__name__).exception("duplicate selfie analysis failed")
+        if not settings.simple_face_mode:
+            return "⚠️ Selfie verification সাময়িকভাবে সম্পন্ন হয়নি। Challenge শেষ হওয়ার আগে আবার চেষ্টা করুন।"
     lat, lon = float(parts[1]), float(parts[2]); dist = float(parts[3]) if len(parts) > 3 and parts[3] else None
     result = check_in(employee) if action == "check_in" else check_out(employee)
     with get_db() as c:
