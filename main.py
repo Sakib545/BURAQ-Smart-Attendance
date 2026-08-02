@@ -28,12 +28,15 @@ from app.runtime import configured, get_setting, set_setting, import_environment
 from app.employee_seed import import_employees
 from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_selfie_review_result, send_text
 from app.reminders import reminder_worker
+from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-app = FastAPI(title=settings.app_name, version="9.19.0", docs_url=None, redoc_url=None)
+APP_VERSION = "9.19.8"
+
+app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -249,7 +252,7 @@ def startup():
     if get_setting("admin_password_hash") and not get_setting("admin_setup_completed"):
         set_setting("admin_setup_completed","1")
     imported = import_employees()
-    logger.info("BURAQ v9.17.1 started database=%s employees_synced=%s", database_kind(), imported)
+    logger.info("BURAQ v%s started database=%s employees_synced=%s", APP_VERSION, database_kind(), imported)
 
 @app.on_event("startup")
 async def start_reminders():
@@ -267,7 +270,7 @@ async def stop_reminders():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": settings.app_name, "version": "9.17.1"}
+    return {"status": "ok", "service": settings.app_name, "version": APP_VERSION}
 
 
 @app.get("/ready")
@@ -284,7 +287,7 @@ def ready():
         "database_ok": db_ok,
         "whatsapp_configured": configured_ok,
         "admin_setup_complete": setup_ok,
-        "version": "9.17.1",
+        "version": APP_VERSION,
     }
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
@@ -476,6 +479,8 @@ def update_my_account_password(request: Request, current_password: str = Form(..
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
     require_permission(request, "dashboard_view")
+    can_duty_view = has_permission(request, "duty_view")
+    can_duty_manage = has_permission(request, "duty_manage")
     now = datetime.now(ZoneInfo(settings.timezone))
     today = now.date().isoformat()
     week_days = [(now.date() - timedelta(days=i)) for i in range(6, -1, -1)]
@@ -499,6 +504,57 @@ def dashboard(request: Request):
             LEFT JOIN attendance a ON a.employee_id=e.id AND a.work_date=?
             LEFT JOIN (SELECT DISTINCT employee_id FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?) l ON l.employee_id=e.id
             WHERE e.is_active ORDER BY CASE WHEN a.check_in IS NOT NULL THEN 0 ELSE 1 END,e.name LIMIT 5""",(today,today,today)).fetchall()
+        duty_employees=c.execute("SELECT id,name,staff_id,department,shift,office_name FROM employees WHERE is_active ORDER BY name").fetchall() if can_duty_view else []
+        dashboard_weekly=c.execute("SELECT * FROM duty_schedules WHERE is_active ORDER BY employee_id,weekday").fetchall() if can_duty_view else []
+        dashboard_custom=c.execute("SELECT * FROM custom_duties WHERE is_active AND duty_date IN (?,?) ORDER BY employee_id,duty_date",((now.date()-timedelta(days=1)).isoformat(),today)).fetchall() if can_duty_view else []
+    duty_overview=''
+    if can_duty_view:
+        weekly_map={(int(r['employee_id']),int(r['weekday'])):r for r in dashboard_weekly}
+        custom_map={(int(r['employee_id']),str(r['duty_date'])):r for r in dashboard_custom}
+
+        def dashboard_assignment(employee_id,day):
+            custom_row=custom_map.get((employee_id,day.isoformat()))
+            if custom_row: return 'Custom Duty',custom_row
+            weekly_row=weekly_map.get((employee_id,day.weekday()))
+            if weekly_row:
+                label='Friday Duty' if day.weekday()==4 else ('Night Duty' if weekly_row['end_time']<=weekly_row['start_time'] else 'Regular Duty')
+                return label,weekly_row
+            return None
+
+        def dashboard_duty_range(day,row):
+            start_dt=datetime.combine(day,datetime.strptime(row['start_time'],'%H:%M').time(),tzinfo=now.tzinfo)
+            end_dt=datetime.combine(day,datetime.strptime(row['end_time'],'%H:%M').time(),tzinfo=now.tzinfo)
+            if end_dt<=start_dt: end_dt+=timedelta(days=1)
+            return start_dt,end_dt
+
+        duty_rows=[]; assigned_count=0; running_count=0
+        for employee in duty_employees:
+            employee_id=int(employee['id']); assignment=None
+            previous_day=now.date()-timedelta(days=1)
+            previous=dashboard_assignment(employee_id,previous_day)
+            if previous:
+                previous_start,previous_end=dashboard_duty_range(previous_day,previous[1])
+                if previous_end.date()>previous_day and previous_start<=now<=previous_end:
+                    assignment=(previous[0],previous[1],previous_day,previous_start,previous_end)
+            if not assignment:
+                current=dashboard_assignment(employee_id,now.date())
+                if current:
+                    duty_start,duty_end=dashboard_duty_range(now.date(),current[1])
+                    assignment=(current[0],current[1],now.date(),duty_start,duty_end)
+            initials=''.join(x[:1] for x in str(employee['name']).split()[:2]).upper() or 'E'
+            action_label='Edit' if can_duty_manage else 'View'
+            action=f"<a class='btn secondary' href='/employees/{employee_id}#duty'>{action_label}</a>"
+            if assignment:
+                assigned_count+=1
+                duty_label,duty_row,duty_day,duty_start,duty_end=assignment
+                duty_status='Running' if duty_start<=now<=duty_end else ('Upcoming' if now<duty_start else 'Completed')
+                if duty_status=='Running': running_count+=1
+                status_class='ok' if duty_status=='Running' else ('warn' if duty_status=='Upcoming' else '')
+                time_text=f"{format_time_12h(duty_row['start_time'])} – {format_time_12h(duty_row['end_time'])}{' (+1 day)' if duty_row['end_time']<=duty_row['start_time'] else ''}"
+                duty_rows.append(f"<tr><td><div class='kpi-row'><span class='avatar'>{escape(initials)}</span><span><b>{escape(employee['name'])}</b><div class='sub'>{escape(employee['staff_id'])} • {escape(employee['department'] or 'No department')}</div></span></div></td><td><b>{escape(duty_label)}</b></td><td>{escape(time_text)}</td><td>{escape(duty_row['office_name'] or employee['office_name'] or 'BURAQ Office')}</td><td><span class='status {status_class}'>{duty_status}</span></td><td>{action}</td></tr>")
+            else:
+                duty_rows.append(f"<tr><td><div class='kpi-row'><span class='avatar'>{escape(initials)}</span><span><b>{escape(employee['name'])}</b><div class='sub'>{escape(employee['staff_id'])} • {escape(employee['department'] or 'No department')}</div></span></div></td><td><span class='sub'>No assignment</span></td><td>—</td><td>{escape(employee['office_name'] or '—')}</td><td><span class='status bad'>Not assigned</span></td><td>{action}</td></tr>")
+        duty_overview=f"""<div class='card'><div class='card-head'><div><h3>Today's Duty Overview</h3><div class='sub'>{assigned_count} assigned • {running_count} running • {len(duty_employees)-assigned_count} not assigned</div></div><a class='btn secondary' href='/duty-schedules'>Full Schedule</a></div><div style='overflow:auto;max-height:620px'><table class='dashboard-table'><thead><tr><th>Employee</th><th>Duty</th><th>Time</th><th>Office</th><th>Status</th><th></th></tr></thead><tbody>{''.join(duty_rows) or '<tr><td colspan=6>No active employees.</td></tr>'}</tbody></table></div></div><div class='section-gap'></div>"""
     absent=max(employees-present-on_leave,0)
     attendance_rate=round((present/employees*100),1) if employees else 0
     by_day={str(r['work_date']):int(r['c']) for r in week_counts}; weekly=[(d,by_day.get(d.isoformat(),0)) for d in week_days]
@@ -548,6 +604,7 @@ def dashboard(request: Request):
       <div class='card dashboard-panel'><div class='card-head'><h3>Workforce Readiness</h3></div><div class='readiness-wrap'><div class='donut' style='--pct:{readiness_pct}'><div class='donut-value'><b>{round(readiness_pct)}%</b><span class='sub'>Today</span></div></div><div class='legend-list'><div class='legend-row'><span class='legend-dot' style='background:#dfe6e3'></span><span>Registered</span><b>{registered}</b></div><div class='legend-row'><span class='legend-dot' style='background:#079669'></span><span>Present</span><b>{present}</b></div><div class='legend-row'><span class='legend-dot' style='background:#ef476f'></span><span>Absent</span><b>{absent}</b></div><div class='legend-row'><span class='legend-dot' style='background:#8b5cf6'></span><span>On Leave</span><b>{on_leave}</b></div></div></div><div class='sub'>{present} of {employees} employees present today</div></div>
     </div>
     <div class='section-gap'></div>
+    {duty_overview}
     <div class='dashboard-main-grid'>
       <div class='card'><div class='card-head'><h3>Live Attendance</h3><a class='btn secondary' href='/employees'>View All</a></div><div style='overflow:auto'><table class='dashboard-table'><thead><tr><th>Employee</th><th>Status</th><th>Check In</th><th>Check Out</th></tr></thead><tbody>{live_table or '<tr><td colspan=4>No employee records.</td></tr>'}</tbody></table></div></div>
       <div class='card'><div class='card-head'><h3>Pending Work</h3><span class='pill'>{pending_total}</span></div><div class='pending-list'>{pending_html or '<div class="sub">No pending work.</div>'}</div></div>
@@ -819,11 +876,13 @@ async def employee_bulk(request: Request):
     return RedirectResponse('/employees',303)
 
 @app.get("/employees/{employee_id}", response_class=HTMLResponse)
-def employee_profile(request: Request, employee_id: int, month: str = ""):
+def employee_profile(request: Request, employee_id: int, month: str = "", duty_saved: str = ""):
     require_permission(request,"employees_view")
     can_payroll_view=has_permission(request,"payroll_view")
     can_payroll_manage=has_permission(request,"payroll_manage")
     can_payroll_export=has_permission(request,"payroll_export")
+    can_duty_view=has_permission(request,"duty_view")
+    can_duty_manage=has_permission(request,"duty_manage")
     now=datetime.now(ZoneInfo(settings.timezone)); month=month or now.strftime('%Y-%m')
     try: first=datetime.strptime(month+'-01','%Y-%m-%d')
     except ValueError: first=datetime(now.year,now.month,1); month=first.strftime('%Y-%m')
@@ -839,6 +898,8 @@ def employee_profile(request: Request, employee_id: int, month: str = ""):
         perf=c.execute("SELECT overall_rating,review_period,reviewed_by,reviewed_at FROM performance_reviews WHERE employee_id=? ORDER BY reviewed_at DESC,id DESC LIMIT 1",(employee_id,)).fetchone()
         month_stats=c.execute("SELECT COUNT(*) total,SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) present,SUM(CASE WHEN late_minutes>0 THEN 1 ELSE 0 END) late,SUM(COALESCE(overtime_minutes,0)) overtime FROM attendance WHERE employee_id=? AND work_date>=? AND work_date<=?",(employee_id,first.strftime('%Y-%m-%d'),last.strftime('%Y-%m-%d'))).fetchone()
         payroll=c.execute("SELECT * FROM payroll_records WHERE employee_id=? ORDER BY salary_month DESC LIMIT 24",(employee_id,)).fetchall() if can_payroll_view else []
+        weekly_duties=c.execute("SELECT * FROM duty_schedules WHERE employee_id=? AND is_active ORDER BY weekday",(employee_id,)).fetchall() if can_duty_view else []
+        custom_duties=c.execute("SELECT * FROM custom_duties WHERE employee_id=? AND duty_date>=? AND is_active ORDER BY duty_date",(employee_id,(now.date()-timedelta(days=1)).isoformat())).fetchall() if can_duty_view else []
     amap={a['work_date']:a for a in attendance}; leave_dates=set()
     for l in leaves:
         d=datetime.strptime(l['start_date'],'%Y-%m-%d'); end=datetime.strptime(l['end_date'],'%Y-%m-%d')
@@ -865,6 +926,60 @@ def employee_profile(request: Request, employee_id: int, month: str = ""):
     latest_rating=float(perf['overall_rating']) if perf else 0
     attendance_total=int(month_stats['total'] or 0); attendance_present=int(month_stats['present'] or 0); attendance_rate=round((attendance_present/attendance_total*100),1) if attendance_total else 0
     initials=''.join(x[:1] for x in e['name'].split()[:2]).upper()
+    duty_tab=''; duty_section=''
+    if can_duty_view:
+        duty_tab="<a class='tab' href='#duty'>Duty</a>"
+        duty_days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+        weekly_by_day={int(r['weekday']):r for r in weekly_duties}
+        custom_by_date={str(r['duty_date']):r for r in custom_duties}
+
+        def assigned_duty(day):
+            custom_row=custom_by_date.get(day.isoformat())
+            if custom_row: return 'Custom Duty',custom_row
+            weekly_row=weekly_by_day.get(day.weekday())
+            if weekly_row:
+                label='Friday Duty' if day.weekday()==4 else ('Night Duty' if weekly_row['end_time']<=weekly_row['start_time'] else 'Regular Duty')
+                return label,weekly_row
+            return None
+
+        def duty_range(day,row):
+            start_dt=datetime.combine(day,datetime.strptime(row['start_time'],'%H:%M').time(),tzinfo=now.tzinfo)
+            end_dt=datetime.combine(day,datetime.strptime(row['end_time'],'%H:%M').time(),tzinfo=now.tzinfo)
+            if end_dt<=start_dt: end_dt+=timedelta(days=1)
+            return start_dt,end_dt
+
+        active_assignment=None
+        yesterday=now.date()-timedelta(days=1)
+        previous=assigned_duty(yesterday)
+        if previous:
+            previous_start,previous_end=duty_range(yesterday,previous[1])
+            if previous_end.date()>yesterday and previous_start<=now<=previous_end:
+                active_assignment=(previous[0],previous[1],yesterday,previous_start,previous_end)
+        if not active_assignment:
+            today_assignment=assigned_duty(now.date())
+            if today_assignment:
+                duty_start,duty_end=duty_range(now.date(),today_assignment[1])
+                active_assignment=(today_assignment[0],today_assignment[1],now.date(),duty_start,duty_end)
+
+        if active_assignment:
+            duty_label,duty_row,duty_day,duty_start,duty_end=active_assignment
+            duty_status='Running' if duty_start<=now<=duty_end else ('Upcoming' if now<duty_start else 'Completed')
+            duty_status_class='ok' if duty_status=='Running' else ('warn' if duty_status=='Upcoming' else '')
+            current_duty=f"""<div class='duty-current'><div><div class='eyebrow'>Today's assigned duty</div><h2>{escape(duty_label)}</h2><div class='duty-time'>{escape(format_time_12h(duty_row['start_time']))} – {escape(format_time_12h(duty_row['end_time']))}{' (+1 day)' if duty_row['end_time']<=duty_row['start_time'] else ''}</div><div class='sub'>{escape(duty_day.strftime('%A, %d %B'))} • {escape(duty_row['office_name'] or e['office_name'] or 'BURAQ Office')}</div></div><span class='status {duty_status_class}'>{duty_status}</span></div>"""
+        else:
+            current_duty=f"""<div class='duty-current'><div><div class='eyebrow'>Today's assigned duty</div><h2>No duty assigned today</h2><div class='sub'>Employee default shift: {escape(e['shift'] or 'morning')}</div></div><span class='status warn'>Not assigned</span></div>"""
+
+        if can_duty_manage:
+            weekly_editor=''.join(f"""<form class='duty-edit-row' method='post' action='/employees/{employee_id}/duty/regular'><input type='hidden' name='return_to' value='profile'><input type='hidden' name='weekday' value='{int(r['weekday'])}'><input type='hidden' name='preset' value='custom'><div class='duty-label'><b>{duty_days[int(r['weekday'])]}</b><span class='sub'>{'Night' if r['end_time']<=r['start_time'] else 'Weekly'} duty</span></div><input aria-label='Start time' type='time' name='start_time' value='{escape(r['start_time'])}' required><input aria-label='End time' type='time' name='end_time' value='{escape(r['end_time'])}' required><input aria-label='Office' name='office_name' value='{escape(r['office_name'] or e['office_name'] or 'BURAQ Office')}' required><button class='btn'>Save</button></form>""" for r in weekly_duties)
+            custom_editor=''.join(f"""<form class='duty-edit-row custom' method='post' action='/employees/{employee_id}/duty/custom'><input type='hidden' name='return_to' value='profile'><input type='hidden' name='duty_date' value='{escape(r['duty_date'])}'><div class='duty-label'><b>{escape(r['duty_date'])}</b><span class='sub'>Custom duty</span></div><input aria-label='Start time' type='time' name='start_time' value='{escape(r['start_time'])}' required><input aria-label='End time' type='time' name='end_time' value='{escape(r['end_time'])}' required><input aria-label='Office' name='office_name' value='{escape(r['office_name'] or e['office_name'] or 'BURAQ Office')}' required><input type='hidden' name='note' value='{escape(r['note'] or '')}'><button class='btn'>Save</button></form>""" for r in custom_duties)
+        else:
+            weekly_editor=''.join(f"""<div class='duty-edit-row readonly'><div class='duty-label'><b>{duty_days[int(r['weekday'])]}</b><span class='sub'>Weekly duty</span></div><b>{escape(format_time_12h(r['start_time']))} – {escape(format_time_12h(r['end_time']))}</b><span>{escape(r['office_name'] or 'BURAQ Office')}</span></div>""" for r in weekly_duties)
+            custom_editor=''.join(f"""<div class='duty-edit-row readonly'><div class='duty-label'><b>{escape(r['duty_date'])}</b><span class='sub'>Custom duty</span></div><b>{escape(format_time_12h(r['start_time']))} – {escape(format_time_12h(r['end_time']))}</b><span>{escape(r['office_name'] or 'BURAQ Office')}</span></div>""" for r in custom_duties)
+
+        duty_notice="<div class='notice'>Duty updated successfully.</div>" if duty_saved else ''
+        manage_button=f"<a class='btn secondary' href='/employees/{employee_id}/duty'>Assign / Manage Duty</a>" if can_duty_manage else ''
+        duty_section=f"""<div id='duty' class='section-gap'></div>{duty_notice}<div class='card duty-profile-card'>{current_duty}<div class='card-head duty-heading'><div><h3>Regular weekly duty</h3><div class='sub'>Edit the assigned day, time and office directly from this profile.</div></div>{manage_button}</div><div class='duty-editor-list'>{weekly_editor or '<div class="empty-duty">No regular duty assigned.</div>'}</div><div class='card-head duty-heading'><div><h3>Upcoming custom duty</h3><div class='sub'>A custom date overrides the regular weekly duty.</div></div></div><div class='duty-editor-list'>{custom_editor or '<div class="empty-duty">No upcoming custom duty.</div>'}</div></div><style>.duty-current{{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:22px;border-radius:18px;background:linear-gradient(135deg,#083f32,#0c6b50);color:#fff}}.duty-current .sub,.duty-current .eyebrow{{color:#c8efe3}}.duty-time{{font-size:clamp(24px,4vw,38px);font-weight:800;margin:7px 0}}.duty-heading{{margin-top:24px}}.duty-edit-row{{display:grid;grid-template-columns:minmax(130px,1.2fr) minmax(105px,.75fr) minmax(105px,.75fr) minmax(180px,1.5fr) auto;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}}.duty-edit-row input,.duty-edit-row button{{margin:0}}.duty-label{{display:flex;flex-direction:column;gap:3px}}.duty-edit-row.readonly{{grid-template-columns:minmax(150px,1fr) minmax(180px,1fr) minmax(180px,1fr)}}.empty-duty{{padding:18px;border:1px dashed var(--line);border-radius:14px;color:var(--muted)}}@media(max-width:850px){{.duty-edit-row,.duty-edit-row.readonly{{grid-template-columns:1fr 1fr}}.duty-edit-row .duty-label,.duty-edit-row input[aria-label='Office'],.duty-edit-row button{{grid-column:1/-1}}.duty-current{{align-items:flex-start;flex-direction:column}}}}</style>"""
+
     payroll_section=''; payroll_tab=''
     if can_payroll_view:
         payroll_tab="<a class='tab' href='#payroll'>Payroll</a>"
@@ -882,7 +997,7 @@ def employee_profile(request: Request, employee_id: int, month: str = ""):
             net=float(current_payroll['net_salary']); summary=f"""<div class='card payroll-panel'><div class='card-head'><div><span class='confidential'>🔒 HR CONFIDENTIAL</span><h2 style='margin-top:12px'>{escape(month)} Payroll</h2></div><span class='status {'ok' if current_payroll['payment_status']=='paid' else 'warn'}'>{escape(current_payroll['payment_status'])}</span></div><div class='payroll-amount'>৳{_money(net)}</div><div class='sub'>Net salary</div><div class='salary-breakdown' style='margin-top:18px'><div><div class='sub'>Fixed</div><b>৳{_money(current_payroll['fixed_salary'])}</b></div><div><div class='sub'>Overtime</div><b>৳{_money(current_payroll['overtime_amount'])}</b></div><div><div class='sub'>Bonus</div><b>৳{_money(current_payroll['bonus'])}</b></div><div><div class='sub'>Deduction</div><b>৳{_money(current_payroll['deduction'])}</b></div></div></div>"""
         else: summary=f"<div class='card payroll-panel'><span class='confidential'>🔒 HR CONFIDENTIAL</span><h2 style='margin-top:14px'>No salary for {escape(month)}</h2><div class='sub'>Create this employee's monthly salary using the form.</div></div>"
         payroll_section=f"""<div id='payroll' class='section-gap'></div><div class='hero'><div><div class='eyebrow'>Confidential Compensation</div><h2>Employee Payroll</h2><div class='sub'>Only authorized HR/Admin can view or change this information.</div></div><a class='btn secondary' href='/payroll?month={escape(month)}'>Monthly Payroll</a></div><div class='two'>{summary}{payroll_form}</div><div class='section-gap'></div><div class='card' style='overflow:auto'><div class='card-head'><div><h3>Salary History</h3><div class='sub'>Latest 24 months</div></div></div><table><thead><tr><th>Month</th><th>Fixed</th><th>OT</th><th>Bonus</th><th>Deduction</th><th>Net</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(history) or '<tr><td colspan=8>No salary history.</td></tr>'}</tbody></table></div>"""
-    body=f"""<div class='card profile-hero'><div class='profile-photo'>{escape(initials)}</div><div><div class='eyebrow'>Employee 360°</div><h2>{escape(e['name'])}</h2><div class='sub'>{escape(e['staff_id'])} • {escape(e['designation'] or 'No designation')} • {escape(e['department'] or 'No department')}</div><div class='actions' style='margin-top:10px'><span class='status {'ok' if e['is_active'] else 'bad'}'>{'Active' if e['is_active'] else 'Inactive'}</span><span class='status {'ok' if e['registration_status']=='approved' else 'warn'}'>WhatsApp {escape(e['registration_status'])}</span><span class='status {'ok' if e['face_count']>=3 else 'warn'}'>Face {e['face_count']}/3</span></div></div><a class='btn secondary' href='/employees'>Back</a></div><div class='section-gap'></div><div class='summary-strip'><div class='card'><div class='sub'>Attendance</div><div class='metric'>{attendance_rate}%</div></div><div class='card'><div class='sub'>Present</div><div class='metric'>{attendance_present}</div></div><div class='card'><div class='sub'>Late</div><div class='metric'>{int(month_stats['late'] or 0)}</div></div><div class='card'><div class='sub'>Overtime</div><div class='metric'>{round(int(month_stats['overtime'] or 0)/60,1)}h</div></div><div class='card'><div class='sub'>Performance</div><div class='rating'>{latest_rating:.1f}/5</div><div class='stars'>{'★'*round(latest_rating)}{'☆'*(5-round(latest_rating))}</div></div></div><div class='tabs'><a class='tab' href='#profile'>Profile</a><a class='tab' href='#attendance'>Attendance</a><a class='tab' href='#leave'>Leave</a><a class='tab' href='#performance'>Performance</a>{payroll_tab}<a class='tab' href='#activity'>Activity</a></div><div id='profile' class='facts'><div class='fact'><span class='sub'>Shift</span><b>{escape(e['shift'])}</b></div><div class='fact'><span class='sub'>Manager</span><b>{escape(e['reporting_manager'] or '—')}</b></div><div class='fact'><span class='sub'>Office</span><b>{escape(e['office_name'] or 'BURAQ Office')}</b></div><div class='fact'><span class='sub'>Join date</span><b>{escape(e['join_date'] or '—')}</b></div><div class='fact'><span class='sub'>WhatsApp</span><b>{escape(e['whatsapp_phone'] or 'Not registered')}</b></div><div class='fact'><span class='sub'>Emergency</span><b>{escape(e['emergency_name'] or '—')} {escape(e['emergency_phone'] or '')}</b></div></div><div class='section-gap'></div><div class='two'><div class='card'><div class='card-head'><div><h3>Attendance Calendar</h3><div class='sub'>{escape(month)}</div></div><form method='get'><input type='month' name='month' value='{escape(month)}' style='margin:0' onchange='this.form.submit()'></form></div><div class='calendar'>{''.join(cells)}</div></div><div class='card'><h3>Recent timeline</h3><div class='timeline'>{timeline}</div></div></div><div class='section-gap'></div><div id='performance' class='card'><div class='card-head'><div><h3>Performance Review</h3><div class='sub'>Simple 1–5 ratings with comments and goals</div></div><span class='pill'>{latest_rating:.1f}/5 latest</span></div>{reviewform}<div class='section-gap'></div>{reviewhtml}</div>{payroll_section}<div class='section-gap'></div><div class='two'>{edit}<div id='activity' class='card'><h3>HR Notes</h3>{noteform}<div class='section-gap'></div>{notehtml}</div></div>"""
+    body=f"""<div class='card profile-hero'><div class='profile-photo'>{escape(initials)}</div><div><div class='eyebrow'>Employee 360°</div><h2>{escape(e['name'])}</h2><div class='sub'>{escape(e['staff_id'])} • {escape(e['designation'] or 'No designation')} • {escape(e['department'] or 'No department')}</div><div class='actions' style='margin-top:10px'><span class='status {'ok' if e['is_active'] else 'bad'}'>{'Active' if e['is_active'] else 'Inactive'}</span><span class='status {'ok' if e['registration_status']=='approved' else 'warn'}'>WhatsApp {escape(e['registration_status'])}</span><span class='status {'ok' if e['face_count']>=3 else 'warn'}'>Face {e['face_count']}/3</span></div></div><a class='btn secondary' href='/employees'>Back</a></div><div class='section-gap'></div><div class='summary-strip'><div class='card'><div class='sub'>Attendance</div><div class='metric'>{attendance_rate}%</div></div><div class='card'><div class='sub'>Present</div><div class='metric'>{attendance_present}</div></div><div class='card'><div class='sub'>Late</div><div class='metric'>{int(month_stats['late'] or 0)}</div></div><div class='card'><div class='sub'>Overtime</div><div class='metric'>{round(int(month_stats['overtime'] or 0)/60,1)}h</div></div><div class='card'><div class='sub'>Performance</div><div class='rating'>{latest_rating:.1f}/5</div><div class='stars'>{'★'*round(latest_rating)}{'☆'*(5-round(latest_rating))}</div></div></div><div class='tabs'><a class='tab' href='#profile'>Profile</a>{duty_tab}<a class='tab' href='#attendance'>Attendance</a><a class='tab' href='#leave'>Leave</a><a class='tab' href='#performance'>Performance</a>{payroll_tab}<a class='tab' href='#activity'>Activity</a></div><div id='profile' class='facts'><div class='fact'><span class='sub'>Shift</span><b>{escape(e['shift'])}</b></div><div class='fact'><span class='sub'>Manager</span><b>{escape(e['reporting_manager'] or '—')}</b></div><div class='fact'><span class='sub'>Office</span><b>{escape(e['office_name'] or 'BURAQ Office')}</b></div><div class='fact'><span class='sub'>Join date</span><b>{escape(e['join_date'] or '—')}</b></div><div class='fact'><span class='sub'>WhatsApp</span><b>{escape(e['whatsapp_phone'] or 'Not registered')}</b></div><div class='fact'><span class='sub'>Emergency</span><b>{escape(e['emergency_name'] or '—')} {escape(e['emergency_phone'] or '')}</b></div></div>{duty_section}<div class='section-gap'></div><div class='two'><div class='card'><div class='card-head'><div><h3>Attendance Calendar</h3><div class='sub'>{escape(month)}</div></div><form method='get'><input type='month' name='month' value='{escape(month)}' style='margin:0' onchange='this.form.submit()'></form></div><div class='calendar'>{''.join(cells)}</div></div><div class='card'><h3>Recent timeline</h3><div class='timeline'>{timeline}</div></div></div><div class='section-gap'></div><div id='performance' class='card'><div class='card-head'><div><h3>Performance Review</h3><div class='sub'>Simple 1–5 ratings with comments and goals</div></div><span class='pill'>{latest_rating:.1f}/5 latest</span></div>{reviewform}<div class='section-gap'></div>{reviewhtml}</div>{payroll_section}<div class='section-gap'></div><div class='two'>{edit}<div id='activity' class='card'><h3>HR Notes</h3>{noteform}<div class='section-gap'></div>{notehtml}</div></div>"""
     return layout(e['name'],body,request,'employees')
 
 @app.get("/employees/{employee_id}/duty", response_class=HTMLResponse)
@@ -898,8 +1013,8 @@ def employee_duty_page(request: Request, employee_id: int, saved: str=""):
     if can_manage:
         day_options=''.join(f"<option value='{i}'>{d}</option>" for i,d in enumerate(days))
         forms=f"""<div class='two'><div class='card'><div class='eyebrow'>Repeating Schedule</div><h2>Regular Duty by Shift</h2><form method='post' action='/employees/{employee_id}/duty/regular'><label>Weekday</label><select name='weekday'>{day_options}</select><label>Shift preset</label><select name='preset'><option value='morning'>Morning (08:00-16:00)</option><option value='evening'>Evening (16:00-22:00)</option><option value='night'>Night (22:00-06:00)</option><option value='custom'>Custom selectable time</option></select><div class='two'><div><label>Custom start (optional)</label><input type='time' name='start_time'></div><div><label>Custom end (optional)</label><input type='time' name='end_time'></div></div><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Regular Duty</button></form></div><div class='card money-card'><div class='eyebrow'>One Specific Date</div><h2>Custom Duty</h2><form method='post' action='/employees/{employee_id}/duty/custom'><label>Date</label><input type='date' name='duty_date' required><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><label>Note</label><input name='note' placeholder='Special duty reason'><button class='btn'>Assign Custom Duty</button></form></div></div><div class='section-gap'></div><div class='two'><div class='card'><div class='eyebrow'>Quick Assignment</div><h2>Assign Friday Duty</h2><form method='post' action='/employees/{employee_id}/duty/friday'><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Every Friday</button></form></div><div class='card payroll-panel'><div class='eyebrow' style='color:#8ff0cb'>Overnight Assignment</div><h2>Assign Night Duty</h2><form method='post' action='/employees/{employee_id}/duty/night'><label>Starting date</label><input type='date' name='duty_date' required><div class='two'><div><label>Night start</label><input type='time' name='start_time' value='22:00' required></div><div><label>Next-day end</label><input type='time' name='end_time' value='06:00' required></div></div><label>Repeat</label><select name='repeat'><option value='once'>One-time night duty</option><option value='weekly'>Repeat every week on this weekday</option></select><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Night Duty</button></form></div></div>"""
-    weekly_rows=''.join(f"<tr><td>{days[int(r['weekday'])]}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{f'''<form method='post' action='/employees/{employee_id}/duty/weekly/{r['id']}/delete'><button class='btn danger'>Delete</button></form>''' if can_manage else ''}</td></tr>" for r in weekly) or '<tr><td colspan=4>No regular duty.</td></tr>'
-    custom_rows=''.join(f"<tr><td>{escape(r['duty_date'])}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}<div class='sub'>{escape(r['note'] or '')}</div></td><td>{f'''<form method='post' action='/employees/{employee_id}/duty/custom/{r['id']}/delete'><button class='btn danger'>Delete</button></form>''' if can_manage else ''}</td></tr>" for r in custom) or '<tr><td colspan=4>No upcoming custom duty.</td></tr>'
+    weekly_rows=''.join(f"<tr><td>{days[int(r['weekday'])]}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{f'''<form method='post' action='/employees/{employee_id}/duty/weekly/{r['id']}/delete'><button class='btn danger'>Delete</button></form>''' if can_manage else ''}</td></tr>" for r in weekly) or '<tr><td colspan=4>No regular duty.</td></tr>'
+    custom_rows=''.join(f"<tr><td>{escape(r['duty_date'])}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}<div class='sub'>{escape(r['note'] or '')}</div></td><td>{f'''<form method='post' action='/employees/{employee_id}/duty/custom/{r['id']}/delete'><button class='btn danger'>Delete</button></form>''' if can_manage else ''}</td></tr>" for r in custom) or '<tr><td colspan=4>No upcoming custom duty.</td></tr>'
     notice="<div class='notice'>Duty assignment saved.</div>" if saved else ''
     body=f"""{notice}<div class='card profile-hero'><div class='profile-photo'>{escape(''.join(x[:1] for x in e['name'].split()[:2]).upper())}</div><div><div class='eyebrow'>Employee Duty Control</div><h2>{escape(e['name'])}</h2><div class='sub'>{escape(e['staff_id'])} • Current shift: {escape(e['shift'])}</div></div><div class='actions'><a class='btn secondary' href='/employees/{employee_id}'>Profile</a><a class='btn secondary' href='/employees'>Employees</a></div></div><div class='section-gap'></div>{forms}<div class='section-gap'></div><div class='two'><div class='card' style='overflow:auto'><h2>Regular Weekly Duty</h2><table><thead><tr><th>Day</th><th>Time</th><th>Office</th><th></th></tr></thead><tbody>{weekly_rows}</tbody></table></div><div class='card' style='overflow:auto'><h2>Upcoming Custom Duty</h2><table><thead><tr><th>Date</th><th>Time</th><th>Office</th><th></th></tr></thead><tbody>{custom_rows}</tbody></table></div></div>"""
     return layout(f"{e['name']} Duty",body,request,'employees')
@@ -911,19 +1026,21 @@ def _duty_times(preset: str, start_time: str, end_time: str):
     raise HTTPException(400,'Select start and end time')
 
 @app.post("/employees/{employee_id}/duty/regular")
-def assign_regular_duty(request: Request, employee_id: int, weekday: int=Form(...), preset: str=Form('morning'), start_time: str=Form(''), end_time: str=Form(''), office_name: str=Form('BURAQ Office')):
+def assign_regular_duty(request: Request, employee_id: int, weekday: int=Form(...), preset: str=Form('morning'), start_time: str=Form(''), end_time: str=Form(''), office_name: str=Form('BURAQ Office'), return_to: str=Form('')):
     require_permission(request,'duty_manage'); start_time,end_time=_duty_times(preset,start_time,end_time)
     if weekday not in range(7): raise HTTPException(400,'Invalid weekday')
     with get_db() as c: c.execute("INSERT INTO duty_schedules(employee_id,weekday,start_time,end_time,office_name,created_by) VALUES(?,?,?,?,?,?) ON CONFLICT(employee_id,weekday) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time,office_name=excluded.office_name,is_active=excluded.is_active,updated_at=CURRENT_TIMESTAMP",(employee_id,weekday,start_time,end_time,office_name.strip() or 'BURAQ Office',str(request.session.get('hr_id') or 'super_admin')))
-    return RedirectResponse(f'/employees/{employee_id}/duty?saved=1',303)
+    target=f'/employees/{employee_id}?duty_saved=1#duty' if return_to=='profile' else f'/employees/{employee_id}/duty?saved=1'
+    return RedirectResponse(target,303)
 
 @app.post("/employees/{employee_id}/duty/custom")
-def assign_employee_custom_duty(request: Request, employee_id: int, duty_date: str=Form(...), start_time: str=Form(...), end_time: str=Form(...), office_name: str=Form('BURAQ Office'), note: str=Form('')):
+def assign_employee_custom_duty(request: Request, employee_id: int, duty_date: str=Form(...), start_time: str=Form(...), end_time: str=Form(...), office_name: str=Form('BURAQ Office'), note: str=Form(''), return_to: str=Form('')):
     require_permission(request,'duty_manage')
     try: datetime.strptime(duty_date,'%Y-%m-%d')
     except ValueError: raise HTTPException(400,'Invalid date')
     with get_db() as c: c.execute("INSERT INTO custom_duties(employee_id,duty_date,start_time,end_time,office_name,note,created_by) VALUES(?,?,?,?,?,?,?) ON CONFLICT(employee_id,duty_date) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time,office_name=excluded.office_name,note=excluded.note,is_active=excluded.is_active,updated_at=CURRENT_TIMESTAMP",(employee_id,duty_date,start_time,end_time,office_name.strip() or 'BURAQ Office',note.strip() or None,str(request.session.get('hr_id') or 'super_admin')))
-    return RedirectResponse(f'/employees/{employee_id}/duty?saved=1',303)
+    target=f'/employees/{employee_id}?duty_saved=1#duty' if return_to=='profile' else f'/employees/{employee_id}/duty?saved=1'
+    return RedirectResponse(target,303)
 
 @app.post("/employees/{employee_id}/duty/friday")
 def assign_friday_duty(request: Request, employee_id: int, start_time: str=Form(...), end_time: str=Form(...), office_name: str=Form('BURAQ Office')):
@@ -1500,28 +1617,52 @@ def _build_payslip_pdf(r) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet
-    out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
-    data=[["Salary Item","Amount (BDT)"],["Basic Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],[f"Absent deduction ({r['absent_duty_units']} days)",f"- {_money(r['absent_deduction'])}"],[f"Unpaid leave ({r['unpaid_leave_units']} days)",f"- {_money(r['unpaid_leave_deduction'])}"],["Salary advance",f"- {_money(r['advance_amount'])}"],["Fine",f"- {_money(r['fine_amount'])}"],["Other deduction",f"- {_money(r['deduction'])}"],["TOTAL DEDUCTION",f"- {_money(r['total_deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
-    table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#DCFCE7")),("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10)]))
-    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=45,bottomMargin=45)
-    doc.build([Paragraph("BURAQ Salary Statement",styles['Title']),Paragraph(f"Employee: {escape(str(r['name']))}<br/>Staff ID: {escape(str(r['staff_id']))}<br/>Department: {escape(str(r['department'] or '-'))}<br/>Salary month: {r['salary_month']}<br/>Payment status: {str(r['payment_status']).title()}",styles['Normal']),Spacer(1,18),table,Spacer(1,18),Paragraph("Confidential - generated for HR/Admin use only.",styles['Normal'])]); return out.getvalue()
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    def deduction(value):
+        amount=float(value or 0)
+        return "0.00" if abs(amount)<0.005 else f"- {_money(amount)}"
+
+    out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet()
+    styles['Title'].fontName=font; styles['Title'].fontSize=24; styles['Title'].leading=28; styles['Title'].textColor=colors.HexColor("#0D3B2E")
+    styles['Normal'].fontName=font
+    month_label=datetime.strptime(str(r['salary_month']),"%Y-%m").strftime("%B %Y").upper()
+    month_style=ParagraphStyle("Month",parent=styles['Heading1'],fontName=font,fontSize=20,leading=24,alignment=1,textColor=colors.HexColor("#087F5B"),spaceAfter=12)
+    muted=ParagraphStyle("Muted",parent=styles['Normal'],fontName=font,fontSize=9,textColor=colors.HexColor("#64748B"),alignment=1)
+
+    employee_data=[
+        ["Employee",str(r['name']),"Staff ID",str(r['staff_id'])],
+        ["Department",str(r['department'] or '-'),"Designation",str(r['designation'] or '-')],
+        ["Payment status",str(r['payment_status']).title(),"Currency","BDT"],
+    ]
+    employee_table=Table(employee_data,colWidths=[90,155,95,150])
+    employee_table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#F4F7F6")),("TEXTCOLOR",(0,0),(0,-1),colors.HexColor("#64748B")),("TEXTCOLOR",(2,0),(2,-1),colors.HexColor("#64748B")),("FONTNAME",(1,0),(1,-1),font),("FONTNAME",(3,0),(3,-1),font),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#D5E2DD")),("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+
+    duty_data=[
+        ["Scheduled Duty","Worked Duty","Paid Leave","Absent"],
+        [f"{float(r['scheduled_duty_days'] or 0):g} days",f"{float(r['worked_duty_days'] or 0):g} days",f"{float(r['paid_leave_days'] or 0):g} days",f"{float(r['absent_days'] or 0):g} days"],
+    ]
+    duty_table=Table(duty_data,colWidths=[122.5]*4)
+    duty_table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#E7F5EF")),("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#087F5B")),("ALIGN",(0,0),(-1,-1),"CENTER"),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#B7C8C2")),("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+
+    absence_label=("No duty completed deduction" if float(r['scheduled_duty_days'] or 0)<=0 else f"Absent deduction ({float(r['absent_duty_units'] or 0):g} days)")
+    data=[["Salary Item","Amount (BDT)"],["Basic Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours × {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],["GROSS SALARY",_money(r['gross_salary'])],[absence_label,deduction(r['absent_deduction'])],[f"Unpaid leave ({float(r['unpaid_leave_units'] or 0):g} days)",deduction(r['unpaid_leave_deduction'])],["Salary advance",deduction(r['advance_amount'])],["Fine",deduction(r['fine_amount'])],["Other deduction",deduction(r['deduction'])],["TOTAL DEDUCTION",deduction(r['total_deduction'])],["NET SALARY",_money(r['net_salary'])]]
+    table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,4),(-1,4),colors.HexColor("#F1F5F4")),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#D1FAE5")),("TEXTCOLOR",(0,-1),(-1,-1),colors.HexColor("#065F46")),("FONTNAME",(0,4),(-1,4),font),("FONTNAME",(0,-2),(-1,-1),font),("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=36,bottomMargin=36,title=f"BURAQ Payment Sheet - {month_label}")
+    doc.build([Paragraph("BURAQ PAYMENT SHEET",styles['Title']),Paragraph(month_label,month_style),employee_table,Spacer(1,14),duty_table,Spacer(1,14),table,Spacer(1,14),Paragraph("Confidential • Generated for HR/Admin use only",muted)]); return out.getvalue()
 
 @app.get("/payroll/{payroll_id}/payslip.pdf")
 def payroll_payslip(request: Request, payroll_id: int):
     require_permission(request,"payroll_export")
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet
     with get_db() as c: r=c.execute("SELECT p.*,e.staff_id,e.name,e.department,e.designation FROM payroll_records p JOIN employees e ON e.id=p.employee_id WHERE p.id=?",(payroll_id,)).fetchone()
     if not r: raise HTTPException(404,"Payroll not found")
-    out=io.BytesIO(); font=_pdf_font(); styles=getSampleStyleSheet(); styles['Title'].fontName=font; styles['Normal'].fontName=font
-    data=[["Salary Item","Amount (BDT)"],["Basic Salary",_money(r['fixed_salary'])],[f"Overtime ({r['overtime_hours']:.2f} hours x {_money(r['overtime_rate'])})",_money(r['overtime_amount'])],["Bonus",_money(r['bonus'])],[f"Absent deduction ({r['absent_duty_units']} days)",f"- {_money(r['absent_deduction'])}"],[f"Unpaid leave ({r['unpaid_leave_units']} days)",f"- {_money(r['unpaid_leave_deduction'])}"],["Salary advance",f"- {_money(r['advance_amount'])}"],["Fine",f"- {_money(r['fine_amount'])}"],["Other deduction",f"- {_money(r['deduction'])}"],["TOTAL DEDUCTION",f"- {_money(r['total_deduction'])}"],["NET SALARY",_money(r['net_salary'])]]
-    table=Table(data,colWidths=[330,160]); table.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#087F5B")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.HexColor("#B7C8C2")),("ALIGN",(1,1),(1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#DCFCE7")),("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10)]))
-    doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=45,bottomMargin=45)
-    doc.build([Paragraph("BURAQ Salary Statement",styles['Title']),Paragraph(f"Employee: {escape(str(r['name']))}<br/>Staff ID: {escape(str(r['staff_id']))}<br/>Department: {escape(str(r['department'] or '-'))}<br/>Salary month: {r['salary_month']}<br/>Payment status: {str(r['payment_status']).title()}",styles['Normal']),Spacer(1,18),table,Spacer(1,18),Paragraph("Confidential - generated for HR/Admin use only.",styles['Normal'])]); out.seek(0)
-    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payslip-{r['staff_id']}-{r['salary_month']}.pdf"})
+    payslip=dict(r)
+    if r['payment_status']=='draft':
+        calc=_calculate_employee_payroll(r['employee_id'],r['salary_month'],float(r['fixed_salary'] or 0),float(r['overtime_rate'] or 0),str(r['overtime_mode'] or 'auto'),float(r['overtime_hours'] or 0),float(r['bonus'] or 0),float(r['advance_amount'] or 0),float(r['fine_amount'] or 0),float(r['deduction'] or 0))
+        payslip.update(calc)
+        payslip.update({'scheduled_duty_days':calc['scheduled'],'worked_duty_days':calc['worked'],'paid_leave_days':calc['paid_leave'],'absent_days':calc['absent'],'absent_duty_units':calc['absent'],'unpaid_leave_units':calc['unpaid_leave']})
+    out=io.BytesIO(_build_payslip_pdf(payslip))
+    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payment-Sheet-{r['staff_id']}-{r['salary_month']}.pdf"})
 
 @app.get("/reports", response_class=HTMLResponse)
 def reports_page(request: Request, start_date: str = "", end_date: str = "", status: str = "", department: str = ""):
@@ -1688,7 +1829,7 @@ def duty_management_page(request: Request, saved: str="", error: str=""):
           </section>
           <section class='duty-actionbar'><div><b id='dutySummary'>Select employees and date range</b><div class='sub'>Existing duty থাকলে নতুন সময় দিয়ে update হবে।</div></div><div class='actions'><button type='button' class='btn secondary' id='previewDutyBtn'>Preview</button><button class='btn' type='submit'>Save Duty</button></div></section>
         </form>"""
-    rows=''.join(f"<tr><td><b>{escape(r['duty_date'])}</b></td><td>{escape(r['staff_id'])} - {escape(r['name'])}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{escape(r['note'] or '—')}</td></tr>" for r in upcoming) or '<tr><td colspan=5>No upcoming duty assigned.</td></tr>'
+    rows=''.join(f"<tr><td><b>{escape(r['duty_date'])}</b></td><td>{escape(r['staff_id'])} - {escape(r['name'])}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{escape(r['note'] or '—')}</td></tr>" for r in upcoming) or '<tr><td colspan=5>No upcoming duty assigned.</td></tr>'
     notice="<div class='notice'>Duty assigned successfully.</div>" if saved else (f"<div class='notice bad'>{escape(error)}</div>" if error else '')
     body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty Management</div><h2>Manage Employee Duty</h2><div class='sub'>All employees, date range, regular schedule and separate Friday duty—সব এক page-এ। Saturday regular duty থাকবে।</div></div><div class='actions'><span class='pill'>Total {total}</span><span class='pill'>Assigned {assigned_n}</span><span class='pill'>Unassigned {unassigned}</span></div></div>{manage}<div class='section-gap'></div><div class='card' style='overflow:auto'><div class='card-head'><div><div class='eyebrow'>Assigned Duty</div><h2>Upcoming Duty List</h2></div><a class='btn secondary' href='/duty-schedules'>Advanced / Reminder Log</a></div><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th></tr></thead><tbody>{rows}</tbody></table></div>"""
     extra="""<style>
@@ -1791,12 +1932,12 @@ def duty_schedules_page(request: Request, saved: str=""):
     roster=[]
     for r in rows:
         action=f"<form method='post' action='/duty-schedules/{r['id']}/delete' onsubmit=\"return confirm('Delete this duty?')\"><button class='btn danger'>Delete</button></form>" if can_manage else ''
-        roster.append(f"<tr><td><b>{escape(r['staff_id'])}</b><div class='sub'>{escape(r['name'])}</div></td><td>{days[int(r['weekday'])]}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td><span class='status {'ok' if r['is_active'] else 'bad'}'>{'Active' if r['is_active'] else 'Off'}</span></td><td>{action}</td></tr>")
+        roster.append(f"<tr><td><b>{escape(r['staff_id'])}</b><div class='sub'>{escape(r['name'])}</div></td><td>{days[int(r['weekday'])]}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td><span class='status {'ok' if r['is_active'] else 'bad'}'>{'Active' if r['is_active'] else 'Off'}</span></td><td>{action}</td></tr>")
     log_rows=''.join(f"<tr><td>{escape(str(x['created_at']))}</td><td>{escape(x['staff_id'])} - {escape(x['name'])}</td><td>{escape(x['duty_date'])}</td><td>{escape(x['reminder_type'])}</td><td><span class='status ok'>{escape(x['status'])}</span></td></tr>" for x in logs) or '<tr><td colspan=5>No reminders sent yet.</td></tr>'
     custom_rows=[]
     for r in custom:
         action=f"<form method='post' action='/custom-duties/{r['id']}/delete' onsubmit=\"return confirm('Delete this custom duty?')\"><button class='btn danger'>Delete</button></form>" if can_manage else ''
-        custom_rows.append(f"<tr><td><b>{escape(r['duty_date'])}</b></td><td>{escape(r['staff_id'])} - {escape(r['name'])}</td><td>{escape(r['start_time'])} - {escape(r['end_time'])}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{escape(r['note'] or '—')}</td><td>{action}</td></tr>")
+        custom_rows.append(f"<tr><td><b>{escape(r['duty_date'])}</b></td><td>{escape(r['staff_id'])} - {escape(r['name'])}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{escape(r['note'] or '—')}</td><td>{action}</td></tr>")
     notice="<div class='notice'>Duty schedule saved.</div>" if saved else ''
     body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Zero-Touch Workforce</div><h2>Duty Scheduler & Reminders</h2><div class='sub'>Weekly roster plus one-day custom duty with automatic reminders.</div></div><div class='actions'><span class='pill'>{len(rows)} weekly</span><span class='pill'>{len(custom)} custom</span></div></div><div class='two'>{form}<div class='card'><h2>Reminder Timing</h2><div class='salary-part'><span class='sub'>Before duty</span><b>30 minutes</b></div><div class='salary-part'><span class='sub'>Late alert</span><b>10 minutes after start</b></div><div class='salary-part'><span class='sub'>Checkout</span><b>10 minutes before end</b></div><p class='sub'>Custom duty থাকলে ওই দিনের weekly duty ও reminder override হবে।</p></div></div><div class='section-gap'></div>{custom_form}<div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Upcoming Custom Duties</h2><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th><th></th></tr></thead><tbody>{''.join(custom_rows) or '<tr><td colspan=6>No upcoming custom duty.</td></tr>'}</tbody></table></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Weekly Roster</h2><table><thead><tr><th>Employee</th><th>Day</th><th>Duty</th><th>Office</th><th>Status</th><th></th></tr></thead><tbody>{''.join(roster) or '<tr><td colspan=6>No duty assigned.</td></tr>'}</tbody></table></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>Recent Reminder Log</h2><table><thead><tr><th>Sent</th><th>Employee</th><th>Duty Date</th><th>Type</th><th>Status</th></tr></thead><tbody>{log_rows}</tbody></table></div>"""
     return layout("Duty Scheduler",body,request,"duty")
@@ -1903,5 +2044,9 @@ def verify(hub_mode: str | None = Query(None, alias="hub.mode"), hub_verify_toke
     raise HTTPException(403, "Webhook verification failed")
 
 @app.post("/webhook/whatsapp")
-async def webhook(request: Request):
-    payload=await request.json(); processed=await handle(payload); return {"status":"ok","processed":processed}
+async def webhook(request: Request, background_tasks: BackgroundTasks):
+    payload = await request.json()
+    # Meta needs an immediate 2xx. Download and Face AI continue only after the
+    # acknowledgement, preventing Meta retries and lost selfie responses.
+    background_tasks.add_task(handle, payload)
+    return {"status": "accepted"}
