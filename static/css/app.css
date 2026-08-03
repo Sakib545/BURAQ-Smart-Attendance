@@ -1431,3 +1431,201 @@ tbody tr:last-child td { border-bottom: 0; }
   .live-dot { animation: none; }
   .mini-line span { transition: none; }
 }
+/* ==========================================================================
+   BURAQ Smart Attendance — Payroll v10.0 stylesheet patch
+   Append after the dashboard patch at the END of static/css/app.css.
+   ========================================================================== */
+
+/* --- Notices -------------------------------------------------------------
+   The old page wrote error colours inline (#fee2e2 / #991b1b), which
+   ignored the palette and stayed light-pink in dark mode. */
+
+.notice-ok  { background: var(--present-bg); color: var(--present); border: 1px solid color-mix(in srgb, var(--present) 22%, transparent); }
+.notice-bad { background: var(--absent-bg);  color: var(--absent);  border: 1px solid color-mix(in srgb, var(--absent) 22%, transparent); }
+
+
+/* --- Month picker in the header ------------------------------------------ */
+
+.month-picker { display: flex; gap: 8px; align-items: center; margin: 0; }
+.month-picker input { margin: 0; width: 170px; }
+
+
+/* --- Preparation progress ------------------------------------------------ */
+
+.payroll-progress { padding: 16px 18px; }
+
+.stage-bar {
+  display: flex;
+  height: 9px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-3);
+  margin: 4px 0 12px;
+}
+
+.stage-bar span { display: block; transition: width .4s cubic-bezier(.4, 0, .2, 1); }
+.seg-paid  { background: var(--present); }
+.seg-final { background: var(--leave); }
+.seg-draft { background: var(--late); }
+.seg-none  { background: var(--surface-3); }
+
+.stage-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.stage-key span { display: inline-flex; align-items: center; gap: 7px; }
+.stage-key b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+.seg-dot { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+.stage-none  { background: var(--surface-3);  color: var(--muted); }
+.stage-draft { background: var(--late-bg);    color: var(--late); }
+.stage-final { background: var(--leave-bg);   color: var(--leave); }
+.stage-paid  { background: var(--present-bg); color: var(--present); }
+.seg-dot.stage-none  { background: var(--rule-strong); }
+.seg-dot.stage-draft { background: var(--late); }
+.seg-dot.stage-final { background: var(--leave); }
+.seg-dot.stage-paid  { background: var(--present); }
+
+
+/* --- Money summary ------------------------------------------------------- */
+
+.payroll-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.payroll-summary .metric { font-variant-numeric: tabular-nums; }
+
+
+/* --- Form + live breakdown side by side ---------------------------------- */
+
+.payroll-work { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+
+.field-group {
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  padding: 12px 14px 14px;
+  margin: 16px 0;
+  background: var(--surface-2);
+}
+
+.field-group-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.field-group > label:first-of-type { margin-top: 0; }
+.hint { font-size: 12px; color: var(--faint); margin: 5px 0 2px; line-height: 1.45; }
+input[aria-invalid="true"] { border-color: var(--absent); }
+
+
+/* --- The calculation sheet — the point of the whole page ------------------ */
+
+#payroll-breakdown { position: sticky; top: calc(var(--topbar-h) + 14px); }
+
+.calc-sheet { font-variant-numeric: tabular-nums; }
+
+.calc-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
+  border-bottom: 1px dashed var(--rule);
+  font-size: 13.5px;
+}
+
+.calc-row:last-child { border-bottom: 0; }
+.calc-row span { min-width: 0; }
+.calc-row i { display: block; font-style: normal; font-size: 11.5px; color: var(--faint); margin-top: 2px; }
+.calc-row b { white-space: nowrap; font-weight: 500; }
+
+.calc-row.muted { color: var(--muted); }
+.calc-row.plus b  { color: var(--present); }
+.calc-row.minus b { color: var(--absent); }
+
+.calc-row.subtotal {
+  border-bottom: 1px solid var(--rule-strong);
+  border-top: 1px solid var(--rule-strong);
+  font-weight: 500;
+  margin-top: 4px;
+}
+
+.calc-row.total {
+  margin-top: 8px;
+  padding: 14px 0 4px;
+  border-top: 2px solid var(--ink);
+  border-bottom: 0;
+  font-size: 15px;
+}
+
+.calc-row.total b { font-family: var(--f-display); font-size: 21px; font-weight: 600; }
+
+.calc-warn {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--late-bg);
+  color: var(--late);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+
+/* --- Salary sheet table -------------------------------------------------- */
+
+.payroll-table td { vertical-align: top; }
+.payroll-table .mini-line { margin-top: 6px; max-width: 84px; margin-left: auto; }
+.payroll-table .row-not_prepared { opacity: .62; }
+.payroll-table .row-not_prepared:hover { opacity: 1; }
+
+.cell-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.btn.small { padding: 5px 10px; font-size: 12px; }
+
+/* Method / reference were bare 90px-wide inputs jammed into a table cell.
+   They now live behind a disclosure, so the row stays readable. */
+.pay-details { position: relative; }
+.pay-details > summary { list-style: none; cursor: pointer; display: inline-flex; }
+.pay-details > summary::-webkit-details-marker { display: none; }
+
+.pay-form {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  top: calc(100% + 6px);
+  width: 250px;
+  padding: 14px;
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r);
+  box-shadow: var(--sh-2);
+}
+
+.pay-form label { font-size: 12px; margin-top: 8px; }
+.pay-form label:first-child { margin-top: 0; }
+.pay-form input { margin: 4px 0 0; width: 100%; }
+.pay-form .btn { margin-top: 12px; width: 100%; }
+
+
+/* --- Responsive ---------------------------------------------------------- */
+
+@media (max-width: 1100px) {
+  .payroll-work { grid-template-columns: minmax(0, 1fr); }
+  #payroll-breakdown { position: static; }
+}
+
+@media (max-width: 620px) {
+  .month-picker { width: 100%; }
+  .month-picker input { flex: 1; width: auto; }
+  .pay-form { right: auto; left: 0; width: 220px; }
+}

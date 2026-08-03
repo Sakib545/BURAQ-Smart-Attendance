@@ -1694,33 +1694,462 @@ def _log_payroll_change(db, payroll_id: int, action: str, actor: str, reason: st
     row=db.execute("SELECT * FROM payroll_records WHERE id=?",(payroll_id,)).fetchone()
     db.execute("INSERT INTO payroll_change_logs(payroll_id,action,actor,reason,snapshot) VALUES(?,?,?,?,?)",(payroll_id,action,actor,reason,json.dumps(dict(row),default=str) if row else '{}'))
 
+PAYROLL_STAGES = {
+    "not_prepared": ("Not prepared", "stage-none",
+                     "No payslip exists yet for this month."),
+    "draft":        ("Draft", "stage-draft",
+                     "Saved, still editable. Nothing is committed."),
+    "finalized":    ("Finalized", "stage-final",
+                     "Locked. Only a Super Admin can reopen it."),
+    "paid":         ("Paid", "stage-paid",
+                     "Payment recorded with a method and reference."),
+}
+
+
+@app.get("/payroll/preview")
+def payroll_preview(request: Request, employee_id: int, month: str,
+                    fixed_salary: float = -1, overtime_rate: float = -1,
+                    overtime_hours: float = 0, bonus: float = 0,
+                    advance: float = 0, fine: float = 0, deduction: float = 0):
+    """Live calculation for the payroll form.
+
+    Previously this endpoint existed but nothing ever called it, and it
+    accepted no adjustment values — so the form's 'Preview' label was a
+    promise it could not keep. The extra arguments are all optional and
+    default to the employee's saved figures, so old callers behave
+    exactly as before.
+    """
+    require_permission(request, "payroll_view")
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(400, "Invalid salary month")
+    with get_db() as c:
+        employee = c.execute(
+            "SELECT staff_id,name,fixed_salary,default_overtime_rate "
+            "FROM employees WHERE id=? AND is_active", (employee_id,)).fetchone()
+    if not employee:
+        raise HTTPException(404, "Employee not found")
+    if fixed_salary < 0:
+        fixed_salary = float(employee["fixed_salary"] or 0)
+    if overtime_rate < 0:
+        overtime_rate = float(employee["default_overtime_rate"] or 0)
+    for value in (fixed_salary, overtime_rate, overtime_hours, bonus, advance, fine, deduction):
+        if value < 0:
+            raise HTTPException(400, "Payroll values cannot be negative")
+    result = _calculate_employee_payroll(
+        employee_id, month, fixed_salary, overtime_rate, "manual",
+        overtime_hours, bonus, advance, fine, deduction)
+    result["staff_id"] = employee["staff_id"]
+    result["employee_name"] = employee["name"]
+    return result
+
+
 @app.get("/payroll", response_class=HTMLResponse)
-def payroll_page(request: Request, month: str="", saved: str="", error: str=""):
-    require_permission(request,"payroll_view")
-    current=datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m")
-    month=month or current
-    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
-    rows=[row for row in _salary_sheet_rows(month) if row['payroll_id']]; can_manage=has_permission(request,"payroll_manage"); can_export=has_permission(request,"payroll_export")
-    with get_db() as c: employees=c.execute("SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id").fetchall()
-    employee_options=''.join(f"<option value='{e['id']}'>{escape(e['staff_id'])} - {escape(e['name'])}</option>" for e in employees)
-    notices="<div class='notice'>Payroll prepared/saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Adjustment reason is required.</div>" if error=='reason' else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Payroll could not be saved.</div>" if error else ""))
-    form=""
+def payroll_page(request: Request, month: str = "", saved: str = "", error: str = ""):
+    require_permission(request, "payroll_view")
+    current = datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m")
+    month = month or current
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(400, "Invalid salary month")
+
+    month_label = datetime.strptime(month, "%Y-%m").strftime("%B %Y")
+    can_manage = has_permission(request, "payroll_manage")
+    can_export = has_permission(request, "payroll_export")
+    is_super = request.session.get("role") == "super_admin"
+
+    # Every active employee, including those with no payslip yet. The old
+    # page dropped them with `if row['payroll_id']`, so the one question a
+    # payroll officer actually has — "who is still left?" — was unanswerable.
+    all_rows = _salary_sheet_rows(month)
+    prepared = [r for r in all_rows if r["payroll_id"]]
+    missing = [r for r in all_rows if not r["payroll_id"]]
+
+    def _stage(row):
+        if not row["payroll_id"]:
+            return "not_prepared"
+        return str(row["payment_status"] or "draft")
+
+    counts = {k: 0 for k in PAYROLL_STAGES}
+    for r in all_rows:
+        counts[_stage(r)] = counts.get(_stage(r), 0) + 1
+
+    total_staff = len(all_rows)
+    net_total = sum(float(r["net_salary"] or 0) for r in prepared)
+    paid_total = sum(float(r["net_salary"] or 0) for r in prepared
+                     if r["payment_status"] == "paid")
+    outstanding = net_total - paid_total
+
+    # ---------------- notice ----------------
+    if saved:
+        notices = ("<div class='notice notice-ok'>Payslip saved as a draft. "
+                   "Check the figures below, then finalize it to lock.</div>")
+    elif error == "reason":
+        notices = ("<div class='notice notice-bad'>A reason is required whenever you "
+                   "add a bonus, advance, fine or other deduction.</div>")
+    elif error:
+        notices = ("<div class='notice notice-bad'>The payslip could not be saved. "
+                   "Check that no amount is negative and try again.</div>")
+    else:
+        notices = ""
+
+    # ---------------- progress strip ----------------
+    def _seg(key):
+        return _pct(counts.get(key, 0), total_staff)
+
+    progress = (
+        f"<div class='card payroll-progress'>"
+        f"<div class='card-head'><div>"
+        f"<h3>{len(prepared)} of {total_staff} payslips prepared</h3>"
+        f"<div class='sub'>{month_label} · {counts['paid']} paid, "
+        f"{counts['finalized']} locked, {counts['draft']} still editable</div>"
+        f"</div>"
+        + (f"<form method='post' action='/payroll/bulk-prepare'>"
+           f"<input type='hidden' name='month' value='{month}'>"
+           f"<button class='btn'>Prepare the remaining {len(missing)}</button></form>"
+           if can_manage and missing else "")
+        + "</div>"
+        f"<div class='stage-bar' role='img' aria-label='"
+        f"{counts['paid']} paid, {counts['finalized']} finalized, "
+        f"{counts['draft']} draft, {counts['not_prepared']} not prepared'>"
+        f"<span class='seg-paid'  style='width:{_seg('paid')}%'></span>"
+        f"<span class='seg-final' style='width:{_seg('finalized')}%'></span>"
+        f"<span class='seg-draft' style='width:{_seg('draft')}%'></span>"
+        f"<span class='seg-none'  style='width:{_seg('not_prepared')}%'></span>"
+        f"</div>"
+        f"<div class='stage-key'>"
+        + "".join(
+            f"<span><i class='seg-dot {cls}'></i>{label} <b>{counts.get(key, 0)}</b></span>"
+            for key, (label, cls, _tip) in PAYROLL_STAGES.items())
+        + "</div></div>"
+    )
+
+    # ---------------- money summary ----------------
+    summary = (
+        "<div class='payroll-summary'>"
+        f"<div class='card'><div class='metric-label'>Net payroll</div>"
+        f"<div class='metric'>৳{_money(net_total)}</div>"
+        f"<div class='metric-foot'>Total payable for {month_label}</div></div>"
+        f"<div class='card'><div class='metric-label'>Already paid</div>"
+        f"<div class='metric'>৳{_money(paid_total)}</div>"
+        f"<div class='metric-foot'>{counts['paid']} of {len(prepared)} payslips</div></div>"
+        f"<div class='card'><div class='metric-label'>Still outstanding</div>"
+        f"<div class='metric'>৳{_money(outstanding)}</div>"
+        f"<div class='metric-foot'>"
+        + ("Everything is paid" if outstanding <= 0 else "Waiting to be disbursed")
+        + "</div></div></div>"
+    )
+
+    # ---------------- entry form with live breakdown ----------------
+    form = ""
     if can_manage:
-        form=f"""<div class='card'><h2>Payroll Preview & Adjustment</h2><p class='sub'>Basic salary is earned from completed duties. Break time is excluded and late minutes are deducted automatically.</p><form method='post' action='/payroll'><input type='hidden' name='return_month' value='{month}'><input type='hidden' name='overtime_mode' value='manual'><label>Employee</label><select name='employee_id' required>{employee_options}</select><label>Salary Month</label><input type='month' name='salary_month' value='{month}' required><div class='two'><div><label>Basic Salary</label><input type='number' min='0' step='0.01' name='fixed_salary' required></div><div><label>Manual OT Rate / Hour</label><input type='number' min='0' step='0.01' name='overtime_rate' value='0'></div></div><label>Manual OT Hours (optional; never automatic)</label><input type='number' min='0' step='0.01' name='overtime_hours' value='0'><div class='two'><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='0'></div><div><label>Salary Advance</label><input type='number' min='0' step='0.01' name='advance' value='0'></div></div><div class='two'><div><label>Fine</label><input type='number' min='0' step='0.01' name='fine' value='0'></div><div><label>Other Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='0'></div></div><label>Adjustment Reason (required for bonus/deduction)</label><input name='adjustment_reason'><label>Private HR Note</label><textarea name='note'></textarea><button class='btn'>Calculate & Save Draft</button></form></div>"""
-    table=[]
-    for r in rows:
-        controls=""
-        if can_manage and r['payment_status']=='draft': controls+=f"<form method='post' action='/payroll/{r['id']}/status' style='display:inline'><input type='hidden' name='month' value='{month}'><input type='hidden' name='status' value='finalized'><button class='btn'>Finalize & Lock</button></form> "
-        elif can_manage and r['payment_status']=='finalized': controls+=f"<form method='post' action='/payroll/{r['id']}/status' style='display:inline-flex;gap:5px'><input type='hidden' name='month' value='{month}'><input type='hidden' name='status' value='paid'><input name='payment_method' placeholder='Method' required style='width:90px'><input name='payment_reference' placeholder='Reference' required style='width:110px'><button class='btn'>Mark Paid</button></form> "
-        if request.session.get('role')=='super_admin' and r['payment_status']=='finalized': controls+=f"<form method='post' action='/payroll/{r['id']}/reopen' style='display:inline-flex;gap:5px'><input type='hidden' name='month' value='{month}'><input name='reason' placeholder='Reopen reason' required><button class='btn secondary'>Reopen</button></form> "
-        if can_export: controls+=f"<a class='btn secondary' href='/payroll/{r['id']}/payslip.pdf'>Payslip</a>"
-        state='ok' if r['payment_status']=='paid' else ('warn' if r['payment_status']=='draft' else 'info')
-        total_ded=float(r['total_deduction'] or 0) if 'total_deduction' in r.keys() else float(r['deduction'] or 0)+float(r['absent_deduction'] or 0)
-        table.append(f"<tr><td><b>{escape(r['staff_id'])}</b><br><span class='sub'>{escape(r['name'])}</span></td><td>{_money(r['fixed_salary'])}</td><td><b>{_money(r['earned_basic_salary'])}</b><div class='sub'>{float(r['worked'] or 0):g}/{float(r['scheduled'] or 0):g} duty</div></td><td>{int(r['late_minutes'] or 0)} min<br><b>-{_money(r['late_deduction'])}</b></td><td>{_money(r['overtime_amount'])}</td><td>{_money(total_ded)}</td><td><b>{_money(r['net_salary'])}</b></td><td><span class='status {state}'>{escape(r['payment_status'])}</span></td><td>{controls}</td></tr>")
-    gross=sum(float(r['net_salary']) for r in rows); paid=sum(float(r['net_salary']) for r in rows if r['payment_status']=='paid')
-    export_buttons=(f"<form method='post' action='/payroll/bulk-prepare' style='display:inline'><input type='hidden' name='month' value='{month}'><button class='btn'>Prepare All Employees</button></form>" if can_manage else "")+(f"<a class='btn secondary' href='/payroll/export.xlsx?month={month}'>Excel</a><a class='btn secondary' href='/payroll/export.pdf?month={month}'>PDF</a>" if can_export else "")+("<a class='btn secondary' href='/settings/payroll-backup'>Backup</a>" if request.session.get('role')=='super_admin' else "")
-    body=f"""{notices}<div class='hero'><div><h2>Salary & Payroll</h2></div><div class='actions'>{export_buttons}</div></div><div class='card' style='margin-bottom:15px'><form method='get' class='actions'><div style='max-width:220px'><label>Salary Month</label><input type='month' name='month' value='{month}'></div><button class='btn'>Open Month</button></form></div><div class='grid'><div class='card'><div class='sub'>Employees</div><div class='metric'>{len(rows)}</div></div><div class='card'><div class='sub'>Net Payroll</div><div class='metric'>৳{_money(gross)}</div></div><div class='card'><div class='sub'>Paid</div><div class='metric'>৳{_money(paid)}</div></div><div class='card'><div class='sub'>Unpaid</div><div class='metric'>৳{_money(gross-paid)}</div></div></div><div class='section-gap'></div><div class='two'>{form}<div class='card'><h2>Payroll Status</h2><div class='health-list'><div class='health-row'><span>Month</span><b>{escape(month)}</b></div><div class='health-row'><span>Employees</span><b>{len(rows)}</b></div><div class='health-row'><span>Net Payroll</span><b>৳{_money(gross)}</b></div><div class='health-row'><span>Paid</span><b>৳{_money(paid)}</b></div></div></div></div><div class='section-gap'></div><div class='card' style='overflow:auto'><h2>{escape(month)} Salary Sheet</h2><table><thead><tr><th>Employee</th><th>Basic</th><th>Duty Earned</th><th>Late Deduction</th><th>Manual OT</th><th>Total Deduction</th><th>Net</th><th>Status</th><th>Action</th></tr></thead><tbody>{''.join(table) or '<tr><td colspan=9>No salary records for this month.</td></tr>'}</tbody></table></div>"""
-    return layout("Payroll",body,request,"payroll")
+        with get_db() as c:
+            employees = c.execute(
+                "SELECT id,staff_id,name,COALESCE(fixed_salary,0) fixed_salary,"
+                "COALESCE(default_overtime_rate,0) ot_rate "
+                "FROM employees WHERE is_active ORDER BY staff_id").fetchall()
+        options = "".join(
+            f"<option value='{e['id']}' data-salary='{float(e['fixed_salary'] or 0):.2f}' "
+            f"data-ot='{float(e['ot_rate'] or 0):.2f}'>"
+            f"{escape(e['staff_id'])} — {escape(e['name'])}</option>"
+            for e in employees)
+        form = f"""
+        <div class='card'>
+          <div class='card-head'><div><h3>Prepare a payslip</h3>
+          <div class='sub'>Pick a person, adjust the amounts, and watch the
+          breakdown on the right update as you type.</div></div></div>
+          <form method='post' action='/payroll' id='payroll-form'>
+            <input type='hidden' name='return_month' value='{month}'>
+            <input type='hidden' name='overtime_mode' value='manual'>
+
+            <label for='pf-emp'>Employee</label>
+            <select id='pf-emp' name='employee_id' required>{options}</select>
+
+            <label for='pf-month'>Salary month</label>
+            <input id='pf-month' type='month' name='salary_month' value='{month}' required>
+
+            <div class='field-group'>
+              <div class='field-group-title'>Salary</div>
+              <div class='two'>
+                <div><label for='pf-basic'>Monthly basic salary</label>
+                <input id='pf-basic' type='number' min='0' step='0.01' name='fixed_salary' required>
+                <div class='hint'>Filled from the employee record. Editing it updates their record too.</div></div>
+                <div><label for='pf-otrate'>Overtime rate per hour</label>
+                <input id='pf-otrate' type='number' min='0' step='0.01' name='overtime_rate' value='0'></div>
+              </div>
+              <label for='pf-othours'>Overtime hours</label>
+              <input id='pf-othours' type='number' min='0' step='0.01' name='overtime_hours' value='0'>
+              <div class='hint'>Entered by hand. Overtime is never added automatically.</div>
+            </div>
+
+            <div class='field-group'>
+              <div class='field-group-title'>Adds to the salary</div>
+              <label for='pf-bonus'>Bonus</label>
+              <input id='pf-bonus' type='number' min='0' step='0.01' name='bonus' value='0'>
+            </div>
+
+            <div class='field-group'>
+              <div class='field-group-title'>Cut from the salary</div>
+              <div class='two'>
+                <div><label for='pf-advance'>Salary advance already taken</label>
+                <input id='pf-advance' type='number' min='0' step='0.01' name='advance' value='0'></div>
+                <div><label for='pf-fine'>Fine</label>
+                <input id='pf-fine' type='number' min='0' step='0.01' name='fine' value='0'></div>
+              </div>
+              <label for='pf-other'>Other deduction</label>
+              <input id='pf-other' type='number' min='0' step='0.01' name='deduction' value='0'>
+              <div class='hint'>Late-minute cuts are calculated from attendance — do not enter them here.</div>
+            </div>
+
+            <label for='pf-reason'>Reason for the adjustment</label>
+            <input id='pf-reason' name='adjustment_reason'
+                   placeholder='Required if you entered a bonus, advance, fine or other deduction'>
+
+            <label for='pf-note'>Private HR note</label>
+            <textarea id='pf-note' name='note'></textarea>
+
+            <button class='btn' type='submit'>Save as draft</button>
+            <div class='hint'>Saving does not pay anyone. You finalize and mark
+            as paid from the salary sheet below.</div>
+          </form>
+        </div>"""
+
+    # ---------------- live breakdown panel ----------------
+    breakdown = f"""
+    <div class='card' id='payroll-breakdown'>
+      <div class='card-head'><div><h3>How this salary is worked out</h3>
+      <div class='sub' id='pb-who'>Select an employee to see their figures.</div></div></div>
+      <div class='calc-sheet' id='pb-body' aria-live='polite'>
+        <div class='empty-cell'>Waiting for an employee…</div>
+      </div>
+    </div>"""
+
+    # ---------------- salary sheet ----------------
+    table = []
+    for r in all_rows:
+        stage = _stage(r)
+        label, cls, _tip = PAYROLL_STAGES[stage]
+        scheduled = float(r["scheduled"] or 0)
+        worked = float(r["worked"] or 0)
+        duty_pct = _pct(worked, scheduled)
+
+        if stage == "not_prepared":
+            actions = (f"<span class='sub'>Use the form to prepare</span>")
+            net_cell = "<span class='sub'>—</span>"
+        else:
+            net_cell = f"<b>৳{_money(r['net_salary'])}</b>"
+            bits = []
+            if can_manage and stage == "draft":
+                bits.append(
+                    f"<form method='post' action='/payroll/{r['id']}/status'>"
+                    f"<input type='hidden' name='month' value='{month}'>"
+                    f"<input type='hidden' name='status' value='finalized'>"
+                    f"<button class='btn small'>Finalize</button></form>")
+            if can_manage and stage == "finalized":
+                bits.append(
+                    f"<details class='pay-details'><summary class='btn small'>Mark as paid</summary>"
+                    f"<form method='post' action='/payroll/{r['id']}/status' class='pay-form'>"
+                    f"<input type='hidden' name='month' value='{month}'>"
+                    f"<input type='hidden' name='status' value='paid'>"
+                    f"<label>How it was paid</label>"
+                    f"<input name='payment_method' placeholder='Cash, bKash, bank transfer…' required>"
+                    f"<label>Reference number</label>"
+                    f"<input name='payment_reference' placeholder='Transaction or voucher no.' required>"
+                    f"<button class='btn small'>Confirm payment</button></form></details>")
+            if is_super and stage == "finalized":
+                bits.append(
+                    f"<details class='pay-details'><summary class='btn small secondary'>Reopen</summary>"
+                    f"<form method='post' action='/payroll/{r['id']}/reopen' class='pay-form'>"
+                    f"<input type='hidden' name='month' value='{month}'>"
+                    f"<label>Why is this being reopened?</label>"
+                    f"<input name='reason' required>"
+                    f"<button class='btn small secondary'>Unlock for editing</button></form></details>")
+            if can_export:
+                bits.append(f"<a class='btn small secondary' "
+                            f"href='/payroll/{r['id']}/payslip.pdf'>Payslip</a>")
+            actions = "".join(bits) or "<span class='sub'>—</span>"
+
+        table.append(
+            f"<tr class='row-{stage}'>"
+            f"<td><b>{escape(str(r['name']))}</b>"
+            f"<div class='sub'>{escape(str(r['staff_id']))}</div></td>"
+            f"<td><span class='status-badge {cls}' title='{escape(_tip)}'>{label}</span></td>"
+            f"<td class='num'>{worked:g} / {scheduled:g}"
+            f"<div class='mini-line'><span class='mini-present' style='width:{duty_pct}%'></span></div></td>"
+            f"<td class='num'>৳{_money(r['earned_basic_salary'])}"
+            f"<div class='sub'>of ৳{_money(r['fixed_salary'])}</div></td>"
+            f"<td class='num'>"
+            + (f"+৳{_money(r['overtime_amount'])}" if float(r['overtime_amount'] or 0) else "—")
+            + f"</td>"
+            f"<td class='num'>"
+            + (f"−৳{_money(r['total_deduction'])}" if float(r['total_deduction'] or 0) else "—")
+            + f"<div class='sub'>"
+            + (f"{int(r['late_minutes'] or 0)} min late" if int(r['late_minutes'] or 0) else "&nbsp;")
+            + f"</div></td>"
+            f"<td class='num'>{net_cell}</td>"
+            f"<td class='cell-actions'>{actions}</td></tr>")
+
+    export_buttons = ""
+    if can_export:
+        export_buttons += (f"<a class='btn secondary' href='/payroll/export.xlsx?month={month}'>Excel</a>"
+                           f"<a class='btn secondary' href='/payroll/export.pdf?month={month}'>PDF</a>")
+    if is_super:
+        export_buttons += "<a class='btn secondary' href='/settings/payroll-backup'>Backup</a>"
+
+    body = f"""
+    {notices}
+    <div class='dashboard-head'>
+      <div class='dashboard-greet'>
+        <h1>Salary &amp; payroll</h1>
+        <div class='dashboard-date'><span>{month_label}</span>
+        <span class='sub'>{total_staff} active employees</span></div>
+      </div>
+      <div class='dashboard-tools'>
+        <form method='get' class='month-picker'>
+          <input type='month' name='month' value='{month}' aria-label='Salary month'>
+          <button class='btn secondary'>Open month</button>
+        </form>
+        {export_buttons}
+      </div>
+    </div>
+
+    {progress}
+    <div class='section-gap'></div>
+    {summary}
+    <div class='section-gap'></div>
+
+    <div class='payroll-work'>{form}{breakdown}</div>
+
+    <div class='section-gap'></div>
+    <div class='card'>
+      <div class='card-head'><div><h3>Salary sheet — {month_label}</h3>
+      <div class='sub'>Net = earned basic + overtime + bonus − (late + advance + fine + other)</div></div></div>
+      <div class='table-scroll'>
+        <table class='dashboard-table payroll-table'>
+          <thead><tr>
+            <th>Employee</th><th>Stage</th><th class='num'>Duty done</th>
+            <th class='num'>Earned basic</th><th class='num'>Overtime</th>
+            <th class='num'>Deductions</th><th class='num'>Net payable</th><th>Action</th>
+          </tr></thead>
+          <tbody>{''.join(table) or "<tr><td colspan='8'><div class='empty-cell'>No active employees.</div></td></tr>"}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+    (function () {{
+      var form = document.getElementById('payroll-form');
+      if (!form) return;
+      var emp = document.getElementById('pf-emp');
+      var basic = document.getElementById('pf-basic');
+      var otRate = document.getElementById('pf-otrate');
+      var body = document.getElementById('pb-body');
+      var who = document.getElementById('pb-who');
+      var timer = null, seq = 0;
+
+      function taka(n) {{
+        return '৳' + Number(n || 0).toLocaleString('en-US',
+          {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
+      }}
+      function val(id) {{
+        var el = document.getElementById(id);
+        var n = parseFloat(el && el.value);
+        return isFinite(n) && n >= 0 ? n : 0;
+      }}
+      function line(label, note, amount, kind) {{
+        return '<div class="calc-row ' + (kind || '') + '"><span>' + label +
+               (note ? '<i>' + note + '</i>' : '') + '</span><b>' + amount + '</b></div>';
+      }}
+
+      // Fill basic salary and OT rate from the chosen employee, so the
+      // officer is not retyping figures the system already knows.
+      function fillFromEmployee() {{
+        var opt = emp.options[emp.selectedIndex];
+        if (!opt) return;
+        basic.value = opt.dataset.salary || '0';
+        otRate.value = opt.dataset.ot || '0';
+      }}
+
+      function render(d) {{
+        who.textContent = d.employee_name + ' · ' + d.staff_id;
+        var rows = '';
+        rows += line('Earned basic',
+                     d.worked + ' of ' + d.scheduled + ' duty units at ' +
+                     taka(d.per_day_salary) + ' each',
+                     taka(d.earned_basic_salary));
+        if (d.paid_leave > 0) rows += line('Includes paid leave', d.paid_leave + ' units', '', 'muted');
+        if (d.absent > 0) rows += line('Absent', d.absent + ' units not earned',
+                                       '−' + taka(d.absent_deduction), 'muted');
+        if (d.overtime_amount > 0)
+          rows += line('Overtime', d.overtime_hours + 'h at ' + taka(d.overtime_rate) + '/h',
+                       '+' + taka(d.overtime_amount), 'plus');
+        if (d.bonus > 0) rows += line('Bonus', '', '+' + taka(d.bonus), 'plus');
+        rows += line('Gross', '', taka(d.gross_salary), 'subtotal');
+        if (d.late_deduction > 0)
+          rows += line('Late arrival', Math.round(d.late_minutes) + ' minutes this month',
+                       '−' + taka(d.late_deduction), 'minus');
+        if (d.advance > 0) rows += line('Advance already taken', '', '−' + taka(d.advance), 'minus');
+        if (d.fine > 0) rows += line('Fine', '', '−' + taka(d.fine), 'minus');
+        if (d.deduction > 0) rows += line('Other deduction', '', '−' + taka(d.deduction), 'minus');
+        if (d.total_deduction > 0) rows += line('Total deductions', '', '−' + taka(d.total_deduction), 'subtotal');
+        rows += line('Net payable', '', taka(d.net_salary), 'total');
+        if (d.incomplete_dates && d.incomplete_dates.length)
+          rows += '<div class="calc-warn">' + d.incomplete_dates.length +
+                  ' day(s) have a check-in but no check-out. Fix those before finalizing.</div>';
+        body.innerHTML = rows;
+      }}
+
+      function refresh() {{
+        if (!emp.value) return;
+        var mine = ++seq;
+        var q = new URLSearchParams({{
+          employee_id: emp.value,
+          month: (document.getElementById('pf-month').value || '{month}'),
+          fixed_salary: val('pf-basic'),
+          overtime_rate: val('pf-otrate'),
+          overtime_hours: val('pf-othours'),
+          bonus: val('pf-bonus'),
+          advance: val('pf-advance'),
+          fine: val('pf-fine'),
+          deduction: val('pf-other')
+        }});
+        fetch('/payroll/preview?' + q.toString(), {{ credentials: 'same-origin' }})
+          .then(function (r) {{ if (!r.ok) throw new Error(r.status); return r.json(); }})
+          .then(function (d) {{ if (mine === seq) render(d); }})
+          .catch(function () {{
+            if (mine === seq)
+              body.innerHTML = '<div class="calc-warn">Could not calculate right now. ' +
+                               'The figures will still be correct when you save.</div>';
+          }});
+      }}
+
+      function debounced() {{ clearTimeout(timer); timer = setTimeout(refresh, 280); }}
+
+      emp.addEventListener('change', function () {{ fillFromEmployee(); refresh(); }});
+      document.getElementById('pf-month').addEventListener('change', refresh);
+      ['pf-basic','pf-otrate','pf-othours','pf-bonus','pf-advance','pf-fine','pf-other']
+        .forEach(function (id) {{
+          var el = document.getElementById(id);
+          if (el) el.addEventListener('input', debounced);
+        }});
+
+      // Block submit when an adjustment has no reason, instead of letting the
+      // server bounce the officer back and lose everything they typed.
+      form.addEventListener('submit', function (e) {{
+        var needs = val('pf-bonus') + val('pf-advance') + val('pf-fine') + val('pf-other');
+        var reason = document.getElementById('pf-reason');
+        if (needs > 0 && !reason.value.trim()) {{
+          e.preventDefault();
+          reason.focus();
+          reason.setAttribute('aria-invalid', 'true');
+        }}
+      }});
+
+      fillFromEmployee();
+      refresh();
+    }})();
+    </script>
+    """
+    return layout("Payroll", body, request, "payroll")
+
 
 @app.post("/payroll")
 def save_payroll(request: Request, employee_id: int=Form(...), salary_month: str=Form(...), fixed_salary: float=Form(...), overtime_hours: float=Form(0), overtime_rate: float=Form(0), overtime_mode: str=Form("manual"), bonus: float=Form(0), advance: float=Form(0), fine: float=Form(0), deduction: float=Form(0), adjustment_reason: str=Form(""), note: str=Form(""), return_month: str=Form(""), profile_employee_id: int=Form(0)):
@@ -1785,14 +2214,6 @@ def payroll_reopen(request: Request, payroll_id: int, month: str=Form(...), reas
         c.execute("UPDATE payroll_records SET payment_status='draft',reopened_at=CURRENT_TIMESTAMP,reopen_reason=?,locked_at=NULL,locked_by=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",(reason.strip(),payroll_id)); _log_payroll_change(c,payroll_id,"reopened",actor,reason.strip())
     audit(request,"reopen","payroll",str(payroll_id),reason.strip())
     return RedirectResponse(f"/payroll?month={month}",303)
-
-@app.get("/payroll/preview")
-def payroll_preview(request: Request, employee_id: int, month: str):
-    require_permission(request,"payroll_view")
-    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
-    with get_db() as c: employee=c.execute("SELECT fixed_salary,default_overtime_rate FROM employees WHERE id=? AND is_active",(employee_id,)).fetchone()
-    if not employee: raise HTTPException(404,"Employee not found")
-    return _calculate_employee_payroll(employee_id,month,float(employee['fixed_salary'] or 0),float(employee['default_overtime_rate'] or 0))
 
 @app.post("/payroll/bulk-prepare")
 def payroll_bulk_prepare(request: Request, month: str=Form(...)):
