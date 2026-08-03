@@ -1,10 +1,11 @@
-## v9.22 Hybrid WhatsApp Location
+## v9.22.1 Hybrid WhatsApp Location
 
 - Check In/Out প্রথমে WhatsApp-এর native `Send Location` button ব্যবহার করে।
 - ৪৫ সেকেন্ডের মধ্যে native location না এলে bot database state যাচাই করে শুধু তখনই secure browser fallback link পাঠায়।
 - Native location আগে গ্রহণ হলে fallback link পাঠানো হয় না।
 - Browser page Location permission চায়, office radius যাচাই করে এবং সফল হলে WhatsApp-এ selfie নির্দেশনা পাঠায়।
 - Signed link employee ও Check In/Out action-এর সঙ্গে বাঁধা, ১০ মিনিটে expire হয় এবং location গ্রহণের পর পুনরায় ব্যবহার করা যায় না।
+- Employee profile-এর `01...`, `+8801...` এবং Meta webhook-এর `8801...` format একই নম্বর হিসেবে match হয়; ভুল expired message আর দেখায় না।
 - Optional: `PUBLIC_BASE_URL=https://smart-attendance.pro` canonical link host নির্ধারণ করে এবং `LOCATION_FALLBACK_DELAY_SECONDS=45` fallback delay নিয়ন্ত্রণ করে।
 
 ## v9.18.2 Self-Service Account Settings

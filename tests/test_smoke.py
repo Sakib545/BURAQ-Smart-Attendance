@@ -24,7 +24,7 @@ def test_liveness_and_readiness():
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "9.22.0"
+        assert health.json()["version"] == "9.22.1"
         assert health.headers.get("x-request-id")
 
         ready = client.get("/ready")
@@ -61,7 +61,7 @@ def test_location_fallback_accepts_once_and_closes_pending_state():
             db.execute(
                 """INSERT INTO employees(staff_id,name,phone,whatsapp_phone,shift,registration_status)
                    VALUES(?,?,?,?,?,?)""",
-                ("TEST-LOCATION-001", "Location Test", "8801700000001", "8801700000001", "morning", "approved"),
+                ("TEST-LOCATION-001", "Location Test", "01700000001", "01700000001", "morning", "approved"),
             )
             employee = db.execute(
                 "SELECT id FROM employees WHERE staff_id=?", ("TEST-LOCATION-001",)

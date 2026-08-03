@@ -32,11 +32,11 @@ from app.reminders import reminder_worker
 from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
-from app.services import approve_pending_attendance, receive_location, state
+from app.services import approve_pending_attendance, phones_match, receive_location, state
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.22.0"
+APP_VERSION = "9.22.1"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -2115,16 +2115,27 @@ def _location_link_employee(token: str):
     if not employee or not employee["attendance_phone"]:
         raise ValueError("Employee is unavailable")
     expected_state = f"{payload['action']}_location"
-    current = state(employee["attendance_phone"])
-    if not current or current["state"] != expected_state:
+    # Meta sends the sender as 8801..., while an employee profile is commonly
+    # stored as 01... or +8801.... Find the actual conversation key instead of
+    # assuming both strings use the same country-code format.
+    with get_db() as c:
+        pending_states = c.execute(
+            "SELECT phone,state FROM conversation_states WHERE state=?",
+            (expected_state,),
+        ).fetchall()
+    current_phone = next(
+        (row["phone"] for row in pending_states if phones_match(row["phone"], employee["attendance_phone"])),
+        "",
+    )
+    if not current_phone:
         raise ValueError("Location is no longer pending")
-    return payload, employee
+    return payload, employee, current_phone
 
 
 @app.get("/attendance/location", response_class=HTMLResponse)
 def attendance_location_page(t: str = Query(..., min_length=20)):
     try:
-        _, employee = _location_link_employee(t)
+        _, employee, _ = _location_link_employee(t)
         employee_name = escape(str(employee["name"]))
         token_json = json.dumps(t)
         content = f"""
@@ -2221,10 +2232,10 @@ async def attendance_location_submit(request: Request):
         longitude = float(data.get("longitude"))
         if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
             raise ValueError("Invalid coordinates")
-        _, employee = _location_link_employee(token)
-        response = receive_location(employee["attendance_phone"], latitude, longitude)
+        _, employee, conversation_phone = _location_link_employee(token)
+        response = receive_location(conversation_phone, latitude, longitude)
         accepted = response.startswith("✅ Location গ্রহণ")
-        await send_text(employee["attendance_phone"], response)
+        await send_text(conversation_phone, response)
         if not accepted:
             return JSONResponse({"ok": False, "message": response.replace("\n", " ")}, status_code=422)
         return {"ok": True, "message": "Location accepted"}
