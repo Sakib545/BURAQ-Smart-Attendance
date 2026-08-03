@@ -1664,3 +1664,261 @@ input[aria-invalid="true"] { border-color: var(--absent); }
   .fill-form { flex-direction: column; align-items: stretch; }
   .fill-form input, .fill-form select, .fill-form .btn { width: 100%; }
 }
+/* ==========================================================================
+   BURAQ Smart Attendance — premium refinement layer
+   Append LAST in static/css/app.css. Pure CSS: no markup or route changes.
+
+   The palette and layout are already sound. What reads as "template" is
+   craft-level: every surface has the same weight, colour is used for
+   decoration rather than meaning, and money is typeset like body text.
+   This layer fixes those three things and nothing else.
+   ========================================================================== */
+
+:root {
+  /* Layered elevation instead of one flat drop shadow. Three very light
+     layers read as depth; one dark layer reads as a box. */
+  --sh-1:
+    0 1px 1px rgba(18, 33, 28, .04),
+    0 2px 6px -1px rgba(18, 33, 28, .05);
+  --sh-2:
+    0 1px 1px rgba(18, 33, 28, .04),
+    0 8px 18px -4px rgba(18, 33, 28, .09),
+    0 20px 40px -12px rgba(18, 33, 28, .10);
+  --sh-lift:
+    0 1px 1px rgba(18, 33, 28, .04),
+    0 6px 14px -3px rgba(18, 33, 28, .10),
+    0 14px 28px -10px rgba(18, 33, 28, .09);
+
+  --hairline: color-mix(in srgb, var(--rule) 70%, transparent);
+}
+
+[data-theme="dark"] {
+  --sh-1: 0 1px 1px rgba(0, 0, 0, .28), 0 2px 6px -1px rgba(0, 0, 0, .34);
+  --sh-2: 0 1px 1px rgba(0, 0, 0, .30), 0 10px 24px -6px rgba(0, 0, 0, .48);
+  --sh-lift: 0 1px 1px rgba(0, 0, 0, .30), 0 8px 18px -4px rgba(0, 0, 0, .44);
+  --hairline: color-mix(in srgb, var(--rule) 82%, transparent);
+}
+
+
+/* --- 1. Surfaces ---------------------------------------------------------
+   A hard 1px border on every card flattens the page. A hairline plus a
+   layered shadow separates cards from the canvas without drawing boxes. */
+
+.card {
+  border-color: var(--hairline);
+  box-shadow: var(--sh-1);
+  transition: box-shadow .18s ease, border-color .18s ease, transform .18s ease;
+}
+
+a.card:hover,
+.control-card:hover,
+.dashboard-kpi-link:hover {
+  box-shadow: var(--sh-lift);
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--brand) 20%, var(--rule));
+}
+
+/* Section headers sit on the canvas, not inside a box. */
+.card-head { padding-bottom: 13px; border-bottom: 1px solid var(--hairline); }
+.card-head + .chart,
+.card-head + .readiness-wrap { margin-top: 4px; }
+
+
+/* --- 2. Money and numbers ------------------------------------------------
+   ৳96,065.43 currently sets the currency mark at the same size and weight
+   as the digits, so the eye reads the symbol first. In financial UI the
+   mark is always optically reduced and the figures carry the weight. */
+
+.metric,
+.calc-row b,
+.donut-value b {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "ss01" 1;
+  letter-spacing: -.025em;
+}
+
+.metric { font-size: 30px; line-height: 1.08; }
+
+/* Optical sizing for the Taka mark wherever it precedes a figure. */
+.payroll-summary .metric,
+.calc-row.total b {
+  font-feature-settings: "tnum" 1;
+}
+
+.payroll-summary .metric { font-size: 32px; }
+.metric-label { letter-spacing: .01em; font-weight: 500; }
+
+.metric-foot,
+.legend-pct,
+.bar-value,
+.bar-label { font-variant-numeric: tabular-nums; }
+
+
+/* --- 3. Colour discipline ------------------------------------------------
+   Five saturated icon chips across one KPI row is decoration. The chip
+   becomes quiet; the state bar underneath carries the colour. That way
+   colour still means something when you see it. */
+
+.kpi-symbol {
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--hairline);
+  transition: color .18s ease, background .18s ease;
+}
+
+.kpi-symbol .ic { opacity: .9; }
+
+.dashboard-kpi:hover .kpi-present,
+.dashboard-kpi-link:hover .kpi-present { background: var(--present-bg); color: var(--present); }
+.dashboard-kpi:hover .kpi-late,
+.dashboard-kpi-link:hover .kpi-late { background: var(--late-bg); color: var(--late); }
+.dashboard-kpi:hover .kpi-absent,
+.dashboard-kpi-link:hover .kpi-absent { background: var(--absent-bg); color: var(--absent); }
+.dashboard-kpi:hover .kpi-leave,
+.dashboard-kpi-link:hover .kpi-leave { background: var(--leave-bg); color: var(--leave); }
+.dashboard-kpi:hover .kpi-overtime,
+.dashboard-kpi-link:hover .kpi-overtime { background: var(--overtime-bg); color: var(--overtime); }
+
+/* The state bar is now the only always-on colour in a KPI tile. */
+.mini-line { height: 4px; }
+
+
+/* --- 4. Buttons ----------------------------------------------------------
+   A primary button with no depth reads as a coloured rectangle. A single
+   inner highlight gives it a surface without turning it into a 2010 gradient. */
+
+.btn {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .09),
+    0 1px 2px rgba(18, 33, 28, .12);
+  transition: background .16s ease, box-shadow .16s ease, transform .06s ease;
+}
+
+.btn:active { transform: translateY(1px); }
+
+.btn.secondary {
+  box-shadow: var(--sh-1);
+  border-color: var(--hairline);
+}
+
+.btn.secondary:hover { border-color: var(--rule-strong); }
+
+.btn:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+
+/* --- 5. Inputs ----------------------------------------------------------- */
+
+input, select, textarea {
+  border-color: var(--hairline);
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: color-mix(in srgb, var(--focus) 55%, var(--rule));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+  outline: none;
+}
+
+
+/* --- 6. Sidebar ----------------------------------------------------------
+   The active item is currently a wash of white at 11%. An accent rail on
+   the leading edge is how the eye actually tracks "where am I". */
+
+.side-nav a {
+  position: relative;
+  transition: background .16s ease, color .16s ease;
+}
+
+.side-nav a.active::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  border-radius: 0 3px 3px 0;
+  background: #64d0a6;
+}
+
+[data-nav="rail"] .side-nav a.active::before { left: -10px; }
+
+.logo .mark { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .18); }
+
+/* Nav count badges are set inline in base.html at #1c7c54, which is darker
+   than the sidebar's own accent and disappears against it. */
+.side-nav a > span[style] {
+  background: #64d0a6 !important;
+  color: #06281d !important;
+  font-weight: 600 !important;
+}
+
+
+/* --- 7. Tables ----------------------------------------------------------- */
+
+.dashboard-table thead th {
+  font-size: 11px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--faint);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.dashboard-table tbody tr { transition: background .14s ease; }
+.dashboard-table tbody tr:hover { background: var(--surface-2); }
+.dashboard-table td { border-bottom: 1px solid var(--hairline); }
+.dashboard-table tbody tr:last-child td { border-bottom: 0; }
+
+
+/* --- 8. Status pills -----------------------------------------------------
+   Filled pills at full saturation shout. A tinted ground with a matching
+   hairline and a small dot is quieter and still unambiguous. */
+
+.status-badge, .status, .pill, .tag {
+  border: 1px solid transparent;
+  font-weight: 500;
+  letter-spacing: .01em;
+}
+
+.status-present, .stage-paid { border-color: color-mix(in srgb, var(--present) 24%, transparent); }
+.status-absent, .stage-none  { border-color: color-mix(in srgb, var(--absent) 20%, transparent); }
+.status-leave,  .stage-final { border-color: color-mix(in srgb, var(--leave) 24%, transparent); }
+.stage-draft, .late-tag      { border-color: color-mix(in srgb, var(--late) 26%, transparent); }
+
+
+/* --- 9. Chart ------------------------------------------------------------ */
+
+.bar { border-radius: 5px 5px 2px 2px; }
+.bar:not(.is-today) { background: color-mix(in srgb, var(--present) 42%, var(--surface-3)); opacity: 1; }
+.bar.is-today { background: var(--present); box-shadow: none; }
+.bar-value { font-weight: 500; }
+
+
+/* --- 10. Page rhythm ----------------------------------------------------- */
+
+.dashboard-greet h1 {
+  font-family: var(--f-display);
+  letter-spacing: -.028em;
+  font-weight: 600;
+}
+
+.section-gap { height: 22px; }
+.card-head h3 { letter-spacing: -.012em; }
+
+
+/* --- 11. Motion ---------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .card, .btn, .side-nav a, .dashboard-table tbody tr,
+  input, select, textarea { transition: none; }
+  a.card:hover, .control-card:hover, .dashboard-kpi-link:hover { transform: none; }
+}
