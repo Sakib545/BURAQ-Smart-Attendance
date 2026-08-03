@@ -1215,3 +1215,219 @@ tbody tr:last-child td { border-bottom: 0; }
   body { background: #fff; color: #000; font-size: 11pt; }
   .sticky-head thead th { position: static; }
 }
+/* ==========================================================================
+   BURAQ Smart Attendance — Dashboard v10.0 stylesheet patch
+   Append this to the END of static/css/app.css. It only adds or overrides
+   dashboard rules, so every other page is untouched.
+   ========================================================================== */
+
+/* --- 0. Missing token -----------------------------------------------------
+   `.review-photo` and a few other rules reference var(--r-md), which was
+   never defined, so those corners silently rendered square. Define it. */
+:root { --r-md: 10px; }
+
+
+/* --- 1. Header ----------------------------------------------------------- */
+
+.dashboard-greet h1 { font-size: 26px; margin: 0 0 8px; letter-spacing: -.015em; }
+
+.dashboard-date {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.dashboard-date .status { margin: 0; }
+
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--present);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--present) 55%, transparent);
+  animation: dash-pulse 2.4s ease-out infinite;
+}
+
+@keyframes dash-pulse {
+  70%  { box-shadow: 0 0 0 7px color-mix(in srgb, var(--present) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--present) 0%, transparent); }
+}
+
+.dashboard-search-form { display: flex; gap: 8px; align-items: center; margin: 0; }
+.dashboard-search { width: 280px; margin: 0; }
+
+
+/* --- 2. KPI tiles --------------------------------------------------------
+   Old grid was a hard `repeat(3, 1fr)`, so 5 or 7 tiles left a ragged,
+   half-empty last row. auto-fit keeps every row full at any tile count. */
+
+.dashboard-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(228px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-kpi {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.dashboard-kpi .metric-foot { margin-top: auto; padding-top: 10px; }
+.kpi-text { min-width: 0; }
+.dashboard-kpi .metric { font-variant-numeric: tabular-nums; line-height: 1.15; }
+
+.dashboard-kpi-link { color: inherit; text-decoration: none; }
+.dashboard-kpi-link:hover { border-color: color-mix(in srgb, var(--brand) 28%, var(--rule)); }
+
+.kpi-go {
+  position: absolute;
+  top: 16px;
+  right: 14px;
+  width: 7px;
+  height: 7px;
+  border-top: 1.6px solid var(--faint);
+  border-right: 1.6px solid var(--faint);
+  transform: rotate(45deg);
+}
+
+.dashboard-kpi-link:hover .kpi-go { border-color: var(--brand); }
+
+/* Semantic tones. The old markup reused the same glyph for Present and
+   Absent and the same one for Late and Overtime, so four tiles carried two
+   icons between them. These names map tone to meaning instead of colour. */
+.kpi-present  { background: var(--present-bg);  color: var(--present); }
+.kpi-late     { background: var(--late-bg);     color: var(--late); }
+.kpi-absent   { background: var(--absent-bg);   color: var(--absent); }
+.kpi-leave    { background: var(--leave-bg);    color: var(--leave); }
+.kpi-overtime { background: var(--overtime-bg); color: var(--overtime); }
+
+/* Bars used hard-coded hex values (#10b981, #f97316, #ef476f, #8b5cf6) that
+   ignored the palette and did not adapt in dark mode. Tokens now. */
+.mini-line { transition: none; }
+.mini-line span { transition: width .5s cubic-bezier(.4, 0, .2, 1); }
+.mini-line.is-empty { opacity: 0; }
+.mini-present  { background: var(--present); }
+.mini-late     { background: var(--late); }
+.mini-absent   { background: var(--absent); }
+.mini-leave    { background: var(--leave); }
+.mini-overtime { background: var(--overtime); }
+
+
+/* --- 3. Card heads ------------------------------------------------------- */
+
+.card-head { align-items: flex-start; }
+.card-head h3 { margin: 0 0 3px; }
+.card-head .sub { font-size: 12px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 14px; }
+.section-head h3 { margin: 0; }
+
+
+/* --- 4. 7-day chart ------------------------------------------------------
+   Bar heights were computed in Python as raw pixels against a 145px guess,
+   so they drifted out of the 190px box on small screens. Percentages let
+   the browser do the scaling and the bars always fit. */
+
+.chart {
+  height: 200px;
+  align-items: stretch;
+  padding: 24px 0 0;
+}
+
+.bar-wrap { height: 100%; justify-content: flex-end; gap: 0; }
+
+.bar {
+  flex: 0 0 auto;
+  min-height: 6px;
+  max-height: calc(100% - 22px);
+  opacity: .78;
+  transition: opacity .14s ease;
+}
+
+.bar:hover { opacity: 1; }
+.bar.is-today { opacity: 1; box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--brand) 60%, transparent); }
+.bar-label { height: 22px; display: flex; align-items: center; }
+.bar.is-today + .bar-label { color: var(--ink); font-weight: 500; }
+
+
+/* --- 5. Workforce donut --------------------------------------------------
+   The old donut plotted attendance-rate twice: once as the ring and once in
+   the legend, while the legend listed four values that did not sum to the
+   ring. This version is a true three-segment breakdown of the same total. */
+
+.donut-stack {
+  background: conic-gradient(
+    var(--present) 0            calc(var(--stop1, 0) * 1%),
+    var(--leave)   calc(var(--stop1, 0) * 1%) calc(var(--stop2, 0) * 1%),
+    var(--absent)  calc(var(--stop2, 0) * 1%) 100%
+  );
+}
+
+.legend-row { gap: 9px; }
+.legend-row b { margin-left: auto; }
+.legend-pct { font-size: 11.5px; color: var(--faint); min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+.legend-present { background: var(--present); }
+.legend-leave   { background: var(--leave); }
+.legend-absent  { background: var(--absent); }
+
+
+/* --- 6. Live attendance table -------------------------------------------- */
+
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.dashboard-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.late-tag { background: var(--late-bg); color: var(--late); margin-left: 6px; }
+
+.empty-cell {
+  padding: 22px 4px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+
+/* --- 7. Pending work ----------------------------------------------------- */
+
+.pending-item.is-clear { opacity: .62; }
+.pending-item.is-clear:hover { opacity: 1; }
+.chip-zero { background: var(--surface-3); color: var(--faint); }
+
+.pending-go {
+  width: 7px;
+  height: 7px;
+  border-top: 1.6px solid var(--faint);
+  border-right: 1.6px solid var(--faint);
+  transform: rotate(45deg);
+  flex: 0 0 auto;
+}
+
+
+/* --- 8. Quick actions ---------------------------------------------------- */
+
+.dashboard-quick { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+
+
+/* --- 9. Accessibility + responsive --------------------------------------- */
+
+.dashboard-kpi-link:focus-visible,
+.pending-item:focus-visible,
+.dashboard-quick a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (max-width: 620px) {
+  .dashboard-kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .dashboard-search-form { width: 100%; }
+  .dashboard-search { width: 100%; }
+  .chart { height: 168px; }
+  .legend-pct { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot { animation: none; }
+  .mini-line span { transition: none; }
+}

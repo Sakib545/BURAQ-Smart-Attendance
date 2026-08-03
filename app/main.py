@@ -479,93 +479,364 @@ def update_my_account_password(request: Request, current_password: str = Form(..
             audit(request, "password_change", "user_account", str(account_id), "HR/Admin password changed", db=c)
     return RedirectResponse("/my-account?saved=password", 303)
 
+# --- small helpers: keep the route body readable and kill divide-by-zero ---
+
+def _pct(part, whole) -> float:
+    """Percentage clamped to 0-100. Returns 0 when the denominator is 0."""
+    if not whole:
+        return 0.0
+    return round(min(100.0, max(0.0, float(part) / float(whole) * 100)), 1)
+
+
+def _hours_minutes(minutes) -> str:
+    """480 -> '8h 00m'.  45 -> '45m'.  Never shows raw minute counts > 59."""
+    total = max(0, int(minutes or 0))
+    if total < 60:
+        return f"{total}m"
+    return f"{total // 60}h {total % 60:02d}m"
+
+
+def _kpi_card(icon_name: str, tone: str, label: str, value: str,
+              foot: str, pct: float | None = None, href: str = "") -> str:
+    """One KPI tile. Every tile has a bar track, so the cards never
+    end up different heights when one of them has no percentage."""
+    width = 0.0 if pct is None else pct
+    empty = " is-empty" if pct is None else ""
+    inner = (
+        f"<div class='kpi-row'>"
+        f"<span class='kpi-symbol kpi-{tone}'>{ui.icon(icon_name)}</span>"
+        f"<div class='kpi-text'>"
+        f"<div class='metric-label'>{escape(label)}</div>"
+        f"<div class='metric'>{escape(value)}</div>"
+        f"</div></div>"
+        f"<div class='metric-foot'>{foot}</div>"
+        f"<div class='mini-line{empty}'><span class='mini-{tone}' style='width:{width}%'></span></div>"
+    )
+    if href:
+        return (f"<a class='card dashboard-kpi dashboard-kpi-link' href='{href}'>"
+                f"{inner}<span class='kpi-go' aria-hidden='true'></span></a>")
+    return f"<div class='card dashboard-kpi'>{inner}</div>"
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
     require_permission(request, "dashboard_view")
     now = datetime.now(ZoneInfo(settings.timezone))
     today = now.date().isoformat()
+    month = now.strftime("%Y-%m")
     week_days = [(now.date() - timedelta(days=i)) for i in range(6, -1, -1)]
+
     with get_db() as c:
-        workforce = c.execute("SELECT COUNT(*) employees,SUM(CASE WHEN registration_status='approved' THEN 1 ELSE 0 END) registered FROM employees").fetchone()
-        employees = int(workforce["employees"] or 0); registered = int(workforce["registered"] or 0)
-        pending_registration = int(c.execute("SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"] or 0)
-        daily = c.execute("""SELECT SUM(CASE WHEN check_in IS NOT NULL THEN 1 ELSE 0 END) present,
-            SUM(CASE WHEN check_out IS NOT NULL THEN 1 ELSE 0 END) checked_out,
-            SUM(CASE WHEN late_minutes>0 THEN 1 ELSE 0 END) late,
-            COALESCE(SUM(overtime_minutes),0) overtime FROM attendance WHERE work_date=?""",(today,)).fetchone()
-        present=int(daily["present"] or 0); checked_out=int(daily["checked_out"] or 0); late=int(daily["late"] or 0); overtime=int(daily["overtime"] or 0)
-        on_leave = int(c.execute("SELECT COUNT(DISTINCT employee_id) c FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?", (today,today)).fetchone()["c"] or 0)
-        pending_leave = int(c.execute("SELECT COUNT(*) c FROM leave_requests WHERE status='pending'").fetchone()["c"] or 0)
-        pending_correction = int(c.execute("SELECT COUNT(*) c FROM attendance_corrections WHERE status='pending'").fetchone()["c"] or 0)
-        pending_selfie = int(c.execute("SELECT COUNT(*) c FROM attendance_fingerprints WHERE review_status='pending'").fetchone()["c"] or 0)
-        week_counts=c.execute("SELECT work_date,COUNT(*) c FROM attendance WHERE work_date>=? AND work_date<=? AND check_in IS NOT NULL GROUP BY work_date",(week_days[0].isoformat(),week_days[-1].isoformat())).fetchall()
-        live_rows=c.execute("""SELECT e.name,e.staff_id,a.check_in,a.check_out,
-            CASE WHEN l.employee_id IS NOT NULL THEN 'leave' WHEN a.check_in IS NOT NULL THEN 'present' ELSE 'absent' END status
+        # ------------------------------------------------------------------
+        # ONE query for the whole workforce picture.
+        #
+        # Everything is scoped to active employees and uses the *same*
+        # leave-beats-attendance precedence as the Live Attendance table
+        # below, so present + on_leave + absent == total, always.
+        # ------------------------------------------------------------------
+        snap = c.execute("""
+            SELECT COUNT(*) total,
+                   SUM(CASE WHEN e.registration_status='approved' THEN 1 ELSE 0 END) registered,
+                   SUM(CASE WHEN l.employee_id IS NOT NULL THEN 1 ELSE 0 END) on_leave,
+                   SUM(CASE WHEN l.employee_id IS NULL AND a.check_in IS NOT NULL THEN 1 ELSE 0 END) present,
+                   SUM(CASE WHEN l.employee_id IS NULL AND a.check_in IS NULL THEN 1 ELSE 0 END) absent,
+                   SUM(CASE WHEN a.check_out IS NOT NULL THEN 1 ELSE 0 END) checked_out,
+                   SUM(CASE WHEN a.late_minutes>0 THEN 1 ELSE 0 END) late,
+                   COALESCE(SUM(a.overtime_minutes),0) overtime
             FROM employees e
             LEFT JOIN attendance a ON a.employee_id=e.id AND a.work_date=?
-            LEFT JOIN (SELECT DISTINCT employee_id FROM leave_requests WHERE status='approved' AND start_date<=? AND end_date>=?) l ON l.employee_id=e.id
-            WHERE e.is_active ORDER BY CASE WHEN a.check_in IS NOT NULL THEN 0 ELSE 1 END,e.name LIMIT 5""",(today,today,today)).fetchall()
+            LEFT JOIN (SELECT DISTINCT employee_id FROM leave_requests
+                       WHERE status='approved' AND start_date<=? AND end_date>=?) l
+                   ON l.employee_id=e.id
+            WHERE e.is_active
+        """, (today, today, today)).fetchone()
+
+        employees = int(snap["total"] or 0)
+        registered = int(snap["registered"] or 0)
+        present = int(snap["present"] or 0)
+        absent = int(snap["absent"] or 0)
+        on_leave = int(snap["on_leave"] or 0)
+        checked_out = int(snap["checked_out"] or 0)
+        late = int(snap["late"] or 0)
+        overtime = int(snap["overtime"] or 0)
+
+        pending_registration = int(c.execute(
+            "SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"] or 0)
+        pending_leave = int(c.execute(
+            "SELECT COUNT(*) c FROM leave_requests WHERE status='pending'").fetchone()["c"] or 0)
+        pending_correction = int(c.execute(
+            "SELECT COUNT(*) c FROM attendance_corrections WHERE status='pending'").fetchone()["c"] or 0)
+        pending_selfie = int(c.execute(
+            "SELECT COUNT(*) c FROM attendance_fingerprints WHERE review_status='pending'").fetchone()["c"] or 0)
+
+        # Real payroll figure instead of the hard-coded 0.
+        payroll_pending = int(c.execute("""
+            SELECT COUNT(*) c FROM employees e
+            WHERE e.is_active AND NOT EXISTS (
+                SELECT 1 FROM payroll_records p
+                WHERE p.employee_id=e.id AND p.salary_month=?)
+        """, (month,)).fetchone()["c"] or 0)
+
+        # 7-day trend, active employees only, matching the KPI scope.
+        week_counts = c.execute("""
+            SELECT a.work_date, COUNT(*) c
+            FROM attendance a JOIN employees e ON e.id=a.employee_id
+            WHERE a.work_date>=? AND a.work_date<=? AND a.check_in IS NOT NULL AND e.is_active
+            GROUP BY a.work_date
+        """, (week_days[0].isoformat(), week_days[-1].isoformat())).fetchall()
+
+        live_rows = c.execute("""
+            SELECT e.name, e.staff_id, a.check_in, a.check_out, a.late_minutes,
+                   CASE WHEN l.employee_id IS NOT NULL THEN 'leave'
+                        WHEN a.check_in IS NOT NULL THEN 'present'
+                        ELSE 'absent' END status
+            FROM employees e
+            LEFT JOIN attendance a ON a.employee_id=e.id AND a.work_date=?
+            LEFT JOIN (SELECT DISTINCT employee_id FROM leave_requests
+                       WHERE status='approved' AND start_date<=? AND end_date>=?) l
+                   ON l.employee_id=e.id
+            WHERE e.is_active
+            ORDER BY CASE WHEN a.check_in IS NOT NULL THEN 0 ELSE 1 END,
+                     a.check_in DESC, e.name
+            LIMIT 6
+        """, (today, today, today)).fetchall()
+
     face_today = face_security_summary(now)
-    absent=max(employees-present-on_leave,0)
-    attendance_rate=round((present/employees*100),1) if employees else 0
-    by_day={str(r['work_date']):int(r['c']) for r in week_counts}; weekly=[(d,by_day.get(d.isoformat(),0)) for d in week_days]
-    max_week=max([v for _,v in weekly]+[1])
-    chart=''.join(f"<div class='bar-wrap'><div class='bar' style='height:{max(8,int(v/max_week*145))}px'><span class='bar-value'>{v}</span></div><div class='bar-label'>{d.strftime('%a')}</div></div>" for d,v in weekly)
-    live_table=''
+
+    present_pct = _pct(present, employees)
+    absent_pct = _pct(absent, employees)
+    leave_pct = _pct(on_leave, employees)
+    late_pct = _pct(late, employees)
+    unregistered = max(employees - registered, 0)
+
+    # --- 7-day bar chart -------------------------------------------------
+    by_day = {str(r["work_date"]): int(r["c"]) for r in week_counts}
+    weekly = [(d, by_day.get(d.isoformat(), 0)) for d in week_days]
+    max_week = max([v for _, v in weekly] + [1])
+    week_total = sum(v for _, v in weekly)
+    week_avg = round(week_total / 7, 1)
+    chart = "".join(
+        f"<div class='bar-wrap'>"
+        f"<div class='bar{' is-today' if d == now.date() else ''}' "
+        f"style='height:{max(4.0, v / max_week * 100):.1f}%' "
+        f"title='{d.strftime('%d %b')}: {v} present'>"
+        f"<span class='bar-value'>{v}</span></div>"
+        f"<div class='bar-label'>{d.strftime('%a')}</div></div>"
+        for d, v in weekly
+    )
+
+    # --- live attendance rows --------------------------------------------
+    rows = []
     for r in live_rows:
-        initials=''.join(x[0] for x in str(r['name']).split()[:2]).upper() or 'E'
-        status=str(r['status']); cls={'present':'status-present','leave':'status-leave'}.get(status,'status-absent')
-        live_table += f"<tr><td><div class='kpi-row'><span class='avatar'>{escape(initials)}</span><span><b>{escape(str(r['name']))}</b><div class='sub'>{escape(str(r['staff_id']))}</div></span></div></td><td><span class='status-badge {cls}'>{status.title()}</span></td><td>{escape(format_time_12h(r['check_in']) or '—')}</td><td>{escape(format_time_12h(r['check_out']) or '—')}</td></tr>"
-    readiness_pct=attendance_rate
-    pending_total=pending_registration+pending_leave+pending_correction+pending_selfie
-    payroll_pending=0
-    name=escape(str(request.session.get('user_name','Admin')))
-    role=escape(str(request.session.get('role','super_admin')).replace('_',' ').title())
-    quick=[]
-    if has_permission(request,'employees_add'): quick.append(("/employees","♙","Add Employee"))
-    if has_permission(request,'attendance_edit'): quick.append(("/attendance","◎","Mark Attendance"))
-    if has_permission(request,'duty_view'): quick.append(("/duty","▣","Assign Duty"))
-    if has_permission(request,'leave_view'): quick.append(("/hr-operations","☂","Add Leave"))
-    if has_permission(request,'payroll_view'): quick.append(("/payroll", ui.icon("banknote"), "Run Payroll"))
-    if has_permission(request,'reports_view'): quick.append(("/reports","◔","View Reports"))
-    if has_permission(request,'approvals_view'): quick.append(("/duplicates?review=pending", ui.icon("search"), "Selfie Review"))
-    if has_permission(request,'face_security_view'): quick.append(("/face-security", ui.icon("shield"), "Face Security"))
-    quick_html=''.join(f"<a href='{url}'><span class='qicon'>{icon}</span><span>{label}</span></a>" for url,icon,label in quick)
-    pending_items=[]
-    if has_permission(request,'leave_view'): pending_items.append(("/hr-operations","♧","Pending Leaves",f"{pending_leave} leave requests",pending_leave))
-    if has_permission(request,'approvals_view'): pending_items.append(("/pending","▣","Pending Approvals",f"{pending_registration} approvals",pending_registration))
-    if has_permission(request,'attendance_edit'): pending_items.append(("/hr-operations","▤","Attendance Corrections",f"{pending_correction} correction requests",pending_correction))
-    if has_permission(request,'approvals_view'): pending_items.append(("/duplicates?review=pending", ui.icon("search"), "Selfie Review", f"{pending_selfie} selfie waiting for a decision", pending_selfie))
-    if has_permission(request,'payroll_view'): pending_items.append(("/payroll", ui.icon("banknote"), "Payroll Not Prepared",now.strftime('%B %Y'),payroll_pending))
-    pending_html=''.join(f"<a class='pending-item' href='{url}'><span class='pending-icon'>{icon}</span><span><b>{title}</b><div class='sub'>{subtitle}</div></span><span class='count-chip'>{count}</span><span>›</span></a>" for url,icon,title,subtitle,count in pending_items)
-    body=f"""
+        status = str(r["status"])
+        cls = {"present": "status-present", "leave": "status-leave"}.get(status, "status-absent")
+        late_min = int(r["late_minutes"] or 0)
+        note = f" <span class='tag late-tag'>{late_min}m late</span>" if status == "present" and late_min > 0 else ""
+        rows.append(
+            f"<tr><td><div class='kpi-row'>"
+            f"<span class='avatar'>{escape(ui.initials_of(r['name']))}</span>"
+            f"<span><b>{escape(str(r['name']))}</b>"
+            f"<div class='sub'>{escape(str(r['staff_id']))}</div></span></div></td>"
+            f"<td><span class='status-badge {cls}'>{escape(status.title())}</span>{note}</td>"
+            f"<td class='num'>{escape(format_time_12h(r['check_in']) or '—')}</td>"
+            f"<td class='num'>{escape(format_time_12h(r['check_out']) or '—')}</td></tr>"
+        )
+    live_table = "".join(rows) or (
+        "<tr><td colspan='4'><div class='empty-cell'>No active employees yet. "
+        "Add your first employee to start tracking attendance.</div></td></tr>")
+
+    # --- header ----------------------------------------------------------
+    name = escape(str(request.session.get("user_name", "Admin")))
+    role = escape(str(request.session.get("role", "super_admin")).replace("_", " ").title())
+    search_html = ""
+    if has_permission(request, "employees_view"):
+        search_html = (
+            "<form class='dashboard-search-form' action='/employees' method='get' role='search'>"
+            "<input class='dashboard-search' type='search' name='q' "
+            "placeholder='Search employee by name, ID or phone' aria-label='Search employees'>"
+            "<button class='btn secondary' type='submit'>Search</button></form>")
+
+    # --- KPI tiles -------------------------------------------------------
+    kpis = [
+        _kpi_card("check", "present", "Present today", str(present),
+                  f"{present_pct}% of {employees} active staff", present_pct),
+        _kpi_card("clock", "late", "Late arrivals", str(late),
+                  ("All on time today" if late == 0 else f"{late_pct}% of staff — already counted in Present"),
+                  late_pct),
+        _kpi_card("x", "absent", "Absent", str(absent),
+                  f"{absent_pct}% of {employees} active staff", absent_pct),
+        _kpi_card("calendar-minus", "leave", "On approved leave", str(on_leave),
+                  f"{leave_pct}% of {employees} active staff", leave_pct),
+        _kpi_card("trending-up", "overtime", "Overtime today", _hours_minutes(overtime),
+                  f"{checked_out} of {present} have checked out",
+                  _pct(checked_out, present) if present else 0.0),
+    ]
+    if has_permission(request, "approvals_view"):
+        kpis.append(_kpi_card(
+            "user", "late", "Selfies awaiting review", str(pending_selfie),
+            "Open the review queue" if pending_selfie else "Queue is clear",
+            _pct(pending_selfie, max(present, 1)), "/duplicates?review=pending"))
+    if has_permission(request, "face_security_view"):
+        spoof = int(face_today["spoof"] or 0)
+        checks = int(face_today["checks"] or 0)
+        kpis.append(_kpi_card(
+            "shield", "absent", "Spoof attempts today", str(spoof),
+            f"{checks} face checks · {face_today['rejected']} rejected",
+            _pct(spoof, max(checks, 1)), "/face-security"))
+    kpi_html = "".join(kpis)
+
+    # --- workforce breakdown donut (segments actually add up to 100%) ----
+    seg_present = _pct(present, employees)
+    seg_leave = _pct(on_leave, employees)
+    stop_1 = seg_present
+    stop_2 = min(100.0, seg_present + seg_leave)
+    legend = [
+        ("present", "Present", present, present_pct),
+        ("leave", "On leave", on_leave, leave_pct),
+        ("absent", "Absent", absent, absent_pct),
+    ]
+    legend_html = "".join(
+        f"<div class='legend-row'><span class='legend-dot legend-{key}'></span>"
+        f"<span>{label}</span><b>{value}</b><span class='legend-pct'>{pc}%</span></div>"
+        for key, label, value, pc in legend)
+    reg_note = (f"{registered} of {employees} face-registered"
+                + (f" · {unregistered} still pending enrolment" if unregistered else " · all enrolled"))
+
+    # --- pending work ----------------------------------------------------
+    pending_items = []
+    if has_permission(request, "approvals_view"):
+        pending_items.append(("/pending", "user", "Employee registrations",
+                              "New staff waiting for approval", pending_registration))
+        pending_items.append(("/duplicates?review=pending", "search", "Selfie review",
+                              "Check-in photos flagged for a decision", pending_selfie))
+    if has_permission(request, "leave_view"):
+        pending_items.append(("/hr-operations", "calendar-minus", "Leave requests",
+                              "Submitted and not yet decided", pending_leave))
+    if has_permission(request, "attendance_edit"):
+        pending_items.append(("/hr-operations", "file-text", "Attendance corrections",
+                              "Staff-reported time fixes", pending_correction))
+    if has_permission(request, "payroll_view"):
+        pending_items.append(("/payroll", "banknote", f"Payroll — {now.strftime('%B %Y')}",
+                              "Employees with no payslip prepared yet", payroll_pending))
+
+    pending_total = sum(count for *_rest, count in pending_items)
+    pending_html = "".join(
+        f"<a class='pending-item{'' if count else ' is-clear'}' href='{url}'>"
+        f"<span class='pending-icon'>{ui.icon(ic)}</span>"
+        f"<span><b>{escape(title)}</b><div class='sub'>{escape(sub)}</div></span>"
+        f"<span class='count-chip{'' if count else ' chip-zero'}'>{count}</span>"
+        f"<span class='pending-go' aria-hidden='true'></span></a>"
+        for url, ic, title, sub, count in pending_items)
+    if not pending_html:
+        pending_html = "<div class='empty-cell'>Nothing is waiting on you right now.</div>"
+
+    # --- quick actions ---------------------------------------------------
+    quick = []
+    if has_permission(request, "employees_add"):
+        quick.append(("/employees", "plus", "Add employee"))
+    if has_permission(request, "attendance_edit"):
+        quick.append(("/attendance", "clock", "Mark attendance"))
+    if has_permission(request, "duty_view"):
+        quick.append(("/duty", "calendar-check", "Assign duty"))
+    if has_permission(request, "leave_view"):
+        quick.append(("/hr-operations", "calendar-minus", "Record leave"))
+    if has_permission(request, "payroll_view"):
+        quick.append(("/payroll", "banknote", "Run payroll"))
+    if has_permission(request, "reports_view"):
+        quick.append(("/reports", "chart-bar", "View reports"))
+    quick_html = "".join(
+        f"<a href='{url}'><span class='qicon'>{ui.icon(ic)}</span><span>{escape(label)}</span></a>"
+        for url, ic, label in quick)
+    quick_block = (f"<div class='section-head'><h3>Quick actions</h3></div>"
+                   f"<div class='dashboard-quick'>{quick_html}</div>") if quick_html else ""
+
+    report_btn = ("<a class='btn secondary' href='/reports'>Full report</a>"
+                  if has_permission(request, "reports_view") else "")
+    all_btn = ("<a class='btn secondary' href='/employees'>All employees</a>"
+               if has_permission(request, "employees_view") else "")
+
+    body = f"""
     <div class='dashboard-head'>
-      <div><h1>Welcome back,<br>{name} <span class='status ok' style='vertical-align:middle'>{role}</span></h1><div class='dashboard-date'>▣ &nbsp;{now.strftime('%A')} • {now.strftime('%d %B %Y')}</div></div>
-      <div class='dashboard-tools'><input class='dashboard-search' type='search' placeholder='Search anything...' aria-label='Search'><button class='btn secondary'>⌕</button></div>
+      <div class='dashboard-greet'>
+        <h1>Good {'morning' if now.hour < 12 else 'afternoon' if now.hour < 17 else 'evening'}, {name}</h1>
+        <div class='dashboard-date'>
+          <span class='status ok'>{role}</span>
+          <span>{now.strftime('%A, %d %B %Y')}</span>
+          <span class='live-dot' title='Refreshes automatically'></span>
+          <span class='sub' id='dash-updated'>Updated {now.strftime('%I:%M %p')}</span>
+        </div>
+      </div>
+      <div class='dashboard-tools'>{search_html}</div>
     </div>
-    <div class='dashboard-kpis'>
-      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-green'>♙</span><div><div class='metric-label'>Present Today</div><div class='metric'>{present}</div></div></div><div class='metric-foot'>{attendance_rate}% of workforce</div><div class='mini-line'><span style='width:{attendance_rate}%;background:#10b981'></span></div></div>
-      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-orange'>◷</span><div><div class='metric-label'>Late Today</div><div class='metric'>{late}</div></div></div><div class='metric-foot'>{'Need attention' if late else 'No late attendance'}</div><div class='mini-line'><span style='width:{min(100,late*10)}%;background:#f97316'></span></div></div>
-      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-red'>♙</span><div><div class='metric-label'>Absent</div><div class='metric'>{absent}</div></div></div><div class='metric-foot'>{round(absent/employees*100,1) if employees else 0}% of workforce</div><div class='mini-line'><span style='width:{round(absent/employees*100,1) if employees else 0}%;background:#ef476f'></span></div></div>
-      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-purple'>☂</span><div><div class='metric-label'>On Leave</div><div class='metric'>{on_leave}</div></div></div><div class='metric-foot'>{round(on_leave/employees*100,1) if employees else 0}% of workforce</div><div class='mini-line'><span style='width:{round(on_leave/employees*100,1) if employees else 0}%;background:#8b5cf6'></span></div></div>
-      <div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol kpi-blue'>◷</span><div><div class='metric-label'>Overtime (Today)</div><div class='metric'>{overtime}m</div></div></div><div class='metric-foot'>{checked_out} check-outs</div></div>
-      {f"<a class='card dashboard-kpi dashboard-kpi-link' href='/duplicates?review=pending'><div class='kpi-row'><span class='kpi-symbol kpi-orange'>{ui.icon('user')}</span><div><div class='metric-label'>Pending Selfies</div><div class='metric'>{pending_selfie}</div></div></div><div class='metric-foot'>Waiting for HR/Admin approval</div><div class='mini-line'><span style='width:{min(100,pending_selfie*12)}%;background:#f97316'></span></div></a>" if has_permission(request,'approvals_view') else ''}
-      {f"<a class='card dashboard-kpi dashboard-kpi-link' href='/face-security'><div class='kpi-row'><span class='kpi-symbol kpi-red'>{ui.icon('shield')}</span><div><div class='metric-label'>Spoof Attempts Today</div><div class='metric'>{face_today['spoof']}</div></div></div><div class='metric-foot'>{face_today['checks']} face checks · {face_today['rejected']} rejected</div><div class='mini-line'><span style='width:{min(100,face_today['spoof']*20)}%;background:#ef476f'></span></div></a>" if has_permission(request,'face_security_view') else ''}
-    </div>
+
+    <div class='dashboard-kpis'>{kpi_html}</div>
+
     <div class='section-gap'></div>
     <div class='dashboard-main-grid'>
-      <div class='card dashboard-panel'><div class='card-head'><h3>7-Day Attendance Trend</h3>{"<a class='btn secondary' href='/reports'>View Report</a>" if has_permission(request,'reports_view') else ''}</div><div class='chart'>{chart}</div></div>
-      <div class='card dashboard-panel'><div class='card-head'><h3>Workforce Readiness</h3></div><div class='readiness-wrap'><div class='donut' style='--pct:{readiness_pct}'><div class='donut-value'><b>{round(readiness_pct)}%</b><span class='sub'>Today</span></div></div><div class='legend-list'><div class='legend-row'><span class='legend-dot' style='background:#dfe6e3'></span><span>Registered</span><b>{registered}</b></div><div class='legend-row'><span class='legend-dot' style='background:#079669'></span><span>Present</span><b>{present}</b></div><div class='legend-row'><span class='legend-dot' style='background:#ef476f'></span><span>Absent</span><b>{absent}</b></div><div class='legend-row'><span class='legend-dot' style='background:#8b5cf6'></span><span>On Leave</span><b>{on_leave}</b></div></div></div><div class='sub'>{present} of {employees} employees present today</div></div>
+      <div class='card dashboard-panel'>
+        <div class='card-head'>
+          <div><h3>Attendance, last 7 days</h3>
+          <div class='sub'>{week_total} check-ins · {week_avg} per day on average</div></div>
+          {report_btn}
+        </div>
+        <div class='chart'>{chart}</div>
+      </div>
+      <div class='card dashboard-panel'>
+        <div class='card-head'><div><h3>Where the team is today</h3>
+        <div class='sub'>{reg_note}</div></div></div>
+        <div class='readiness-wrap'>
+          <div class='donut donut-stack' style='--stop1:{stop_1};--stop2:{stop_2}'
+               role='img' aria-label='{present} present, {on_leave} on leave, {absent} absent'>
+            <div class='donut-value'><b>{round(present_pct)}%</b><span class='sub'>Present</span></div>
+          </div>
+          <div class='legend-list'>{legend_html}</div>
+        </div>
+      </div>
     </div>
+
     <div class='section-gap'></div>
     <div class='dashboard-main-grid'>
-      <div class='card'><div class='card-head'><h3>Live Attendance</h3><a class='btn secondary' href='/employees'>View All</a></div><div style='overflow:auto'><table class='dashboard-table'><thead><tr><th>Employee</th><th>Status</th><th>Check In</th><th>Check Out</th></tr></thead><tbody>{live_table or '<tr><td colspan=4>No employee records.</td></tr>'}</tbody></table></div></div>
-      <div class='card'><div class='card-head'><h3>Pending Work</h3><span class='pill'>{pending_total}</span></div><div class='pending-list'>{pending_html or '<div class="sub">No pending work.</div>'}</div></div>
+      <div class='card'>
+        <div class='card-head'><div><h3>Live attendance</h3>
+        <div class='sub'>Latest check-ins first</div></div>{all_btn}</div>
+        <div class='table-scroll'>
+          <table class='dashboard-table'>
+            <thead><tr><th>Employee</th><th>Status</th><th class='num'>Check in</th><th class='num'>Check out</th></tr></thead>
+            <tbody>{live_table}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class='card'>
+        <div class='card-head'><div><h3>Needs your attention</h3>
+        <div class='sub'>Items waiting for a decision</div></div>
+        <span class='pill{'' if pending_total else ' chip-zero'}'>{pending_total}</span></div>
+        <div class='pending-list'>{pending_html}</div>
+      </div>
     </div>
+
     <div class='section-gap'></div>
-    <h3 style='margin:2px 0 14px'>Quick Actions</h3><div class='dashboard-quick'>{quick_html}</div>
+    {quick_block}
+
+    <script>
+    (function () {{
+      // Refresh every 60s, but only while the tab is visible and the user
+      // is not typing in the search box. Prevents the page reloading under
+      // someone's hands, which the old dashboard never handled at all.
+      var WAIT = 60000, timer = null;
+      function armed() {{
+        var a = document.activeElement;
+        return document.visibilityState === 'visible' &&
+               !(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT'));
+      }}
+      function tick() {{ if (armed()) {{ location.reload(); }} else {{ schedule(); }} }}
+      function schedule() {{ clearTimeout(timer); timer = setTimeout(tick, WAIT); }}
+      document.addEventListener('visibilitychange', schedule);
+      schedule();
+    }})();
+    </script>
     """
     return layout("Dashboard", body, request, "dashboard")
+
 
 @app.get("/attendance", response_class=HTMLResponse)
 def attendance_center(request: Request):
