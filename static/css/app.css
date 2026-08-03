@@ -1629,3 +1629,38 @@ input[aria-invalid="true"] { border-color: var(--absent); }
   .month-picker input { flex: 1; width: auto; }
   .pay-form { right: auto; left: 0; width: 220px; }
 }
+
+
+/* ==========================================================================
+   Discard + missing-duty additions
+   ========================================================================== */
+
+.warn-card {
+  border-color: color-mix(in srgb, var(--late) 35%, var(--rule));
+  background: var(--late-bg);
+  padding: 14px 16px;
+}
+
+.warn-card b { color: var(--late); }
+.warn-card .sub { margin-top: 5px; line-height: 1.55; }
+
+.btn.danger { background: var(--absent); border-color: var(--absent); color: #fff; }
+.btn.danger:hover { background: color-mix(in srgb, var(--absent) 85%, #000); }
+
+.pay-form .hint { margin: 0 0 10px; }
+
+.missing-picker { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin: 0; }
+.missing-picker > div { flex: 1; min-width: 180px; }
+.missing-picker label { margin-top: 0; }
+.missing-picker select, .missing-picker input { margin: 4px 0 0; width: 100%; }
+
+.fill-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0; }
+.fill-form input, .fill-form select { margin: 0; width: auto; min-width: 108px; }
+
+.fill-all { margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--rule); }
+.fill-all .hint { margin-top: 8px; max-width: 60ch; }
+
+@media (max-width: 620px) {
+  .fill-form { flex-direction: column; align-items: stretch; }
+  .fill-form input, .fill-form select, .fill-form .btn { width: 100%; }
+}

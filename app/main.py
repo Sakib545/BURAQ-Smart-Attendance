@@ -844,6 +844,7 @@ def attendance_center(request: Request):
     cards=[]
     if has_permission(request,"reports_view"): cards.append(("📊","Attendance Reports","Daily records, late, overtime and employee attendance history.","/reports"))
     if has_permission(request,"duty_view"): cards.append(("🗓","Duty Schedule","Regular, custom, Friday and night duty with reminder status.","/duty-schedules"))
+    if has_permission(request,"attendance_edit"): cards.append(("✅","Missing Duty Days","Scheduled duty with no attendance at all. Record a past day directly.","/attendance/missing"))
     if has_permission(request,"leave_view"): cards.append(("🏖","Leave & Corrections","Leave approval, attendance correction, shifts and departments.","/hr-operations"))
     if has_permission(request,"reports_export"): cards.append(("📥","Reports & Export","Download filtered attendance as Excel, PDF or CSV.","/reports"))
     if not cards: raise HTTPException(403,"Permission denied")
@@ -1744,7 +1745,8 @@ def payroll_preview(request: Request, employee_id: int, month: str,
 
 
 @app.get("/payroll", response_class=HTMLResponse)
-def payroll_page(request: Request, month: str = "", saved: str = "", error: str = ""):
+def payroll_page(request: Request, month: str = "", saved: str = "", error: str = "",
+                 made: int = 0, skipped: int = 0):
     require_permission(request, "payroll_view")
     current = datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m")
     month = month or current
@@ -1778,10 +1780,29 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
                      if r["payment_status"] == "paid")
     outstanding = net_total - paid_total
 
+    # Employees who have no basic salary on record. Preparing a payslip for
+    # them can only ever produce 0.00, which is what makes a bulk prepare
+    # look broken.
+    no_salary = [r for r in all_rows if float(r["fixed_salary"] or 0) <= 0]
+
     # ---------------- notice ----------------
-    if saved:
+    if saved == "discard":
+        notices = (f"<div class='notice notice-ok'>Discarded {made} draft payslip"
+                   f"{'' if made == 1 else 's'}. Finalized and paid payslips were "
+                   f"left untouched.</div>" if made else
+                   "<div class='notice notice-ok'>Draft payslip discarded.</div>")
+    elif saved == "bulk":
+        notices = f"<div class='notice notice-ok'>Prepared {made} payslip{'' if made == 1 else 's'}."
+        if skipped:
+            notices += (f" Skipped {skipped} employee{'' if skipped == 1 else 's'} with no basic "
+                        f"salary on record — set their salary first, then prepare again.")
+        notices += "</div>"
+    elif saved:
         notices = ("<div class='notice notice-ok'>Payslip saved as a draft. "
                    "Check the figures below, then finalize it to lock.</div>")
+    elif error == "confirm":
+        notices = ("<div class='notice notice-bad'>Nothing was discarded. You must type "
+                   "DISCARD to confirm.</div>")
     elif error == "reason":
         notices = ("<div class='notice notice-bad'>A reason is required whenever you "
                    "add a bonus, advance, fine or other deduction.</div>")
@@ -1806,6 +1827,16 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
            f"<input type='hidden' name='month' value='{month}'>"
            f"<button class='btn'>Prepare the remaining {len(missing)}</button></form>"
            if can_manage and missing else "")
+        + (f"<details class='pay-details'><summary class='btn secondary'>Discard {counts['draft']} draft"
+           f"{'' if counts['draft'] == 1 else 's'}</summary>"
+           f"<form method='post' action='/payroll/bulk-discard' class='pay-form'>"
+           f"<input type='hidden' name='month' value='{month}'>"
+           f"<div class='hint'>This deletes every draft payslip for {month_label}. "
+           f"Finalized and paid payslips are not touched. It cannot be undone.</div>"
+           f"<label>Type DISCARD to confirm</label>"
+           f"<input name='confirm' placeholder='DISCARD' required>"
+           f"<button class='btn danger'>Discard drafts</button></form></details>"
+           if can_manage and counts["draft"] else "")
         + "</div>"
         f"<div class='stage-bar' role='img' aria-label='"
         f"{counts['paid']} paid, {counts['finalized']} finalized, "
@@ -1943,6 +1974,10 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
                     f"<input type='hidden' name='month' value='{month}'>"
                     f"<input type='hidden' name='status' value='finalized'>"
                     f"<button class='btn small'>Finalize</button></form>")
+                bits.append(
+                    f"<form method='post' action='/payroll/{r['id']}/discard'>"
+                    f"<input type='hidden' name='month' value='{month}'>"
+                    f"<button class='btn small secondary' title='Delete this draft payslip'>Discard</button></form>")
             if can_manage and stage == "finalized":
                 bits.append(
                     f"<details class='pay-details'><summary class='btn small'>Mark as paid</summary>"
@@ -1994,6 +2029,17 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
     if is_super:
         export_buttons += "<a class='btn secondary' href='/settings/payroll-backup'>Backup</a>"
 
+    salary_warning = ""
+    if no_salary:
+        names = ", ".join(escape(str(r["name"])) for r in no_salary[:6])
+        more = f" and {len(no_salary) - 6} more" if len(no_salary) > 6 else ""
+        salary_warning = (
+            f"<div class='card warn-card'><b>{len(no_salary)} employee"
+            f"{'' if len(no_salary) == 1 else 's'} have no basic salary on record.</b>"
+            f"<div class='sub'>{names}{more}. Their payslips can only come out as ৳0.00. "
+            f"Set a monthly basic salary on each employee first — either in the form below "
+            f"or from their profile page.</div></div><div class='section-gap'></div>")
+
     body = f"""
     {notices}
     <div class='dashboard-head'>
@@ -2011,6 +2057,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
       </div>
     </div>
 
+    {salary_warning}
     {progress}
     <div class='section-gap'></div>
     {summary}
@@ -2219,16 +2266,63 @@ def payroll_reopen(request: Request, payroll_id: int, month: str=Form(...), reas
 def payroll_bulk_prepare(request: Request, month: str=Form(...)):
     require_permission(request,"payroll_manage")
     if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
-    actor=_payroll_actor(request); prepared=0
+    actor=_payroll_actor(request); prepared=0; skipped=0
     with get_db() as c:
         employees=c.execute("SELECT id,fixed_salary,default_overtime_rate FROM employees WHERE is_active ORDER BY id").fetchall()
         for employee in employees:
             exists=c.execute("SELECT id FROM payroll_records WHERE employee_id=? AND salary_month=?",(employee['id'],month)).fetchone()
             if exists: continue
+            # A payslip for someone with no basic salary is always 0.00 and only
+            # creates clutter that then has to be cleaned up. Skip and report.
+            if float(employee['fixed_salary'] or 0) <= 0:
+                skipped += 1
+                continue
             calc=_calculate_employee_payroll(employee['id'],month,float(employee['fixed_salary'] or 0),float(employee['default_overtime_rate'] or 0))
             c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,created_by,updated_by,scheduled_duty_days,worked_duty_days,paid_leave_days,absent_days,absent_deduction,worked_duty_units,paid_leave_units,unpaid_leave_units,absent_duty_units,unpaid_leave_deduction,earned_basic_salary,late_minutes,late_deduction,payable_duty_minutes,advance_amount,fine_amount,gross_salary,total_deduction,overtime_mode,calculation_snapshot,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft')""",(employee['id'],month,calc['fixed_salary'],calc['overtime_hours'],calc['overtime_rate'],calc['overtime_amount'],0,0,calc['net_salary'],actor,actor,int(calc['scheduled']),int(calc['worked']),int(calc['paid_leave']),int(calc['absent']),calc['absent_deduction'],calc['worked'],calc['paid_leave'],calc['unpaid_leave'],calc['absent'],calc['unpaid_leave_deduction'],calc['earned_basic_salary'],int(calc['late_minutes']),calc['late_deduction'],int(calc['payable_duty_minutes']),0,0,calc['gross_salary'],calc['total_deduction'],'manual',json.dumps(calc,default=str))); prepared+=1
-    audit(request,"bulk_prepare","payroll",month,f"Prepared {prepared} employee payrolls")
-    return RedirectResponse(f"/payroll?month={month}&saved=bulk",303)
+    audit(request,"bulk_prepare","payroll",month,f"Prepared {prepared} employee payrolls, skipped {skipped} with no basic salary")
+    return RedirectResponse(f"/payroll?month={month}&saved=bulk&made={prepared}&skipped={skipped}",303)
+
+@app.post("/payroll/{payroll_id}/discard")
+def payroll_discard(request: Request, payroll_id: int, month: str=Form(...)):
+    """Delete a single DRAFT payslip.
+
+    Until now nothing in the application could remove a payroll_records row,
+    so a mistaken 'Prepare' was permanent. Only drafts can be discarded:
+    finalized rows must be reopened by a Super Admin first, and paid rows can
+    never be removed, which keeps the payment trail intact.
+    """
+    require_permission(request,"payroll_manage")
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    actor=_payroll_actor(request)
+    with get_db() as c:
+        row=c.execute("SELECT id,employee_id,salary_month,payment_status,net_salary FROM payroll_records WHERE id=?",(payroll_id,)).fetchone()
+        if not row: raise HTTPException(404,"Payroll not found")
+        if row['payment_status']!='draft':
+            raise HTTPException(409,"Only a draft payslip can be discarded. Reopen it first.")
+        c.execute("DELETE FROM payroll_change_logs WHERE payroll_id=?",(payroll_id,))
+        c.execute("DELETE FROM payroll_records WHERE id=?",(payroll_id,))
+    audit(request,"discard","payroll",str(payroll_id),f"Discarded draft payslip for {row['salary_month']} (net {float(row['net_salary'] or 0):.2f}) by {actor}")
+    return RedirectResponse(f"/payroll?month={month}&saved=discard",303)
+
+@app.post("/payroll/bulk-discard")
+def payroll_bulk_discard(request: Request, month: str=Form(...), confirm: str=Form("")):
+    """Undo a bulk prepare: delete every DRAFT payslip for the month.
+
+    Finalized and paid payslips are left untouched, so this can never wipe
+    out work that has already been committed or disbursed.
+    """
+    require_permission(request,"payroll_manage")
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    if confirm.strip().upper()!="DISCARD":
+        return RedirectResponse(f"/payroll?month={month}&error=confirm",303)
+    actor=_payroll_actor(request)
+    with get_db() as c:
+        rows=c.execute("SELECT id FROM payroll_records WHERE salary_month=? AND payment_status='draft'",(month,)).fetchall()
+        for row in rows:
+            c.execute("DELETE FROM payroll_change_logs WHERE payroll_id=?",(row['id'],))
+            c.execute("DELETE FROM payroll_records WHERE id=?",(row['id'],))
+    audit(request,"bulk_discard","payroll",month,f"Discarded {len(rows)} draft payslips by {actor}")
+    return RedirectResponse(f"/payroll?month={month}&saved=discard&made={len(rows)}",303)
 
 @app.post("/employees/{employee_id}/salary-master")
 def salary_master(request: Request, employee_id: int, fixed_salary: float=Form(...), overtime_rate: float=Form(0), return_month: str=Form("")):
@@ -2470,6 +2564,270 @@ def decide_leave(request: Request, request_id: int, action: str):
             while d<=end:
                 c.execute("INSERT INTO attendance(employee_id,work_date,status,source) VALUES(?,?,?,?) ON CONFLICT(employee_id,work_date) DO UPDATE SET status=excluded.status,source=excluded.source,updated_at=CURRENT_TIMESTAMP",(row['employee_id'],d.isoformat(),'leave','hr')); d+=timedelta(days=1)
     audit(request,status,"leave_request",str(request_id),""); return RedirectResponse("/hr-operations?saved=1",303)
+
+def _missing_duty_days(employee_id: int, month: str) -> list[dict]:
+    """Scheduled duty days in `month` that have no attendance row at all.
+
+    Deliberately excludes days that DO have a row but are incomplete (a
+    check-in with no check-out) — those already surface as incomplete_dates
+    in payroll and are a different fix.
+    """
+    first = datetime.strptime(month + "-01", "%Y-%m-%d").date()
+    next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    last = next_month - timedelta(days=1)
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    # Never offer to backfill a day that has not happened yet.
+    effective_last = min(last, today - timedelta(days=1))
+    if effective_last < first:
+        return []
+    with get_db() as c:
+        weekly = c.execute(
+            "SELECT * FROM duty_schedules WHERE employee_id=? AND is_active",
+            (employee_id,)).fetchall()
+        custom = c.execute(
+            "SELECT * FROM custom_duties WHERE employee_id=? AND duty_date>=? "
+            "AND duty_date<=? AND is_active",
+            (employee_id, first.isoformat(), effective_last.isoformat())).fetchall()
+        have = {str(r["work_date"]) for r in c.execute(
+            "SELECT work_date FROM attendance WHERE employee_id=? AND work_date>=? AND work_date<=?",
+            (employee_id, first.isoformat(), effective_last.isoformat())).fetchall()}
+        leaves = c.execute(
+            "SELECT start_date,end_date FROM leave_requests WHERE employee_id=? "
+            "AND status='approved' AND start_date<=? AND end_date>=?",
+            (employee_id, effective_last.isoformat(), first.isoformat())).fetchall()
+
+    on_leave = set()
+    for lv in leaves:
+        day = max(datetime.fromisoformat(str(lv["start_date"])).date(), first)
+        end = min(datetime.fromisoformat(str(lv["end_date"])).date(), effective_last)
+        while day <= end:
+            on_leave.add(day.isoformat())
+            day += timedelta(days=1)
+
+    weekly_by_day = {int(r["weekday"]): r for r in weekly}
+    custom_by_date = {str(r["duty_date"]): r for r in custom}
+
+    out = []
+    day = first
+    while day <= effective_last:
+        key = day.isoformat()
+        duty = custom_by_date.get(key) or weekly_by_day.get(day.weekday())
+        # Approved leave is not a missing day — it is accounted for already.
+        if duty and key not in have and key not in on_leave:
+            out.append({
+                "date": key,
+                "label": day.strftime("%a %d %b"),
+                "start": str(duty["start_time"]),
+                "end": str(duty["end_time"]),
+                "break_minutes": int(duty["break_minutes"] or 0),
+            })
+        day += timedelta(days=1)
+    return out
+
+
+def _month_payroll_locked(employee_id: int, month: str) -> bool:
+    with get_db() as c:
+        row = c.execute(
+            "SELECT payment_status FROM payroll_records WHERE employee_id=? AND salary_month=?",
+            (employee_id, month)).fetchone()
+    return bool(row and str(row["payment_status"]) in {"finalized", "paid"})
+
+
+@app.get("/attendance/missing", response_class=HTMLResponse)
+def missing_duty_page(request: Request, employee_id: int = 0, month: str = "",
+                      saved: str = "", error: str = "", made: int = 0):
+    require_permission(request, "attendance_edit")
+    current = datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m")
+    month = month or current
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(400, "Invalid month")
+    month_label = datetime.strptime(month, "%Y-%m").strftime("%B %Y")
+
+    with get_db() as c:
+        employees = c.execute(
+            "SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id").fetchall()
+    if not employees:
+        return layout("Missing duty", "<div class='card'><div class='empty-cell'>"
+                      "No active employees.</div></div>", request, "attendance")
+    if not employee_id:
+        employee_id = int(employees[0]["id"])
+    chosen = next((e for e in employees if int(e["id"]) == employee_id), None)
+    if not chosen:
+        raise HTTPException(404, "Employee not found")
+
+    days = _missing_duty_days(employee_id, month)
+    locked = _month_payroll_locked(employee_id, month)
+
+    if saved == "filled":
+        notice = (f"<div class='notice notice-ok'>Recorded {made} duty day"
+                  f"{'' if made == 1 else 's'}. Payroll for {month_label} will "
+                  f"pick this up straight away.</div>")
+    elif error == "locked":
+        notice = ("<div class='notice notice-bad'>This month's payslip is finalized or "
+                  "paid, so attendance cannot be changed. A Super Admin must reopen the "
+                  "payslip first.</div>")
+    elif error == "exists":
+        notice = ("<div class='notice notice-bad'>That day already has an attendance "
+                  "record. Use Attendance Correction to change it instead.</div>")
+    elif error == "time":
+        notice = ("<div class='notice notice-bad'>Check-out must be later than check-in, "
+                  "and both must be in HH:MM form.</div>")
+    elif error:
+        notice = "<div class='notice notice-bad'>That day could not be recorded.</div>"
+    else:
+        notice = ""
+
+    options = "".join(
+        f"<option value='{e['id']}'{' selected' if int(e['id']) == employee_id else ''}>"
+        f"{escape(str(e['staff_id']))} — {escape(str(e['name']))}</option>"
+        for e in employees)
+
+    if locked:
+        rows_html = ("<div class='empty-cell'>The payslip for this month is locked, "
+                     "so these days cannot be edited.</div>")
+    elif not days:
+        rows_html = (f"<div class='empty-cell'>No missing duty days in {month_label}. "
+                     f"Every scheduled duty either has attendance or approved leave.</div>")
+    else:
+        rows = []
+        for d in days:
+            rows.append(
+                f"<tr><td><b>{escape(d['label'])}</b>"
+                f"<div class='sub'>{escape(d['date'])}</div></td>"
+                f"<td class='sub'>Scheduled {escape(d['start'])} – {escape(d['end'])}"
+                + (f", {d['break_minutes']}m break" if d["break_minutes"] else "")
+                + "</td>"
+                f"<td><form method='post' action='/attendance/backfill' class='fill-form'>"
+                f"<input type='hidden' name='employee_id' value='{employee_id}'>"
+                f"<input type='hidden' name='month' value='{month}'>"
+                f"<input type='hidden' name='work_date' value='{d['date']}'>"
+                f"<input type='time' name='check_in' value='{escape(d['start'])}' "
+                f"aria-label='Check in for {escape(d['label'])}' required>"
+                f"<input type='time' name='check_out' value='{escape(d['end'])}' "
+                f"aria-label='Check out for {escape(d['label'])}' required>"
+                f"<select name='status' aria-label='Day type'>"
+                f"<option value='present'>Full day</option>"
+                f"<option value='half_day'>Half day</option></select>"
+                f"<button class='btn small'>Record</button></form></td></tr>")
+        rows_html = (
+            "<div class='table-scroll'><table class='dashboard-table'>"
+            "<thead><tr><th>Day</th><th>Duty</th><th>Record it</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>"
+            f"<form method='post' action='/attendance/backfill-all' class='fill-all'>"
+            f"<input type='hidden' name='employee_id' value='{employee_id}'>"
+            f"<input type='hidden' name='month' value='{month}'>"
+            f"<button class='btn secondary'>Record all {len(days)} at their scheduled times</button>"
+            f"<div class='hint'>Fills every day above using the duty start and end time. "
+            f"Late minutes come out as zero, so only use this when the staff actually "
+            f"worked their normal hours.</div></form>")
+
+    body = f"""
+    {notice}
+    <div class='dashboard-head'>
+      <div class='dashboard-greet'>
+        <h1>Missing duty days</h1>
+        <div class='dashboard-date'><span>Days with a scheduled duty but no attendance at all</span></div>
+      </div>
+    </div>
+    <div class='card' style='margin-bottom:14px'>
+      <form method='get' class='missing-picker'>
+        <div><label for='md-emp'>Employee</label>
+        <select id='md-emp' name='employee_id'>{options}</select></div>
+        <div><label for='md-month'>Month</label>
+        <input id='md-month' type='month' name='month' value='{month}'></div>
+        <button class='btn'>Show</button>
+      </form>
+    </div>
+    <div class='card'>
+      <div class='card-head'><div>
+        <h3>{escape(str(chosen['name']))} — {month_label}</h3>
+        <div class='sub'>{len(days)} day{'' if len(days) == 1 else 's'} missing. Recording a
+        day here applies immediately; it does not need a second approval.</div>
+      </div></div>
+      {rows_html}
+    </div>
+    """
+    return layout("Missing duty", body, request, "attendance")
+
+
+def _write_backfill(c, employee_id: int, work_date: str, check_in: str,
+                    check_out: str, status: str, actor: str) -> None:
+    """Insert one attendance row for a past duty day, with late minutes
+    measured against that day's scheduled start."""
+    start_dt = datetime.fromisoformat(f"{work_date}T{check_in}:00")
+    end_dt = datetime.fromisoformat(f"{work_date}T{check_out}:00")
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+    duty = c.execute(
+        "SELECT start_time FROM custom_duties WHERE employee_id=? AND duty_date=? AND is_active",
+        (employee_id, work_date)).fetchone()
+    if not duty:
+        weekday = datetime.fromisoformat(work_date).date().weekday()
+        duty = c.execute(
+            "SELECT start_time FROM duty_schedules WHERE employee_id=? AND weekday=? AND is_active",
+            (employee_id, weekday)).fetchone()
+    late = 0
+    if duty:
+        scheduled_start = datetime.fromisoformat(f"{work_date}T{str(duty['start_time'])}:00")
+        late = max(0, int((start_dt - scheduled_start).total_seconds() // 60))
+    c.execute(
+        "INSERT INTO attendance(employee_id,work_date,check_in,check_out,late_minutes,status,source) "
+        "VALUES(?,?,?,?,?,?,'hr_backfill')",
+        (employee_id, work_date, start_dt.isoformat(timespec="seconds"),
+         end_dt.isoformat(timespec="seconds"), late, status))
+
+
+@app.post("/attendance/backfill")
+def attendance_backfill(request: Request, employee_id: int = Form(...),
+                        work_date: str = Form(...), month: str = Form(...),
+                        check_in: str = Form(...), check_out: str = Form(...),
+                        status: str = Form("present")):
+    require_permission(request, "attendance_edit")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", work_date) or not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(400, "Invalid date")
+    if not re.fullmatch(r"\d{2}:\d{2}", check_in) or not re.fullmatch(r"\d{2}:\d{2}", check_out):
+        return RedirectResponse(f"/attendance/missing?employee_id={employee_id}&month={month}&error=time", 303)
+    if status not in {"present", "half_day"}:
+        raise HTTPException(400, "Invalid status")
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    if datetime.fromisoformat(work_date).date() >= today:
+        raise HTTPException(400, "Only past days can be recorded here")
+    if _month_payroll_locked(employee_id, month):
+        return RedirectResponse(f"/attendance/missing?employee_id={employee_id}&month={month}&error=locked", 303)
+    actor = str(request.session.get("user_name") or request.session.get("hr_id") or "Super Admin")
+    with get_db() as c:
+        exists = c.execute("SELECT id FROM attendance WHERE employee_id=? AND work_date=?",
+                           (employee_id, work_date)).fetchone()
+        if exists:
+            return RedirectResponse(f"/attendance/missing?employee_id={employee_id}&month={month}&error=exists", 303)
+        _write_backfill(c, employee_id, work_date, check_in, check_out, status, actor)
+    audit(request, "backfill", "attendance", f"{employee_id}:{work_date}",
+          f"Recorded past duty {check_in}-{check_out} ({status}) by {actor}")
+    return RedirectResponse(f"/attendance/missing?employee_id={employee_id}&month={month}&saved=filled&made=1", 303)
+
+
+@app.post("/attendance/backfill-all")
+def attendance_backfill_all(request: Request, employee_id: int = Form(...), month: str = Form(...)):
+    require_permission(request, "attendance_edit")
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(400, "Invalid month")
+    if _month_payroll_locked(employee_id, month):
+        return RedirectResponse(f"/attendance/missing?employee_id={employee_id}&month={month}&error=locked", 303)
+    days = _missing_duty_days(employee_id, month)
+    actor = str(request.session.get("user_name") or request.session.get("hr_id") or "Super Admin")
+    made = 0
+    with get_db() as c:
+        for d in days:
+            exists = c.execute("SELECT id FROM attendance WHERE employee_id=? AND work_date=?",
+                               (employee_id, d["date"])).fetchone()
+            if exists:
+                continue
+            _write_backfill(c, employee_id, d["date"], d["start"], d["end"], "present", actor)
+            made += 1
+    audit(request, "backfill_all", "attendance", f"{employee_id}:{month}",
+          f"Recorded {made} past duty days at scheduled times by {actor}")
+    return RedirectResponse(f"/attendance/missing?employee_id={employee_id}&month={month}&saved=filled&made={made}", 303)
+
 
 @app.post("/correction")
 def create_correction(request: Request, employee_id: int=Form(...), work_date: str=Form(...), check_in: str=Form(""), check_out: str=Form(""), reason: str=Form(...)):
