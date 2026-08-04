@@ -1,3 +1,11 @@
+## v9.23.0 Automatic Attendance Shift
+
+- Check-in সম্পন্ন না হলে Check-out Location বা Selfie flow শুরু হবে না।
+- সকাল/দুপুরের Check-in স্বয়ংক্রিয়ভাবে First Shift এবং 3:00 PM থেকে Second Shift হিসেবে সংরক্ষিত হবে।
+- `SECOND_SHIFT_FROM` Railway variable দিয়ে Second Shift cutoff পরিবর্তন করা যাবে (default `15:00`)।
+- Dashboard, WhatsApp report এবং attendance exports-এ attendance-এর আসল shift দেখা যাবে।
+- পুরোনো database-এ `attendance_shift` column নিরাপদ migration-এর মাধ্যমে নিজে থেকে যোগ হবে।
+
 ## v9.22.2 Dashboard Selfie Approval Fix
 
 - Selfie approval এখন attendance, evidence ও fingerprint status একই atomic database transaction-এ final করে।

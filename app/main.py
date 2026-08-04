@@ -36,7 +36,7 @@ from app.services import approve_pending_attendance, phones_match, receive_locat
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.22.2"
+APP_VERSION = "9.23.0"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -587,6 +587,7 @@ def dashboard(request: Request):
 
         live_rows = c.execute("""
             SELECT e.name, e.staff_id, a.check_in, a.check_out, a.late_minutes,
+                   a.attendance_shift,
                    CASE WHEN l.employee_id IS NOT NULL THEN 'leave'
                         WHEN a.check_in IS NOT NULL THEN 'present'
                         ELSE 'absent' END status
@@ -632,11 +633,14 @@ def dashboard(request: Request):
         cls = {"present": "status-present", "leave": "status-leave"}.get(status, "status-absent")
         late_min = int(r["late_minutes"] or 0)
         note = f" <span class='tag late-tag'>{late_min}m late</span>" if status == "present" and late_min > 0 else ""
+        shift_note = ""
+        if status == "present":
+            shift_note = "Second Shift" if r["attendance_shift"] == "second" else "First Shift"
         rows.append(
             f"<tr><td><div class='kpi-row'>"
             f"<span class='avatar'>{escape(ui.initials_of(r['name']))}</span>"
             f"<span><b>{escape(str(r['name']))}</b>"
-            f"<div class='sub'>{escape(str(r['staff_id']))}</div></span></div></td>"
+            f"<div class='sub'>{escape(str(r['staff_id']))}{' · ' + shift_note if shift_note else ''}</div></span></div></td>"
             f"<td><span class='status-badge {cls}'>{escape(status.title())}</span>{note}</td>"
             f"<td class='num'>{escape(format_time_12h(r['check_in']) or '—')}</td>"
             f"<td class='num'>{escape(format_time_12h(r['check_out']) or '—')}</td></tr>"
@@ -1472,7 +1476,7 @@ def reject_pending(request: Request, pending_id: int):
 @app.get("/export/attendance.csv")
 def export_attendance(request: Request):
     require_permission(request, "reports_export")
-    with get_db() as c: rows=c.execute("SELECT a.work_date,e.staff_id,e.name,e.department,e.shift,a.check_in,a.check_out,a.late_minutes,a.early_leave_minutes,a.overtime_minutes,a.status FROM attendance a JOIN employees e ON e.id=a.employee_id ORDER BY a.work_date DESC,e.staff_id").fetchall()
+    with get_db() as c: rows=c.execute("SELECT a.work_date,e.staff_id,e.name,e.department,CASE WHEN a.attendance_shift='second' THEN 'Second Shift' ELSE 'First Shift' END AS shift,a.check_in,a.check_out,a.late_minutes,a.early_leave_minutes,a.overtime_minutes,a.status FROM attendance a JOIN employees e ON e.id=a.employee_id ORDER BY a.work_date DESC,e.staff_id").fetchall()
     output=io.StringIO(); writer=csv.writer(output); writer.writerow(["Date","Staff ID","Name","Department","Shift","Check In","Check Out","Late Minutes","Early Leave Minutes","Overtime Minutes","Status"])
     for r in rows: writer.writerow(list(r.values()))
     data=output.getvalue().encode("utf-8-sig")
@@ -1590,7 +1594,7 @@ def _attendance_report_rows(start_date: str, end_date: str, status: str = "", de
         clauses.append("a.status=?"); params.append(status)
     if department:
         clauses.append("e.department=?"); params.append(department)
-    sql = "SELECT a.*,e.staff_id,e.name,e.department,e.shift FROM attendance a JOIN employees e ON e.id=a.employee_id WHERE " + " AND ".join(clauses) + " ORDER BY a.work_date DESC,e.staff_id"
+    sql = "SELECT a.*,e.staff_id,e.name,e.department,CASE WHEN a.attendance_shift='second' THEN 'Second Shift' ELSE 'First Shift' END AS shift FROM attendance a JOIN employees e ON e.id=a.employee_id WHERE " + " AND ".join(clauses) + " ORDER BY a.work_date DESC,e.staff_id"
     with get_db() as c:
         return c.execute(sql, params).fetchall()
 

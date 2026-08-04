@@ -61,6 +61,8 @@ class Settings:
     # Location is the primary attendance boundary for BURAQ. In simple mode
     # Face AI confirms identity without strict pose/passive-liveness gates.
     simple_face_mode: bool = os.getenv("SIMPLE_FACE_MODE", "true").strip().lower() in {"1","true","yes","on"}
+    # Check-ins at or after this local time are classified as Second Shift.
+    second_shift_from: str = os.getenv("SECOND_SHIFT_FROM", "15:00").strip()
 
     @property
     def is_postgres(self) -> bool:

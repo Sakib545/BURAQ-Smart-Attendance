@@ -316,7 +316,25 @@ def save_face_reference(employee, media_id, image_bytes):
 def shift_times(shift):
     return (time(16), time(22)) if (shift or "").lower() == "evening" else (time(8), time(16))
 
-def duty_window(employee, duty_date, db=None):
+def automatic_attendance_shift(moment):
+    """Classify an actual check-in using the configured local-time cutoff."""
+    try:
+        cutoff = time.fromisoformat(settings.second_shift_from)
+    except (TypeError, ValueError):
+        cutoff = time(15)
+    local_moment = _submitted_at_local(moment)
+    return "second" if local_moment.time().replace(tzinfo=None) >= cutoff else "first"
+
+
+def attendance_shift_label(value):
+    return "Second Shift" if (value or "").lower() == "second" else "First Shift"
+
+
+def _employee_shift_for_attendance(value):
+    return "evening" if (value or "").lower() == "second" else "morning"
+
+
+def duty_window(employee, duty_date, db=None, shift_override=None):
     date_text=duty_date.isoformat()
     def load(c):
         duty=c.execute("SELECT start_time,end_time FROM custom_duties WHERE employee_id=? AND duty_date=? AND is_active",(employee['id'],date_text)).fetchone()
@@ -329,35 +347,45 @@ def duty_window(employee, duty_date, db=None):
         duty=load(db)
     if duty:
         start=time.fromisoformat(duty['start_time']); end=time.fromisoformat(duty['end_time'])
-    else: start,end=shift_times(employee['shift'])
+    else: start,end=shift_times(shift_override or employee['shift'])
     start_dt=datetime.combine(duty_date,start,tzinfo=now_local().tzinfo); end_dt=datetime.combine(duty_date,end,tzinfo=now_local().tzinfo)
     if end_dt<=start_dt: end_dt+=timedelta(days=1)
     return start_dt,end_dt
 
 
 def check_in(employee):
-    current = now_local(); work_date = current.date().isoformat(); start_dt,_=duty_window(employee,current.date())
+    current = now_local(); work_date = current.date().isoformat()
+    attendance_shift = automatic_attendance_shift(current)
+    start_dt,_=duty_window(employee,current.date(),shift_override=_employee_shift_for_attendance(attendance_shift))
     late = max(0, int((current-start_dt).total_seconds() // 60))
     with get_db() as c:
         record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], work_date)).fetchone()
         if record and record["check_in"]: return f"ℹ️ আজ Check In করা হয়েছে: {datetime.fromisoformat(record['check_in']).strftime('%I:%M %p')}"
-        if record: c.execute("UPDATE attendance SET check_in=?,late_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (current.isoformat(timespec="seconds"), late, record["id"]))
-        else: c.execute("INSERT INTO attendance(employee_id,work_date,check_in,late_minutes) VALUES(?,?,?,?)", (employee["id"], work_date, current.isoformat(timespec="seconds"), late))
-    return f"✅ Check In সফল\nসময়: {current.strftime('%I:%M %p')}" + (f"\n⏰ Late: {late} মিনিট" if late else "\n🟢 On time")
+        if record: c.execute("UPDATE attendance SET check_in=?,attendance_shift=?,late_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (current.isoformat(timespec="seconds"), attendance_shift, late, record["id"]))
+        else: c.execute("INSERT INTO attendance(employee_id,work_date,check_in,attendance_shift,late_minutes) VALUES(?,?,?,?,?)", (employee["id"], work_date, current.isoformat(timespec="seconds"), attendance_shift, late))
+    return f"✅ Check In সফল\nসময়: {current.strftime('%I:%M %p')}\nShift: {attendance_shift_label(attendance_shift)}" + (f"\n⏰ Late: {late} মিনিট" if late else "\n🟢 On time")
 
 
-def check_out(employee):
-    current=now_local(); today=current.date(); yesterday=today-timedelta(days=1)
-    with get_db() as c:
-        today_record=c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?",(employee['id'],today.isoformat())).fetchone()
-        previous_record=c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?",(employee['id'],yesterday.isoformat())).fetchone()
+def _open_attendance(employee, current, db):
+    today=current.date(); yesterday=today-timedelta(days=1)
+    today_record=db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?",(employee['id'],today.isoformat())).fetchone()
+    previous_record=db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?",(employee['id'],yesterday.isoformat())).fetchone()
     record=today_record if today_record and today_record['check_in'] and not today_record['check_out'] else None
     duty_date=today
     if not record and previous_record and previous_record['check_in'] and not previous_record['check_out']:
-        prev_start,prev_end=duty_window(employee,yesterday)
-        if prev_end.date()>yesterday and current<=prev_end+timedelta(hours=12): record=previous_record; duty_date=yesterday
+        previous_shift = _employee_shift_for_attendance(previous_record['attendance_shift'])
+        _,prev_end=duty_window(employee,yesterday,db=db,shift_override=previous_shift)
+        if prev_end.date()>yesterday and current<=prev_end+timedelta(hours=12):
+            record=previous_record; duty_date=yesterday
+    return record, duty_date
+
+
+def check_out(employee):
+    current=now_local()
+    with get_db() as c:
+        record,duty_date=_open_attendance(employee,current,c)
     if not record: return "❌ আগে Check In করতে হবে।"
-    _,end_dt=duty_window(employee,duty_date)
+    _,end_dt=duty_window(employee,duty_date,shift_override=_employee_shift_for_attendance(record['attendance_shift']))
     early=max(0,int((end_dt-current).total_seconds()//60)); overtime=max(0,int((current-end_dt).total_seconds()//60))
     with get_db() as c:
         if record["check_out"]: return f"ℹ️ আজ Check Out করা হয়েছে: {datetime.fromisoformat(record['check_out']).strftime('%I:%M %p')}"
@@ -413,7 +441,11 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
 
         if action == "check_in":
             work_date = submitted.date().isoformat()
-            start_dt, _ = duty_window(item, submitted.date(), db=c)
+            attendance_shift = automatic_attendance_shift(submitted)
+            start_dt, _ = duty_window(
+                item, submitted.date(), db=c,
+                shift_override=_employee_shift_for_attendance(attendance_shift),
+            )
             late = max(0, int((submitted - start_dt).total_seconds() // 60))
             attendance = c.execute(
                 "SELECT * FROM attendance WHERE employee_id=? AND work_date=?",
@@ -422,13 +454,13 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
             if attendance and attendance["check_in"]:
                 result = f"Check-in already recorded at {datetime.fromisoformat(str(attendance['check_in'])).strftime('%I:%M %p')}"
             elif attendance:
-                c.execute("UPDATE attendance SET check_in=?,late_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                          (submitted_text, late, attendance["id"]))
-                result = f"Check-in approved at {submitted.strftime('%I:%M %p')}"
+                c.execute("UPDATE attendance SET check_in=?,attendance_shift=?,late_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                          (submitted_text, attendance_shift, late, attendance["id"]))
+                result = f"Check-in approved at {submitted.strftime('%I:%M %p')} · {attendance_shift_label(attendance_shift)}"
             else:
-                c.execute("INSERT INTO attendance(employee_id,work_date,check_in,late_minutes) VALUES(?,?,?,?)",
-                          (item["id"], work_date, submitted_text, late))
-                result = f"Check-in approved at {submitted.strftime('%I:%M %p')}"
+                c.execute("INSERT INTO attendance(employee_id,work_date,check_in,attendance_shift,late_minutes) VALUES(?,?,?,?,?)",
+                          (item["id"], work_date, submitted_text, attendance_shift, late))
+                result = f"Check-in approved at {submitted.strftime('%I:%M %p')} · {attendance_shift_label(attendance_shift)}"
             c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)",
                       (item["id"], action, item["fingerprint_latitude"], item["fingerprint_longitude"], item["fingerprint_distance"], item["fingerprint_media_id"], True))
             c.execute("UPDATE attendance_fingerprints SET review_status='approved',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP,attendance_applied=?,attendance_result=? WHERE id=? AND review_status='pending'",
@@ -445,7 +477,10 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
                     attendance = previous_record; duty_date = yesterday
             if not attendance:
                 raise ValueError("Check-out approve করার আগে employee-এর Check-in approve করুন।")
-            _, end_dt = duty_window(item, duty_date, db=c)
+            _, end_dt = duty_window(
+                item, duty_date, db=c,
+                shift_override=_employee_shift_for_attendance(attendance["attendance_shift"]),
+            )
             checked_in = _submitted_at_local(attendance["check_in"])
             worked = max(0, int((submitted - checked_in).total_seconds() // 60))
             early = max(0, int((end_dt - submitted).total_seconds() // 60))
@@ -472,7 +507,7 @@ def report(employee):
     with get_db() as c: rows = c.execute("SELECT * FROM attendance WHERE employee_id=? ORDER BY work_date DESC LIMIT 7", (employee["id"],)).fetchall()
     if not rows: return "ℹ️ কোনো attendance record নেই।"
     output = [f"📊 {employee['name']}-এর সর্বশেষ Attendance:"]
-    for row in rows: output.append(f"{row['work_date']} | In {format_time_12h(row['check_in']) or '-'} | Out {format_time_12h(row['check_out']) or '-'} | Late {row['late_minutes']}m | OT {row['overtime_minutes']}m")
+    for row in rows: output.append(f"{row['work_date']} | {attendance_shift_label(row['attendance_shift'])} | In {format_time_12h(row['check_in']) or '-'} | Out {format_time_12h(row['check_out']) or '-'} | Late {row['late_minutes']}m | OT {row['overtime_minutes']}m")
     return "\n".join(output)
 
 
@@ -494,15 +529,21 @@ def verify_location(latitude, longitude):
 def begin_attendance_action(phone, action):
     employee = employee_by_phone(phone)
     if not employee: return "❌ আগে Register করুন। শুধু লিখুন: Register"
-    if not has_face(employee["id"]):
-        set_state(phone, "awaiting_face_registration")
-        return "📸 Attendance দেওয়ার আগে Face Registration সম্পন্ন করুন। এখন ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।"
     with get_db() as c:
         pending = c.execute("SELECT id,action,created_at FROM attendance_fingerprints WHERE employee_id=? AND review_status='pending' ORDER BY id DESC LIMIT 1", (employee["id"],)).fetchone()
     if pending:
         pending_label = "Check-in" if pending["action"] == "check_in" else "Check-out"
         return (f"⏳ আপনার {pending_label} selfie এখনো Admin approval-এর অপেক্ষায় আছে।\n"
                 "সিদ্ধান্ত না হওয়া পর্যন্ত নতুন attendance selfie প্রয়োজন নেই।")
+    if action == "checkout":
+        with get_db() as c:
+            open_record, _ = _open_attendance(employee, now_local(), c)
+        if not open_record:
+            clear_state(phone)
+            return "❌ Check Out করা যাবে না। আগে Check In সম্পন্ন করুন।"
+    if not has_face(employee["id"]):
+        set_state(phone, "awaiting_face_registration")
+        return "📸 Attendance দেওয়ার আগে Face Registration সম্পন্ন করুন। এখন ৩টি পরিষ্কার selfie পাঠান। প্রথম selfie এখন পাঠান।"
     set_state(phone, f"{action}_location")
     return "__REQUEST_LOCATION__"
 
@@ -511,6 +552,16 @@ def receive_location(phone, latitude, longitude):
     current = state(phone)
     if not current or current["state"] not in {"checkin_location", "checkout_location"}:
         return "ℹ️ এই মুহূর্তে Location প্রয়োজন নেই। Menu থেকে Check In বা Check Out নির্বাচন করুন।"
+    if current["state"] == "checkout_location":
+        employee = employee_by_phone(phone)
+        if not employee:
+            clear_state(phone)
+            return "❌ Employee পাওয়া যায়নি। আবার Register করুন।"
+        with get_db() as c:
+            open_record, _ = _open_attendance(employee, now_local(), c)
+        if not open_record:
+            clear_state(phone)
+            return "❌ Check Out করা যাবে না। আগে Check In সম্পন্ন করুন।"
     ok, distance = verify_location(latitude, longitude)
     if not ok:
         return f"❌ আপনি অনুমোদিত অফিস এলাকার বাইরে আছেন।\nদূরত্ব: {distance:.0f} মিটার\nঅনুমোদিত: {OFFICE_RADIUS_METERS:.0f} মিটার\n\nআবার সঠিক Location পাঠান।"
@@ -532,6 +583,12 @@ def receive_image(phone, media_id, image_bytes=None):
     if not employee: return "❌ আগে Register করুন।"
     if not current or not current["state"].startswith(("checkin_selfie:", "checkout_selfie:")):
         return "ℹ️ এই মুহূর্তে selfie প্রয়োজন নেই। Menu থেকে Check In বা Check Out নির্বাচন করুন।"
+    if current["state"].startswith("checkout_selfie:"):
+        with get_db() as c:
+            open_record, _ = _open_attendance(employee, now_local(), c)
+        if not open_record:
+            clear_state(phone)
+            return "❌ Check Out করা যাবে না। আগে Check In সম্পন্ন করুন।"
     parts = current["state"].split(":")
     challenge_pose = parts[4] if len(parts) > 4 else "straight"
     issued_at = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0

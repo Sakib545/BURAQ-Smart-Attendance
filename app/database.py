@@ -19,7 +19,7 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS employees(id INTEGER PRIMARY KEY AUTOINCREMENT,staff_id TEXT NOT NULL UNIQUE COLLATE NOCASE,name TEXT NOT NULL,phone TEXT UNIQUE,department TEXT,shift TEXT NOT NULL DEFAULT 'morning',registration_status TEXT NOT NULL DEFAULT 'unregistered',whatsapp_phone TEXT UNIQUE,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS conversation_states(phone TEXT PRIMARY KEY,state TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS attendance(id INTEGER PRIMARY KEY AUTOINCREMENT,employee_id INTEGER NOT NULL,work_date TEXT NOT NULL,check_in TEXT,check_out TEXT,late_minutes INTEGER NOT NULL DEFAULT 0,early_leave_minutes INTEGER NOT NULL DEFAULT 0,overtime_minutes INTEGER NOT NULL DEFAULT 0,source TEXT NOT NULL DEFAULT 'whatsapp',status TEXT NOT NULL DEFAULT 'present',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(employee_id,work_date),FOREIGN KEY(employee_id) REFERENCES employees(id));
+CREATE TABLE IF NOT EXISTS attendance(id INTEGER PRIMARY KEY AUTOINCREMENT,employee_id INTEGER NOT NULL,work_date TEXT NOT NULL,check_in TEXT,check_out TEXT,attendance_shift TEXT NOT NULL DEFAULT 'first',late_minutes INTEGER NOT NULL DEFAULT 0,early_leave_minutes INTEGER NOT NULL DEFAULT 0,overtime_minutes INTEGER NOT NULL DEFAULT 0,source TEXT NOT NULL DEFAULT 'whatsapp',status TEXT NOT NULL DEFAULT 'present',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(employee_id,work_date),FOREIGN KEY(employee_id) REFERENCES employees(id));
 CREATE TABLE IF NOT EXISTS whatsapp_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,direction TEXT NOT NULL,phone TEXT,message_type TEXT,content TEXT,message_id TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_whatsapp_incoming_message_id ON whatsapp_logs(message_id) WHERE direction='incoming' AND message_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS pending_registrations(id INTEGER PRIMARY KEY AUTOINCREMENT,employee_id INTEGER NOT NULL,whatsapp_phone TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(employee_id) REFERENCES employees(id));
@@ -30,7 +30,7 @@ POSTGRES_STATEMENTS = [
     """CREATE TABLE IF NOT EXISTS employees(id BIGSERIAL PRIMARY KEY,staff_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL,phone TEXT UNIQUE,department TEXT,shift TEXT NOT NULL DEFAULT 'morning',registration_status TEXT NOT NULL DEFAULT 'unregistered',whatsapp_phone TEXT UNIQUE,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS ux_employees_staff_id_lower ON employees(LOWER(staff_id))""",
     """CREATE TABLE IF NOT EXISTS conversation_states(phone TEXT PRIMARY KEY,state TEXT NOT NULL,updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
-    """CREATE TABLE IF NOT EXISTS attendance(id BIGSERIAL PRIMARY KEY,employee_id BIGINT NOT NULL REFERENCES employees(id),work_date TEXT NOT NULL,check_in TEXT,check_out TEXT,late_minutes INTEGER NOT NULL DEFAULT 0,early_leave_minutes INTEGER NOT NULL DEFAULT 0,overtime_minutes INTEGER NOT NULL DEFAULT 0,source TEXT NOT NULL DEFAULT 'whatsapp',status TEXT NOT NULL DEFAULT 'present',created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(employee_id,work_date))""",
+    """CREATE TABLE IF NOT EXISTS attendance(id BIGSERIAL PRIMARY KEY,employee_id BIGINT NOT NULL REFERENCES employees(id),work_date TEXT NOT NULL,check_in TEXT,check_out TEXT,attendance_shift TEXT NOT NULL DEFAULT 'first',late_minutes INTEGER NOT NULL DEFAULT 0,early_leave_minutes INTEGER NOT NULL DEFAULT 0,overtime_minutes INTEGER NOT NULL DEFAULT 0,source TEXT NOT NULL DEFAULT 'whatsapp',status TEXT NOT NULL DEFAULT 'present',created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(employee_id,work_date))""",
     """CREATE TABLE IF NOT EXISTS whatsapp_logs(id BIGSERIAL PRIMARY KEY,direction TEXT NOT NULL,phone TEXT,message_type TEXT,content TEXT,message_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS ux_whatsapp_incoming_message_id ON whatsapp_logs(message_id) WHERE direction='incoming' AND message_id IS NOT NULL""",
     """CREATE TABLE IF NOT EXISTS pending_registrations(id BIGSERIAL PRIMARY KEY,employee_id BIGINT NOT NULL REFERENCES employees(id),whatsapp_phone TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
@@ -433,6 +433,10 @@ def apply_feature_migrations() -> None:
         if "break_minutes" not in duty_columns:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN break_minutes INTEGER NOT NULL DEFAULT 0"))
+    attendance_columns = {col["name"] for col in inspect(engine).get_columns("attendance")}
+    if "attendance_shift" not in attendance_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE attendance ADD COLUMN attendance_shift TEXT NOT NULL DEFAULT 'first'"))
     mark_migration("v9.5-attendance-fingerprints")
     mark_migration("v9.6-private-payroll")
     mark_migration("v9.8-performance-optimization")
@@ -441,6 +445,7 @@ def apply_feature_migrations() -> None:
     mark_migration("v9.19.7-fingerprint-schema-repair")
     mark_migration("v9.20-mandatory-selfie-review")
     mark_migration("v9.21-duty-break-payroll")
+    mark_migration("v9.23-auto-attendance-shift")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.
