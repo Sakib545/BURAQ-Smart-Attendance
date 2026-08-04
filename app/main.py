@@ -36,7 +36,7 @@ from app.services import approve_pending_attendance, phones_match, receive_locat
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.22.1"
+APP_VERSION = "9.22.2"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -3060,13 +3060,14 @@ def duplicate_analysis(request: Request, decision: str="", review: str="", scope
     image_field = "f.image_data" if review == "pending" and scope != "all" else "NULL AS image_data"
     row_limit = 60 if review == "pending" and scope != "all" else 300
     with get_db() as c:
+        pending_order = "e.id, CASE WHEN f.action IN ('check_in','checkin','in') THEN 0 ELSE 1 END, f.created_at ASC" if review == "pending" and scope != "all" else "f.id DESC"
         rows = c.execute(f"""SELECT f.id,f.employee_id,f.action,f.media_id,{image_field},
             f.latitude,f.longitude,f.distance_meters,f.duplicate_score,f.hash_score,f.face_score,
             f.pose_score,f.landmark_score,f.matched_fingerprint_id,f.decision,f.review_status,
             f.attendance_applied,f.attendance_result,f.reviewed_by,f.reviewed_at,f.created_at,
             e.staff_id,e.name FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id
             WHERE {" AND ".join(clauses)}
-            ORDER BY CASE WHEN f.review_status='pending' THEN 0 ELSE 1 END, f.id DESC LIMIT {row_limit}""", tuple(params)).fetchall()
+            ORDER BY CASE WHEN f.review_status='pending' THEN 0 ELSE 1 END, {pending_order} LIMIT {row_limit}""", tuple(params)).fetchall()
         waiting = int(c.execute("SELECT COUNT(*) c FROM attendance_fingerprints WHERE review_status='pending'").fetchone()["c"] or 0)
     can_manage=has_permission(request,"approvals_manage")
     thresholds=f"Accept &lt; {settings.duplicate_accept_below:.2f} • Review {settings.duplicate_accept_below:.2f}–{settings.duplicate_reject_at:.2f} • Reject ≥ {settings.duplicate_reject_at:.2f}"
@@ -3089,7 +3090,7 @@ def duplicate_analysis(request: Request, decision: str="", review: str="", scope
             controls=""
             if can_manage:
                 controls=f"""<div class='review-actions'>
-                  <form method='post' action='/duplicates/{r['id']}/approve'><button class='btn' type='submit'>✓ Approve attendance</button></form>
+                  <form method='post' action='/duplicates/{r['id']}/approve' onsubmit="const b=this.querySelector('button');b.disabled=true;b.textContent='Approving…'"><button class='btn' type='submit'>✓ Approve attendance</button></form>
                   <form method='post' action='/duplicates/{r['id']}/reject' onsubmit=\"return confirm('Reject this selfie and ask the employee to try again?')\"><button class='btn danger' type='submit'>✕ Reject &amp; ask again</button></form>
                 </div>"""
             cards.append(f"""<article class='card selfie-review-card'>
@@ -3106,7 +3107,8 @@ def duplicate_analysis(request: Request, decision: str="", review: str="", scope
             applied="Final" if r["attendance_applied"] else ("Rejected" if r["review_status"]=="rejected" else "Not final")
             history.append(f"<tr><td>#{r['id']}</td><td><b>{escape(str(r['name']))}</b><br><span class='sub'>{escape(str(r['staff_id']))}</span></td><td>{'Check in' if r['action']=='check_in' else 'Check out'}</td><td><span class='status {state}'>{escape(str(r['review_status']).title())}</span><div class='sub'>{applied}</div></td><td>{float(r['face_score'] or 0)*100:.1f}%</td><td>{float(r['duplicate_score'] or 0)*100:.1f}%</td><td>{escape(str(r['attendance_result'] or '—'))}</td><td>{escape(str(r['created_at']))}</td></tr>")
         content=f"<div style='overflow:auto'><table><thead><tr><th>ID</th><th>Employee</th><th>Action</th><th>Status</th><th>Face</th><th>Duplicate</th><th>Attendance result</th><th>Submitted</th></tr></thead><tbody>{''.join(history)}</tbody></table></div>" if history else empty
-    notice = "<div class='notice'>Attendance selfie approved and finalized.</div>" if saved=="approved" else ("<div class='notice'>Selfie rejected; employee notification queued.</div>" if saved=="rejected" else ("<div class='notice bad'>Check-out approve করার আগে ওই employee-এর pending Check-in approve করুন।</div>" if error else ""))
+    error_messages={"checkin-first":"আগে ওই employee-এর Check-in selfie approve করুন; এরপর Check-out approve হবে।","invalid-action":"এই পুরোনো selfie-এর action সঠিক নয়। Employee-কে নতুন attendance দিতে বলুন।","failed":"Approval সাময়িকভাবে সম্পন্ন হয়নি। আবার চেষ্টা করুন; সমস্যা থাকলে Deploy Logs দেখুন।"}
+    notice = "<div class='notice'>Attendance selfie approved and finalized.</div>" if saved=="approved" else ("<div class='notice'>Selfie rejected; employee notification queued.</div>" if saved=="rejected" else (f"<div class='notice bad'>{error_messages.get(error,'Approval সম্পন্ন হয়নি।')}</div>" if error else ""))
     body=f"""<div class='hero'>
       <div><div class='eyebrow'>Attendance Approval</div><h2>Pending Selfies</h2><div class='sub'>প্রতিটি valid attendance selfie HR/Admin approve করার পর final হবে। · {thresholds}</div></div>
       <span class='pill'>{waiting} waiting</span>
@@ -3123,9 +3125,20 @@ def review_duplicate(request: Request, fingerprint_id: int, action: str, backgro
     if action == "approve":
         try:
             approved = approve_pending_attendance(fingerprint_id, actor)
-        except ValueError:
-            return RedirectResponse("/duplicates?review=pending&error=checkin-first",303)
-        if not approved: raise HTTPException(404,"Pending selfie not found or already reviewed")
+        except ValueError as exc:
+            code="checkin-first" if "Check-in approve" in str(exc) else "invalid-action"
+            return RedirectResponse(f"/duplicates?review=pending&error={code}",303)
+        except Exception:
+            logger.exception("Selfie approval failed fingerprint=%s actor=%s",fingerprint_id,actor)
+            return RedirectResponse("/duplicates?review=pending&error=failed",303)
+        if not approved:
+            with get_db() as c:
+                existing=c.execute("SELECT review_status FROM attendance_fingerprints WHERE id=?",(fingerprint_id,)).fetchone()
+            if existing and existing["review_status"]=="approved":
+                return RedirectResponse("/duplicates?review=pending&saved=approved",303)
+            if existing and existing["review_status"]=="rejected":
+                return RedirectResponse("/duplicates?review=rejected",303)
+            raise HTTPException(404,"Pending selfie not found")
         if approved["phone"]:
             notify=(approved["phone"],approved["name"],approved["action"],True,approved["score"],approved["result"])
         status="approved"

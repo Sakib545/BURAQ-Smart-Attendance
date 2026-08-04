@@ -15,6 +15,7 @@ Path("/tmp/buraq_v9_test.db").unlink(missing_ok=True)
 
 from fastapi.testclient import TestClient
 from app.main import app
+import app.main as main_module
 from app.database import get_db
 from app.services import approve_pending_attendance, set_state, state
 from app.location_links import create_location_token, verify_location_token
@@ -24,7 +25,7 @@ def test_liveness_and_readiness():
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "9.22.1"
+        assert health.json()["version"] == "9.22.2"
         assert health.headers.get("x-request-id")
 
         ready = client.get("/ready")
@@ -100,7 +101,7 @@ def test_pending_selfie_approval_finalizes_once():
                 employee_id,action,media_id,image_data,latitude,longitude,distance_meters,
                 phash,ahash,dhash,embedding,decision,review_status,face_score,duplicate_score,created_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (employee["id"], "check_in", "test-media-001", "", 23.0, 90.0, 12.0,
+                (employee["id"], "checkin", "test-media-001", "", 23.0, 90.0, 12.0,
                  "p", "a", "d", "[]", "accept", "pending", 0.91, 0.02, "2026-08-02 09:02:00"))
             fingerprint = db.execute("SELECT id FROM attendance_fingerprints WHERE media_id=?", ("test-media-001",)).fetchone()
 
@@ -114,3 +115,67 @@ def test_pending_selfie_approval_finalizes_once():
         assert selfie["review_status"] == "approved"
         assert bool(selfie["attendance_applied"]) is True
         assert int(attendance["c"]) == 1
+
+
+def test_dashboard_approve_button_is_idempotent(monkeypatch):
+    async def notification_ok(*_args, **_kwargs):
+        return {"sent": True}
+
+    monkeypatch.setattr(main_module, "send_selfie_review_result", notification_ok)
+    with TestClient(app) as client:
+        setup = client.post(
+            "/setup",
+            data={"email": "admin@buraq.com", "password": "password123", "confirm_password": "password123"},
+            follow_redirects=False,
+        )
+        if setup.status_code == 403:
+            login = client.post(
+                "/login",
+                data={"email": "admin@buraq.com", "password": "password123"},
+                follow_redirects=False,
+            )
+            assert login.status_code == 303
+
+        with get_db() as db:
+            db.execute("DELETE FROM employees WHERE staff_id=?", ("TEST-DASH-APPROVE",))
+            db.execute(
+                """INSERT INTO employees(staff_id,name,phone,whatsapp_phone,shift,registration_status)
+                   VALUES(?,?,?,?,?,?)""",
+                ("TEST-DASH-APPROVE", "Dashboard Approve", "01700000003", "8801700000003", "morning", "approved"),
+            )
+            employee = db.execute("SELECT id FROM employees WHERE staff_id=?", ("TEST-DASH-APPROVE",)).fetchone()
+            db.execute(
+                """INSERT INTO attendance_fingerprints(
+                    employee_id,action,media_id,image_data,latitude,longitude,distance_meters,
+                    phash,ahash,dhash,embedding,decision,review_status,face_score,duplicate_score,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (employee["id"], "check_in", "dashboard-approve-media", "", 23.0, 90.0, 5.0,
+                 "pd", "ad", "dd", "[]", "accept", "pending", 0.93, 0.01, "2026-08-04 08:05:00"),
+            )
+            fingerprint = db.execute(
+                "SELECT id FROM attendance_fingerprints WHERE media_id=?", ("dashboard-approve-media",)
+            ).fetchone()
+
+        page = client.get("/duplicates?review=pending")
+        assert page.status_code == 200
+        assert f"/duplicates/{fingerprint['id']}/approve" in page.text
+
+        first = client.post(f"/duplicates/{fingerprint['id']}/approve", follow_redirects=False)
+        second = client.post(f"/duplicates/{fingerprint['id']}/approve", follow_redirects=False)
+        assert first.status_code == 303
+        assert first.headers["location"].endswith("saved=approved")
+        assert second.status_code == 303
+        assert second.headers["location"].endswith("saved=approved")
+
+        with get_db() as db:
+            selfie = db.execute(
+                "SELECT review_status,attendance_applied FROM attendance_fingerprints WHERE id=?",
+                (fingerprint["id"],),
+            ).fetchone()
+            evidence = db.execute(
+                "SELECT COUNT(*) c FROM attendance_evidence WHERE image_media_id=?",
+                ("dashboard-approve-media",),
+            ).fetchone()
+        assert selfie["review_status"] == "approved"
+        assert bool(selfie["attendance_applied"]) is True
+        assert int(evidence["c"]) == 1

@@ -15,7 +15,7 @@ from app.face_ai import FaceAIError, extract_embedding, best_match, best_imposto
 from app.face_log import invalidate_gallery_cache, load_impostor_gallery, log_face_event
 from app.duplicate_detector import DuplicateThresholds, detect_duplicate, make_fingerprint
 from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
-from app.database import get_db
+from app.database import database_kind, get_db
 from app.time_format import format_time_12h
 
 
@@ -316,11 +316,17 @@ def save_face_reference(employee, media_id, image_bytes):
 def shift_times(shift):
     return (time(16), time(22)) if (shift or "").lower() == "evening" else (time(8), time(16))
 
-def duty_window(employee, duty_date):
+def duty_window(employee, duty_date, db=None):
     date_text=duty_date.isoformat()
-    with get_db() as c:
+    def load(c):
         duty=c.execute("SELECT start_time,end_time FROM custom_duties WHERE employee_id=? AND duty_date=? AND is_active",(employee['id'],date_text)).fetchone()
         if not duty: duty=c.execute("SELECT start_time,end_time FROM duty_schedules WHERE employee_id=? AND weekday=? AND is_active",(employee['id'],duty_date.weekday())).fetchone()
+        return duty
+    if db is None:
+        with get_db() as c:
+            duty=load(c)
+    else:
+        duty=load(db)
     if duty:
         start=time.fromisoformat(duty['start_time']); end=time.fromisoformat(duty['end_time'])
     else: start,end=shift_times(employee['shift'])
@@ -382,27 +388,33 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
     second click cannot create a second attendance event.
     """
     with get_db() as c:
+        lock = " FOR UPDATE" if database_kind() == "postgresql" else ""
         item = c.execute(
             """SELECT e.*,f.id fingerprint_id,f.action fingerprint_action,
                       f.media_id fingerprint_media_id,f.latitude fingerprint_latitude,
                       f.longitude fingerprint_longitude,f.distance_meters fingerprint_distance,
                       f.duplicate_score fingerprint_score,f.created_at fingerprint_created_at
                  FROM attendance_fingerprints f JOIN employees e ON e.id=f.employee_id
-                WHERE f.id=? AND f.review_status='pending' AND f.attendance_applied=?""",
-            (fingerprint_id, False),
+                WHERE f.id=? AND f.review_status='pending'""" + lock,
+            (fingerprint_id,),
         ).fetchone()
-    if not item:
-        return None
+        if not item:
+            return None
 
-    submitted = _submitted_at_local(item["fingerprint_created_at"])
-    action = str(item["fingerprint_action"])
-    submitted_text = submitted.isoformat(timespec="seconds")
+        submitted = _submitted_at_local(item["fingerprint_created_at"])
+        raw_action = str(item["fingerprint_action"] or "").strip().lower()
+        if raw_action in {"check_in", "checkin", "in"}:
+            action = "check_in"
+        elif raw_action in {"check_out", "checkout", "out"}:
+            action = "check_out"
+        else:
+            raise ValueError("Unknown attendance action")
+        submitted_text = submitted.isoformat(timespec="seconds")
 
-    if action == "check_in":
-        work_date = submitted.date().isoformat()
-        start_dt, _ = duty_window(item, submitted.date())
-        late = max(0, int((submitted - start_dt).total_seconds() // 60))
-        with get_db() as c:
+        if action == "check_in":
+            work_date = submitted.date().isoformat()
+            start_dt, _ = duty_window(item, submitted.date(), db=c)
+            late = max(0, int((submitted - start_dt).total_seconds() // 60))
             attendance = c.execute(
                 "SELECT * FROM attendance WHERE employee_id=? AND work_date=?",
                 (item["id"], work_date),
@@ -421,35 +433,31 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
                       (item["id"], action, item["fingerprint_latitude"], item["fingerprint_longitude"], item["fingerprint_distance"], item["fingerprint_media_id"], True))
             c.execute("UPDATE attendance_fingerprints SET review_status='approved',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP,attendance_applied=?,attendance_result=? WHERE id=? AND review_status='pending'",
                       (actor, True, result, fingerprint_id))
-    elif action == "check_out":
-        today = submitted.date(); yesterday = today - timedelta(days=1)
-        with get_db() as c:
+        elif action == "check_out":
+            today = submitted.date(); yesterday = today - timedelta(days=1)
             today_record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (item["id"], today.isoformat())).fetchone()
             previous_record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (item["id"], yesterday.isoformat())).fetchone()
-        attendance = today_record if today_record and today_record["check_in"] and not today_record["check_out"] else None
-        duty_date = today
-        if not attendance and previous_record and previous_record["check_in"] and not previous_record["check_out"]:
-            _, previous_end = duty_window(item, yesterday)
-            if previous_end.date() > yesterday and submitted <= previous_end + timedelta(hours=12):
-                attendance = previous_record; duty_date = yesterday
-        if not attendance:
-            raise ValueError("Check-out approve করার আগে employee-এর Check-in approve করুন।")
-        _, end_dt = duty_window(item, duty_date)
-        checked_in = _submitted_at_local(attendance["check_in"])
-        worked = max(0, int((submitted - checked_in).total_seconds() // 60))
-        early = max(0, int((end_dt - submitted).total_seconds() // 60))
-        overtime = max(0, int((submitted - end_dt).total_seconds() // 60))
-        hours, minutes = divmod(worked, 60)
-        result = f"Check-out approved at {submitted.strftime('%I:%M %p')} · Worked {hours}h {minutes}m"
-        with get_db() as c:
+            attendance = today_record if today_record and today_record["check_in"] and not today_record["check_out"] else None
+            duty_date = today
+            if not attendance and previous_record and previous_record["check_in"] and not previous_record["check_out"]:
+                _, previous_end = duty_window(item, yesterday, db=c)
+                if previous_end.date() > yesterday and submitted <= previous_end + timedelta(hours=12):
+                    attendance = previous_record; duty_date = yesterday
+            if not attendance:
+                raise ValueError("Check-out approve করার আগে employee-এর Check-in approve করুন।")
+            _, end_dt = duty_window(item, duty_date, db=c)
+            checked_in = _submitted_at_local(attendance["check_in"])
+            worked = max(0, int((submitted - checked_in).total_seconds() // 60))
+            early = max(0, int((end_dt - submitted).total_seconds() // 60))
+            overtime = max(0, int((submitted - end_dt).total_seconds() // 60))
+            hours, minutes = divmod(worked, 60)
+            result = f"Check-out approved at {submitted.strftime('%I:%M %p')} · Worked {hours}h {minutes}m"
             c.execute("UPDATE attendance SET check_out=?,early_leave_minutes=?,overtime_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                       (submitted_text, early, overtime, attendance["id"]))
             c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)",
                       (item["id"], action, item["fingerprint_latitude"], item["fingerprint_longitude"], item["fingerprint_distance"], item["fingerprint_media_id"], True))
             c.execute("UPDATE attendance_fingerprints SET review_status='approved',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP,attendance_applied=?,attendance_result=? WHERE id=? AND review_status='pending'",
                       (actor, True, result, fingerprint_id))
-    else:
-        raise ValueError("Unknown attendance action")
 
     return {
         "phone": item["whatsapp_phone"] or item["phone"],

@@ -1,3 +1,11 @@
+## v9.22.2 Dashboard Selfie Approval Fix
+
+- Selfie approval এখন attendance, evidence ও fingerprint status একই atomic database transaction-এ final করে।
+- PostgreSQL-এ একই selfie একসঙ্গে দুইবার approve হওয়া row lock দিয়ে বন্ধ করা হয়েছে।
+- Double-click বা page retry হলে 404 না দেখিয়ে আগের successful approval-ই দেখায়।
+- Pending list-এ একই employee-এর Check-in selfie Check-out-এর আগে দেখায়।
+- পুরোনো `checkin`/`checkout` action values-ও safely approve হয় এবং failure হলে dashboard-এ পরিষ্কার কারণ দেখা যায়।
+
 ## v9.22.1 Hybrid WhatsApp Location
 
 - Check In/Out প্রথমে WhatsApp-এর native `Send Location` button ব্যবহার করে।
