@@ -31,7 +31,7 @@ def test_liveness_and_readiness():
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "9.23.0"
+        assert health.json()["version"] == "9.24.0"
         assert health.headers.get("x-request-id")
 
         ready = client.get("/ready")

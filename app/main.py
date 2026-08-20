@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from html import escape
+from urllib.parse import quote_plus
 
 from fastapi import FastAPI, BackgroundTasks, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
@@ -33,10 +34,14 @@ from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 from app.services import approve_pending_attendance, phones_match, receive_location, state
+from app.shift_rules import (
+    CUTOFF_KEY, FIRST_END_KEY, FIRST_START_KEY, GRACE_KEY,
+    SECOND_END_KEY, SECOND_START_KEY, get_shift_rules, save_shift_rules, shift_window,
+)
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.23.0"
+APP_VERSION = "9.24.0"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -671,8 +676,8 @@ def dashboard(request: Request):
                   f"{absent_pct}% of {employees} active staff", absent_pct),
         _kpi_card("calendar-minus", "leave", "On approved leave", str(on_leave),
                   f"{leave_pct}% of {employees} active staff", leave_pct),
-        _kpi_card("trending-up", "overtime", "Overtime today", _hours_minutes(overtime),
-                  f"{checked_out} of {present} have checked out",
+        _kpi_card("trending-up", "overtime", "Checked out today", str(checked_out),
+                  f"{checked_out} of {present} have checked out · Overtime: manual only",
                   _pct(checked_out, present) if present else 0.0),
     ]
     if has_permission(request, "approvals_view"):
@@ -1274,10 +1279,13 @@ def employee_duty_page(request: Request, employee_id: int, saved: str=""):
         weekly=c.execute("SELECT * FROM duty_schedules WHERE employee_id=? ORDER BY weekday",(employee_id,)).fetchall()
         custom=c.execute("SELECT * FROM custom_duties WHERE employee_id=? AND duty_date>=? ORDER BY duty_date",(employee_id,today)).fetchall()
     if not e: raise HTTPException(404,'Employee not found')
+    first_start,first_end=shift_window('first'); second_start,second_end=shift_window('second')
+    first_preset=f"{first_start.strftime('%H:%M')}-{first_end.strftime('%H:%M')}"
+    second_preset=f"{second_start.strftime('%H:%M')}-{second_end.strftime('%H:%M')}"
     forms=''
     if can_manage:
         day_options=''.join(f"<option value='{i}'>{d}</option>" for i,d in enumerate(days))
-        forms=f"""<div class='two'><div class='card'><div class='eyebrow'>Repeating Schedule</div><h2>Regular Duty by Shift</h2><form method='post' action='/employees/{employee_id}/duty/regular'><label>Weekday</label><select name='weekday'>{day_options}</select><label>Shift preset</label><select name='preset'><option value='morning'>Morning (08:00-16:00)</option><option value='evening'>Evening (16:00-22:00)</option><option value='night'>Night (22:00-06:00)</option><option value='custom'>Custom selectable time</option></select><div class='two'><div><label>Custom start (optional)</label><input type='time' name='start_time'></div><div><label>Custom end (optional)</label><input type='time' name='end_time'></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Regular Duty</button></form></div><div class='card money-card'><div class='eyebrow'>One Specific Date</div><h2>Custom Duty</h2><form method='post' action='/employees/{employee_id}/duty/custom'><label>Date</label><input type='date' name='duty_date' required><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><label>Note</label><input name='note' placeholder='Special duty reason'><button class='btn'>Assign Custom Duty</button></form></div></div><div class='section-gap'></div><div class='two'><div class='card'><div class='eyebrow'>Quick Assignment</div><h2>Assign Friday Duty</h2><form method='post' action='/employees/{employee_id}/duty/friday'><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Every Friday</button></form></div><div class='card payroll-panel'><div class='eyebrow' style='color:#8ff0cb'>Overnight Assignment</div><h2>Assign Night Duty</h2><form method='post' action='/employees/{employee_id}/duty/night'><label>Starting date</label><input type='date' name='duty_date' required><div class='two'><div><label>Night start</label><input type='time' name='start_time' value='22:00' required></div><div><label>Next-day end</label><input type='time' name='end_time' value='06:00' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Repeat</label><select name='repeat'><option value='once'>One-time night duty</option><option value='weekly'>Repeat every week on this weekday</option></select><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Night Duty</button></form></div></div>"""
+        forms=f"""<div class='two'><div class='card'><div class='eyebrow'>Repeating Schedule</div><h2>Regular Duty by Shift</h2><form method='post' action='/employees/{employee_id}/duty/regular'><label>Weekday</label><select name='weekday'>{day_options}</select><label>Shift preset</label><select name='preset'><option value='morning'>First Shift ({first_preset})</option><option value='evening'>Second Shift ({second_preset})</option><option value='night'>Night (22:00-06:00)</option><option value='custom'>Custom selectable time</option></select><div class='two'><div><label>Custom start (optional)</label><input type='time' name='start_time'></div><div><label>Custom end (optional)</label><input type='time' name='end_time'></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Regular Duty</button></form></div><div class='card money-card'><div class='eyebrow'>One Specific Date</div><h2>Custom Duty</h2><form method='post' action='/employees/{employee_id}/duty/custom'><label>Date</label><input type='date' name='duty_date' required><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><label>Note</label><input name='note' placeholder='Special duty reason'><button class='btn'>Assign Custom Duty</button></form></div></div><div class='section-gap'></div><div class='two'><div class='card'><div class='eyebrow'>Quick Assignment</div><h2>Assign Friday Duty</h2><form method='post' action='/employees/{employee_id}/duty/friday'><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Every Friday</button></form></div><div class='card payroll-panel'><div class='eyebrow' style='color:#8ff0cb'>Overnight Assignment</div><h2>Assign Night Duty</h2><form method='post' action='/employees/{employee_id}/duty/night'><label>Starting date</label><input type='date' name='duty_date' required><div class='two'><div><label>Night start</label><input type='time' name='start_time' value='22:00' required></div><div><label>Next-day end</label><input type='time' name='end_time' value='06:00' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Repeat</label><select name='repeat'><option value='once'>One-time night duty</option><option value='weekly'>Repeat every week on this weekday</option></select><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Night Duty</button></form></div></div>"""
     weekly_rows=''.join(f"<tr><td>{days[int(r['weekday'])]}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}<div class='sub'>Break: {int(r['break_minutes'] or 0)} min</div></td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{f'''<form method='post' action='/employees/{employee_id}/duty/weekly/{r['id']}/delete'><button class='btn danger'>Delete</button></form>''' if can_manage else ''}</td></tr>" for r in weekly) or '<tr><td colspan=4>No regular duty.</td></tr>'
     custom_rows=''.join(f"<tr><td>{escape(r['duty_date'])}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}<div class='sub'>Break: {int(r['break_minutes'] or 0)} min</div></td><td>{escape(r['office_name'] or 'BURAQ Office')}<div class='sub'>{escape(r['note'] or '')}</div></td><td>{f'''<form method='post' action='/employees/{employee_id}/duty/custom/{r['id']}/delete'><button class='btn danger'>Delete</button></form>''' if can_manage else ''}</td></tr>" for r in custom) or '<tr><td colspan=4>No upcoming custom duty.</td></tr>'
     notice="<div class='notice'>Duty assignment saved.</div>" if saved else ''
@@ -1285,8 +1293,12 @@ def employee_duty_page(request: Request, employee_id: int, saved: str=""):
     return layout(f"{e['name']} Duty",body,request,'employees')
 
 def _duty_times(preset: str, start_time: str, end_time: str):
-    presets={'morning':('08:00','16:00'),'evening':('16:00','22:00'),'night':('22:00','06:00')}
+    """Presets follow the Admin-configured global shift rules."""
     if start_time and end_time: return start_time,end_time
+    first_start,first_end=shift_window('first'); second_start,second_end=shift_window('second')
+    presets={'morning':(first_start.strftime('%H:%M'),first_end.strftime('%H:%M')),
+             'evening':(second_start.strftime('%H:%M'),second_end.strftime('%H:%M')),
+             'night':('22:00','06:00')}
     if preset in presets: return presets[preset]
     raise HTTPException(400,'Select start and end time')
 
@@ -2876,6 +2888,22 @@ def duty_management_page(request: Request, saved: str="", error: str=""):
         assigned=c.execute("SELECT COUNT(DISTINCT employee_id) AS n FROM custom_duties WHERE duty_date>=? AND is_active",(today.isoformat(),)).fetchone()
         upcoming=c.execute("SELECT d.*,e.staff_id,e.name FROM custom_duties d JOIN employees e ON e.id=d.employee_id WHERE d.duty_date>=? ORDER BY d.duty_date,e.staff_id LIMIT 120",(today.isoformat(),)).fetchall()
     total=len(employees); assigned_n=int((assigned or {}).get('n',0)); unassigned=max(0,total-assigned_n)
+    rules=get_shift_rules()
+    rule_fields=[("first_start","First Shift start",rules[FIRST_START_KEY]),("first_end","First Shift end",rules[FIRST_END_KEY]),
+                 ("second_start","Second Shift start",rules[SECOND_START_KEY]),("second_end","Second Shift end",rules[SECOND_END_KEY]),
+                 ("second_cutoff","Second Shift detection cutoff",rules[CUTOFF_KEY])]
+    rule_inputs=''.join(f"<div><label>{escape(label)}</label><input type='time' name='{name}' value='{escape(value)}' {'required' if can_manage else 'disabled'}><div class='sub'>{escape(format_time_12h(value))}</div></div>" for name,label,value in rule_fields)
+    grace_input=f"<div><label>Late-grace minutes</label><input type='number' min='0' max='240' step='1' name='late_grace_minutes' value='{int(rules[GRACE_KEY])}' {'required' if can_manage else 'disabled'}><div class='sub'>Late minutes count only after this grace period.</div></div>"
+    save_button="<div class='actions'><button class='btn' type='submit'>Save Shift Rules</button></div>" if can_manage else "<div class='sub'>You do not have permission to change shift rules.</div>"
+    shift_card=f"""<section class='card duty-section' id='shiftRules'>
+      <div class='card-head'><div><div class='eyebrow'>Global Defaults</div><h2>Shift Rules</h2><p class='sub'>Employee-এর নিজস্ব duty না থাকলে এই সময়গুলোই প্রযোজ্য হবে। একবার save করলে পরের মাসগুলোতেও এই নিয়ম চালু থাকবে।</p></div><span class='pill'>Overtime: Manual only</span></div>
+      <form method='post' action='/duty/shift-rules'>
+        <div class='shift-rule-grid'>{rule_inputs}{grace_input}</div>
+        <div class='notice' style='margin-top:14px'><b>Priority:</b> Employee custom duty (একটি তারিখ) → Employee weekly duty (weekday) → এই global Shift Rules. অর্থাৎ কোনো employee-এর নিজস্ব duty থাকলে সেটিই আগে মানা হবে, global rule তখন প্রযোজ্য নয়।</div>
+        <div class='sub' style='margin-top:8px'>Overtime কখনো নিজে থেকে যোগ হয় না — HR/Admin Payroll page-এ manually overtime hours ও rate দেবেন।</div>
+        {save_button}
+      </form>
+    </section>"""
     employee_cards=''.join(f"<label class='employee-pick' data-search='{escape((e['staff_id']+' '+e['name']+' '+(e['department'] or '')).lower())}'><input type='checkbox' name='employee_ids' value='{e['id']}'><span><b>{escape(e['name'])}</b><small>{escape(e['staff_id'])} · {escape(e['department'] or 'No department')} · {escape(e['shift'] or 'morning')}</small></span></label>" for e in employees)
     manage=''
     if can_manage:
@@ -2894,17 +2922,20 @@ def duty_management_page(request: Request, saved: str="", error: str=""):
           <section class='card duty-section'>
             <div class='card-head'><div><div class='eyebrow'>Step 3</div><h2>Weekly Duty Schedule</h2><p class='sub'>Friday আলাদা special duty; Sunday–Thursday এবং Saturday regular duty।</p></div></div>
             <div class='schedule-grid'>
-              <div class='schedule-card regular'><div class='schedule-days'>Sunday · Monday · Tuesday · Wednesday · Thursday · Saturday</div><h3>Regular Duty</h3><div class='two'><div><label>Start Time</label><input type='time' name='regular_start' value='08:00' required></div><div><label>End Time</label><input type='time' name='regular_end' value='16:00' required></div></div><label>Break (minutes)</label><input type='number' name='regular_break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='BURAQ Office' required><label>Note (optional)</label><input name='regular_note' placeholder='Regular duty'></div>
-              <div class='schedule-card friday'><div class='schedule-days'>Friday · Special Day</div><h3>Friday Duty</h3><div class='two'><div><label>Start Time</label><input type='time' name='friday_start' value='16:00' required></div><div><label>End Time</label><input type='time' name='friday_end' value='22:00' required></div></div><label>Break (minutes)</label><input type='number' name='friday_break_minutes' min='0' step='5' value='60'><label>Friday Note (optional)</label><input name='friday_note' value='Friday duty'></div>
+              <div class='schedule-card regular'><div class='schedule-days'>Sunday · Monday · Tuesday · Wednesday · Thursday · Saturday</div><h3>Regular Duty</h3><div class='two'><div><label>Start Time</label><input type='time' name='regular_start' value='{rules[FIRST_START_KEY]}' required></div><div><label>End Time</label><input type='time' name='regular_end' value='{rules[FIRST_END_KEY]}' required></div></div><label>Break (minutes)</label><input type='number' name='regular_break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='BURAQ Office' required><label>Note (optional)</label><input name='regular_note' placeholder='Regular duty'></div>
+              <div class='schedule-card friday'><div class='schedule-days'>Friday · Special Day</div><h3>Friday Duty</h3><div class='two'><div><label>Start Time</label><input type='time' name='friday_start' value='{rules[SECOND_START_KEY]}' required></div><div><label>End Time</label><input type='time' name='friday_end' value='{rules[SECOND_END_KEY]}' required></div></div><label>Break (minutes)</label><input type='number' name='friday_break_minutes' min='0' step='5' value='60'><label>Friday Note (optional)</label><input name='friday_note' value='Friday duty'></div>
             </div>
           </section>
           <section class='duty-actionbar'><div><b id='dutySummary'>Select employees and date range</b><div class='sub'>Existing duty থাকলে নতুন সময় দিয়ে update হবে।</div></div><div class='actions'><button type='button' class='btn secondary' id='previewDutyBtn'>Preview</button><button class='btn' type='submit'>Save Duty</button></div></section>
         </form>"""
     rows=''.join(f"<tr><td><b>{escape(r['duty_date'])}</b></td><td>{escape(r['staff_id'])} - {escape(r['name'])}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{escape(r['note'] or '—')}</td></tr>" for r in upcoming) or '<tr><td colspan=5>No upcoming duty assigned.</td></tr>'
-    notice="<div class='notice'>Duty assigned successfully.</div>" if saved else (f"<div class='notice bad'>{escape(error)}</div>" if error else '')
-    body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty Management</div><h2>Manage Employee Duty</h2><div class='sub'>All employees, date range, regular schedule and separate Friday duty—সব এক page-এ। Saturday regular duty থাকবে।</div></div><div class='actions'><span class='pill'>Total {total}</span><span class='pill'>Assigned {assigned_n}</span><span class='pill'>Unassigned {unassigned}</span></div></div>{manage}<div class='section-gap'></div><div class='card' style='overflow:auto'><div class='card-head'><div><div class='eyebrow'>Assigned Duty</div><h2>Upcoming Duty List</h2></div><a class='btn secondary' href='/duty-schedules'>Advanced / Reminder Log</a></div><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th></tr></thead><tbody>{rows}</tbody></table></div>"""
+    saved_text={'shift':'Shift rules saved. These defaults stay active until you change them again.'}.get(saved,'Duty assigned successfully.')
+    notice=f"<div class='notice'>{escape(saved_text)}</div>" if saved else (f"<div class='notice bad'>{escape(error)}</div>" if error else '')
+    body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty Management</div><h2>Manage Employee Duty</h2><div class='sub'>All employees, date range, regular schedule and separate Friday duty—সব এক page-এ। Saturday regular duty থাকবে।</div></div><div class='actions'><span class='pill'>Total {total}</span><span class='pill'>Assigned {assigned_n}</span><span class='pill'>Unassigned {unassigned}</span></div></div>{shift_card}{manage}<div class='section-gap'></div><div class='card' style='overflow:auto'><div class='card-head'><div><div class='eyebrow'>Assigned Duty</div><h2>Upcoming Duty List</h2></div><a class='btn secondary' href='/duty-schedules'>Advanced / Reminder Log</a></div><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th></tr></thead><tbody>{rows}</tbody></table></div>"""
     extra="""<style>
-.duty-section{margin-top:16px}.duty-search{display:flex;gap:12px;align-items:center;margin:14px 0}.duty-search input{flex:1}.employee-pick-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-height:360px;overflow:auto;padding:2px}.employee-pick{display:flex;gap:10px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);cursor:pointer}.employee-pick input{width:auto}.employee-pick span{display:grid;gap:2px}.employee-pick small{color:var(--muted)}.employee-pick:has(input:checked){border-color:var(--brand);background:rgba(8,127,91,.1)}.schedule-grid{display:grid;grid-template-columns:2fr 1fr;gap:14px}.schedule-card{padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}.schedule-card.friday{border-color:#7aa7ff;background:rgba(55,111,255,.08)}.schedule-days{font-size:12px;font-weight:850;color:var(--brand);text-transform:uppercase;letter-spacing:.06em}.friday .schedule-days{color:#376fff}.saturday-off{margin-top:12px}.duty-shortcuts{margin-top:12px}.duty-actionbar{position:sticky;bottom:12px;z-index:8;margin-top:16px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:var(--shadow);display:flex;justify-content:space-between;align-items:center;gap:12px}
+.duty-section{margin-top:16px}.shift-rule-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media(max-width:900px){.shift-rule-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.shift-rule-grid{grid-template-columns:1fr}}.duty-search{display:flex;gap:12px;align-items:center;margin:14px 0}.duty-search input{flex:1}.employee-pick-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-height:360px;overflow:auto;padding:2px}.employee-pick{display:flex;gap:10px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);cursor:pointer}.employee-pick input{width:auto}.employee-pick span{display:grid;gap:2px}.employee-pick small{color:var(--muted)}.employee-pick:has(input:checked){border-color:var(--brand);background:rgba(8,127,91,.1)}.schedule-grid{display:grid;grid-template-columns:2fr 1fr;gap:14px}.schedule-card{padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}.schedule-card.friday{border-color:#7aa7ff;background:rgba(55,111,255,.08)}.schedule-days{font-size:12px;font-weight:850;color:var(--brand);text-transform:uppercase;letter-spacing:.06em}.friday .schedule-days{color:#376fff}.saturday-off{margin-top:12px}.duty-shortcuts{margin-top:12px}.duty-actionbar{position:sticky;bottom:12px;z-index:8;margin-top:16px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:var(--shadow);display:flex;justify-content:space-between;align-items:center;gap:12px}
 @media(max-width:900px){.employee-pick-grid{grid-template-columns:1fr 1fr}.schedule-grid{grid-template-columns:1fr}}
 @media(max-width:600px){.employee-pick-grid{grid-template-columns:1fr}.duty-actionbar{align-items:stretch;flex-direction:column}.duty-actionbar .actions{width:100%}.duty-actionbar .btn{flex:1}}
 </style><script>
@@ -2955,6 +2986,24 @@ Friday: separate duty`));
 </script>"""
     response=layout("Duty Management",body,request,"duty")
     return HTMLResponse(response.body.decode().replace('</body>',extra+'</body>'))
+
+@app.post("/duty/shift-rules")
+def save_shift_rules_route(request: Request, first_start: str=Form(...), first_end: str=Form(...),
+                           second_start: str=Form(...), second_end: str=Form(...),
+                           second_cutoff: str=Form(...), late_grace_minutes: int=Form(0)):
+    """Persist the global shift rules. Employee duty always overrides them."""
+    require_permission(request,"duty_manage")
+    for value in (first_start,first_end,second_start,second_end,second_cutoff):
+        if not re.fullmatch(r'\d{2}:\d{2}',str(value or '').strip()): raise HTTPException(400,'Invalid shift time')
+    if late_grace_minutes<0 or late_grace_minutes>240: raise HTTPException(400,'Late grace must be between 0 and 240 minutes')
+    try:
+        rules=save_shift_rules(first_start,first_end,second_start,second_end,second_cutoff,late_grace_minutes)
+    except ValueError as exc:
+        return RedirectResponse(f"/duty?error={quote_plus(str(exc))}",303)
+    audit(request,"save","shift_rules","global",
+          f"First {rules[FIRST_START_KEY]}-{rules[FIRST_END_KEY]}; Second {rules[SECOND_START_KEY]}-{rules[SECOND_END_KEY]}; "
+          f"cutoff {rules[CUTOFF_KEY]}; grace {rules[GRACE_KEY]}m; overtime manual-only")
+    return RedirectResponse("/duty?saved=shift",303)
 
 @app.post("/duty/bulk")
 def save_bulk_duty(request: Request, employee_ids: list[int]=Form(...), start_date: str=Form(...), end_date: str=Form(...), regular_start: str=Form(...), regular_end: str=Form(...), friday_start: str=Form(...), friday_end: str=Form(...), regular_break_minutes: int=Form(0), friday_break_minutes: int=Form(0), office_name: str=Form("BURAQ Office"), regular_note: str=Form(""), friday_note: str=Form("Friday duty")):

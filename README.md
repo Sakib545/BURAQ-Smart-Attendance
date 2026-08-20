@@ -1,3 +1,15 @@
+## v9.24.0 Configurable Shifts & Manual Overtime
+
+- Default First Shift **08:30 AM–04:00 PM**, Default Second Shift **04:00 PM–10:00 AM**, Second Shift auto-detection cutoff **03:00 PM**।
+- `/duty` page-এ নতুন **Shift Rules** card থেকে Admin/HR প্রতিটি shift সময়, detection cutoff এবং late-grace minutes (default `0`) নিজে পরিবর্তন করতে পারবেন।
+- সব rule বিদ্যমান `system_settings` table-এ স্থায়ীভাবে সংরক্ষিত হয়; Admin আবার না বদলানো পর্যন্ত পরের মাসগুলোতেও একই নিয়ম চালু থাকে।
+- Duty priority অপরিবর্তিত এবং পরিষ্কার: **Employee custom duty → Employee weekly duty → Global Shift Rules**। এক employee-এর duty save করলে অন্য কারো duty বদলায় না।
+- Late minutes প্রযোজ্য duty start থেকে গণনা হয় এবং configured late-grace শেষ হওয়ার পরেই record হয়। সব হিসাব `Asia/Dhaka` timezone-এ, dashboard-এ 12-hour format-এ।
+- **Overtime এখন সম্পূর্ণ manual**: দেরিতে Check-out করলেও কোনো automatic overtime তৈরি হয় না; আসল check-in/check-out সময় অপরিবর্তিত থাকে। HR/Admin Payroll page-এ manually overtime hours ও rate দেবেন এবং Payroll, payslip, PDF ও XLSX শুধু সেই manual overtime দেখায়।
+- Break minutes weekly ও custom duty-তে আগের মতোই configurable; salary break বাদ দিয়ে payable duty time থেকেই হিসাব হয়।
+- Basic Salary HR না বদলানো পর্যন্ত স্থায়ী থাকে; duty সম্পূর্ণ না হলে full Basic Salary স্বয়ংক্রিয়ভাবে যোগ হয় না। Payroll শুধু authorized HR/Admin দেখতে ও edit করতে পারেন।
+- Migration সম্পূর্ণ idempotent: কোনো table drop/truncate/recreate হয়নি; employees, attendance, duty, custom duty, face data, settings, payroll ও WhatsApp data অক্ষত থাকে।
+
 ## v9.23.0 Automatic Attendance Shift
 
 - Check-in সম্পন্ন না হলে Check-out Location বা Selfie flow শুরু হবে না।

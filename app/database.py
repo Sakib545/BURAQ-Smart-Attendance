@@ -446,6 +446,9 @@ def apply_feature_migrations() -> None:
     mark_migration("v9.20-mandatory-selfie-review")
     mark_migration("v9.21-duty-break-payroll")
     mark_migration("v9.23-auto-attendance-shift")
+    # v9.24 keeps the configurable shift rules as system_settings rows only, so
+    # no table is created, altered, dropped or truncated for this release.
+    mark_migration("v9.24-configurable-shift-rules")
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.

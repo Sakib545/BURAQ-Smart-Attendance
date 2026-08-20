@@ -16,6 +16,7 @@ from app.face_log import invalidate_gallery_cache, load_impostor_gallery, log_fa
 from app.duplicate_detector import DuplicateThresholds, detect_duplicate, make_fingerprint
 from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
 from app.database import database_kind, get_db
+from app.shift_rules import apply_late_grace, second_shift_cutoff, shift_window
 from app.time_format import format_time_12h
 
 
@@ -314,14 +315,12 @@ def save_face_reference(employee, media_id, image_bytes):
 
 
 def shift_times(shift):
-    return (time(16), time(22)) if (shift or "").lower() == "evening" else (time(8), time(16))
+    """Global fallback window from the Admin-configured shift rules."""
+    return shift_window(shift)
 
 def automatic_attendance_shift(moment):
     """Classify an actual check-in using the configured local-time cutoff."""
-    try:
-        cutoff = time.fromisoformat(settings.second_shift_from)
-    except (TypeError, ValueError):
-        cutoff = time(15)
+    cutoff = second_shift_cutoff()
     local_moment = _submitted_at_local(moment)
     return "second" if local_moment.time().replace(tzinfo=None) >= cutoff else "first"
 
@@ -357,7 +356,7 @@ def check_in(employee):
     current = now_local(); work_date = current.date().isoformat()
     attendance_shift = automatic_attendance_shift(current)
     start_dt,_=duty_window(employee,current.date(),shift_override=_employee_shift_for_attendance(attendance_shift))
-    late = max(0, int((current-start_dt).total_seconds() // 60))
+    late = apply_late_grace(int((current-start_dt).total_seconds() // 60))
     with get_db() as c:
         record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], work_date)).fetchone()
         if record and record["check_in"]: return f"ℹ️ আজ Check In করা হয়েছে: {datetime.fromisoformat(record['check_in']).strftime('%I:%M %p')}"
@@ -386,15 +385,16 @@ def check_out(employee):
         record,duty_date=_open_attendance(employee,current,c)
     if not record: return "❌ আগে Check In করতে হবে।"
     _,end_dt=duty_window(employee,duty_date,shift_override=_employee_shift_for_attendance(record['attendance_shift']))
-    early=max(0,int((end_dt-current).total_seconds()//60)); overtime=max(0,int((current-end_dt).total_seconds()//60))
+    # Overtime is manual-only from v9.24: a late check-out keeps the real
+    # timestamp but never generates automatic overtime.
+    early=max(0,int((end_dt-current).total_seconds()//60))
     with get_db() as c:
         if record["check_out"]: return f"ℹ️ আজ Check Out করা হয়েছে: {datetime.fromisoformat(record['check_out']).strftime('%I:%M %p')}"
         worked = max(0, int((current - datetime.fromisoformat(record["check_in"])).total_seconds() // 60))
-        c.execute("UPDATE attendance SET check_out=?,early_leave_minutes=?,overtime_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (current.isoformat(timespec="seconds"), early, overtime, record["id"]))
+        c.execute("UPDATE attendance SET check_out=?,early_leave_minutes=?,overtime_minutes=0,updated_at=CURRENT_TIMESTAMP WHERE id=?", (current.isoformat(timespec="seconds"), early, record["id"]))
     hours, minutes = divmod(worked, 60)
     message = f"✅ Check Out সফল\nসময়: {current.strftime('%I:%M %p')}\nকাজ করেছেন: {hours} ঘণ্টা {minutes} মিনিট"
     if early: message += f"\n⚠️ Early leave: {early} মিনিট"
-    if overtime: message += f"\n⏱️ Overtime: {overtime} মিনিট"
     return message
 
 
@@ -446,7 +446,7 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
                 item, submitted.date(), db=c,
                 shift_override=_employee_shift_for_attendance(attendance_shift),
             )
-            late = max(0, int((submitted - start_dt).total_seconds() // 60))
+            late = apply_late_grace(int((submitted - start_dt).total_seconds() // 60))
             attendance = c.execute(
                 "SELECT * FROM attendance WHERE employee_id=? AND work_date=?",
                 (item["id"], work_date),
@@ -484,11 +484,12 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
             checked_in = _submitted_at_local(attendance["check_in"])
             worked = max(0, int((submitted - checked_in).total_seconds() // 60))
             early = max(0, int((end_dt - submitted).total_seconds() // 60))
-            overtime = max(0, int((submitted - end_dt).total_seconds() // 60))
             hours, minutes = divmod(worked, 60)
             result = f"Check-out approved at {submitted.strftime('%I:%M %p')} · Worked {hours}h {minutes}m"
-            c.execute("UPDATE attendance SET check_out=?,early_leave_minutes=?,overtime_minutes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                      (submitted_text, early, overtime, attendance["id"]))
+            # Overtime stays manual-only: the real check-out time is kept, but
+            # no paid overtime is generated automatically.
+            c.execute("UPDATE attendance SET check_out=?,early_leave_minutes=?,overtime_minutes=0,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                      (submitted_text, early, attendance["id"]))
             c.execute("INSERT INTO attendance_evidence(employee_id,action,latitude,longitude,distance_meters,image_media_id,verified) VALUES(?,?,?,?,?,?,?)",
                       (item["id"], action, item["fingerprint_latitude"], item["fingerprint_longitude"], item["fingerprint_distance"], item["fingerprint_media_id"], True))
             c.execute("UPDATE attendance_fingerprints SET review_status='approved',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP,attendance_applied=?,attendance_result=? WHERE id=? AND review_status='pending'",
@@ -507,7 +508,7 @@ def report(employee):
     with get_db() as c: rows = c.execute("SELECT * FROM attendance WHERE employee_id=? ORDER BY work_date DESC LIMIT 7", (employee["id"],)).fetchall()
     if not rows: return "ℹ️ কোনো attendance record নেই।"
     output = [f"📊 {employee['name']}-এর সর্বশেষ Attendance:"]
-    for row in rows: output.append(f"{row['work_date']} | {attendance_shift_label(row['attendance_shift'])} | In {format_time_12h(row['check_in']) or '-'} | Out {format_time_12h(row['check_out']) or '-'} | Late {row['late_minutes']}m | OT {row['overtime_minutes']}m")
+    for row in rows: output.append(f"{row['work_date']} | {attendance_shift_label(row['attendance_shift'])} | In {format_time_12h(row['check_in']) or '-'} | Out {format_time_12h(row['check_out']) or '-'} | Late {row['late_minutes']}m")
     return "\n".join(output)
 
 
