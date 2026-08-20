@@ -450,6 +450,8 @@ def apply_feature_migrations() -> None:
     # v9.24 keeps the configurable shift rules as system_settings rows only, so
     # no table is created, altered, dropped or truncated for this release.
     mark_migration("v9.24-configurable-shift-rules")
+    # Marker only: v9.26 adds performance_notices via CREATE TABLE IF NOT EXISTS
+    # and reuses the existing leave_requests table, so nothing is altered here.
     mark_migration("v9.26-leave-performance")
     # v9.24.0 accidentally shipped the complete default rule set with a
     # 10:00 AM Second Shift end and a 3:00 PM cutoff. Correct only that exact

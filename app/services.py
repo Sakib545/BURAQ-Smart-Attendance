@@ -14,6 +14,7 @@ from PIL import Image, ImageOps
 from app.face_ai import FaceAIError, extract_embedding, best_match, best_impostor, gallery_score
 from app.face_log import invalidate_gallery_cache, load_impostor_gallery, log_face_event
 from app.duplicate_detector import DuplicateThresholds, detect_duplicate, make_fingerprint
+from app.leave_flow import handle_leave_state, leave_report, start_leave_request
 from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
 from app.database import database_kind, get_db
 from app.shift_rules import apply_late_grace, second_shift_cutoff, shift_window
@@ -138,7 +139,8 @@ def has_face(employee_id):
 
 def menu(name=None):
     greeting = f"স্বাগতম {name}" if name else "BURAQ Smart Attendance"
-    return f"👋 {greeting}\n\n1️⃣ Register\n2️⃣ Check In\n3️⃣ Check Out\n4️⃣ My Attendance\n5️⃣ Help"
+    return (f"👋 {greeting}\n\n1️⃣ Register\n2️⃣ Check In\n3️⃣ Check Out\n"
+            f"4️⃣ My Attendance\n5️⃣ Help\n6️⃣ ছুটির আবেদন (Leave)\n7️⃣ My Leave")
 
 
 def registration_preview(employee):
@@ -325,6 +327,29 @@ def automatic_attendance_shift(moment):
     return "second" if local_moment.time().replace(tzinfo=None) >= cutoff else "first"
 
 
+SECOND_SHIFT_ASSIGNMENTS = {"second", "evening", "night"}
+
+
+def resolve_attendance_shift(employee, moment):
+    """Which shift this check-in belongs to.
+
+    The clock-based cutoff alone cannot tell an early arrival from a late one:
+    a second-shift worker who reaches the office at 15:56 for a 16:00 duty sits
+    *before* a 16:00 cutoff and used to be filed as first shift, then measured
+    against the 08:30 start — over seven hours "late" for arriving four minutes
+    early.
+
+    So the employee's own assignment wins when it is explicitly a second-shift
+    one. Only when the roster says nothing useful (the default 'morning') do we
+    fall back to guessing from the clock, which keeps the previous behaviour for
+    anyone whose shift column was never set.
+    """
+    assigned = str((employee["shift"] if employee is not None else "") or "").strip().lower()
+    if assigned in SECOND_SHIFT_ASSIGNMENTS:
+        return "second"
+    return automatic_attendance_shift(moment)
+
+
 def attendance_shift_label(value):
     return "Second Shift" if (value or "").lower() == "second" else "First Shift"
 
@@ -354,7 +379,7 @@ def duty_window(employee, duty_date, db=None, shift_override=None):
 
 def check_in(employee):
     current = now_local(); work_date = current.date().isoformat()
-    attendance_shift = automatic_attendance_shift(current)
+    attendance_shift = resolve_attendance_shift(employee, current)
     start_dt,_=duty_window(employee,current.date(),shift_override=_employee_shift_for_attendance(attendance_shift))
     late = apply_late_grace(int((current-start_dt).total_seconds() // 60))
     with get_db() as c:
@@ -441,7 +466,7 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
 
         if action == "check_in":
             work_date = submitted.date().isoformat()
-            attendance_shift = automatic_attendance_shift(submitted)
+            attendance_shift = resolve_attendance_shift(item, submitted)
             start_dt, _ = duty_window(
                 item, submitted.date(), db=c,
                 shift_override=_employee_shift_for_attendance(attendance_shift),
@@ -711,12 +736,6 @@ def process(phone, text):
     current_state = state(phone)
     if command in {"cancel", "বাতিল"}:
         clear_state(phone); return "বর্তমান প্রক্রিয়া বাতিল হয়েছে। Menu খুলতে লিখুন: Menu"
-    # Loaded lazily to avoid a module cycle: leave_flow reuses the same durable
-    # conversation state and employee lookup helpers defined in this module.
-    from app.leave_flow import handle_leave_message
-    leave_response = handle_leave_message(phone, text)
-    if leave_response is not None:
-        return leave_response
     if current_state:
         value = current_state["state"]
         if value == "awaiting_staff_id": return begin_registration(text, phone)
@@ -731,6 +750,8 @@ def process(phone, text):
             parts = value.split(":")
             pose = parts[4] if len(parts) > 4 else "straight"
             return liveness_prompt(pose)
+        if value.startswith("leave_"):
+            return handle_leave_state(phone, value, text, employee_by_phone(phone))
     if command in {"hi","hello","menu","start"}:
         employee=employee_by_phone(phone); return menu(employee["name"] if employee else None)
     if command in {"register","1"}:
@@ -746,6 +767,8 @@ def process(phone, text):
     if not employee: return "❌ আগে Register করুন। শুধু লিখুন: Register"
     if command in {"my attendance","my_attendance","attendance","report","4"}: return report(employee)
     if command in {"my duty","my_duty","duty","5"}: return duty_report(employee)
+    if command in {"leave","ছুটি","apply leave","leave request","6"}: return start_leave_request(phone,employee)
+    if command in {"my leave","my_leave","leave status","আমার ছুটি","7"}: return leave_report(employee)
     return "বুঝতে পারিনি। Menu দেখতে লিখুন: Menu"
 
 
