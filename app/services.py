@@ -711,6 +711,12 @@ def process(phone, text):
     current_state = state(phone)
     if command in {"cancel", "বাতিল"}:
         clear_state(phone); return "বর্তমান প্রক্রিয়া বাতিল হয়েছে। Menu খুলতে লিখুন: Menu"
+    # Loaded lazily to avoid a module cycle: leave_flow reuses the same durable
+    # conversation state and employee lookup helpers defined in this module.
+    from app.leave_flow import handle_leave_message
+    leave_response = handle_leave_message(phone, text)
+    if leave_response is not None:
+        return leave_response
     if current_state:
         value = current_state["state"]
         if value == "awaiting_staff_id": return begin_registration(text, phone)

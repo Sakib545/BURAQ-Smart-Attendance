@@ -34,6 +34,8 @@ from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 from app.services import approve_pending_attendance, phones_match, receive_location, state
+from app.leave_flow import decision_message
+from app.performance import NOTICE_TYPES, build_message, month_label, monthly_ranking, record_notice
 from app.shift_rules import (
     CUTOFF_KEY, FIRST_END_KEY, FIRST_START_KEY, GRACE_KEY,
     SECOND_END_KEY, SECOND_START_KEY, get_shift_rules, save_shift_rules, shift_window,
@@ -41,7 +43,7 @@ from app.shift_rules import (
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.24.1"
+APP_VERSION = "9.26.0"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -853,6 +855,7 @@ def attendance_center(request: Request):
     cards=[]
     if has_permission(request,"reports_view"): cards.append(("📊","Attendance Reports","Daily records, late, overtime and employee attendance history.","/reports"))
     if has_permission(request,"duty_view"): cards.append(("🗓","Duty Schedule","Regular, custom, Friday and night duty with reminder status.","/duty-schedules"))
+    if has_permission(request,"performance_view"): cards.append(("🏆","Monthly Performance","Duty score, ranking ও WhatsApp recognition notice.","/performance-awards"))
     if has_permission(request,"attendance_edit"): cards.append(("✅","Missing Duty Days","Scheduled duty with no attendance at all. Record a past day directly.","/attendance/missing"))
     if has_permission(request,"leave_view"): cards.append(("🏖","Leave & Corrections","Leave approval, attendance correction, shifts and departments.","/hr-operations"))
     if has_permission(request,"reports_export"): cards.append(("📥","Reports & Export","Download filtered attendance as Excel, PDF or CSV.","/reports"))
@@ -2530,6 +2533,93 @@ def report_pdf(request: Request, start_date: str, end_date: str, status: str = "
     doc.build([Paragraph("BURAQ Attendance Report",styles["Title"]),Paragraph(f"{start_date} to {end_date}",styles["Normal"]),Spacer(1,8),table]); out.seek(0)
     return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-{start_date}-to-{end_date}.pdf"})
 
+@app.get("/performance-awards", response_class=HTMLResponse)
+def performance_awards_page(request: Request, month: str = "", saved: str = "", error: str = ""):
+    require_permission(request,"performance_view")
+    period=month or datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m")
+    if not re.fullmatch(r"\d{4}-\d{2}",period): raise HTTPException(400,"Invalid month")
+    rows=monthly_ranking(period)
+    can_send=has_permission(request,"performance_manage")
+    notice=""
+    if saved: notice="<div class='notice'>Notice WhatsApp-এ পাঠানো হয়েছে।</div>"
+    elif error=="duplicate": notice="<div class='notice'>এই notice আগেই পাঠানো হয়েছে।</div>"
+    elif error=="phone": notice="<div class='notice'>এই employee-এর WhatsApp নম্বর নেই।</div>"
+    elif error: notice="<div class='notice'>Notice পাঠানো যায়নি।</div>"
+
+    labels={"star":"🏆 Star","good":"👏 Good","coaching":"📋 Private note"}
+    body_rows=[]
+    for r in rows:
+        rank=f"#{r['rank_position']}" if r['rank_position'] else "—"
+        badge="<span class='sub'>Not enough duty days</span>" if not r['eligible'] else ""
+        sent=" ".join(f"<span class='tag'>{escape(labels.get(t,t))} sent</span>" for t in r['already_sent'])
+        action="-"
+        if can_send and r['suggested'] and r['suggested'] not in r['already_sent'] and r['phone']:
+            preview=escape(build_message(r,r['suggested'],period))
+            action=(f"<details><summary class='btn secondary'>{escape(labels[r['suggested']])}</summary>"
+                    f"<pre style='white-space:pre-wrap;font-size:13px;margin:10px 0'>{preview}</pre>"
+                    f"<form method='post' action='/performance-awards/send'>"
+                    f"<input type='hidden' name='employee_id' value='{r['employee_id']}'>"
+                    f"<input type='hidden' name='period' value='{escape(period)}'>"
+                    f"<input type='hidden' name='notice_type' value='{escape(r['suggested'])}'>"
+                    f"<button class='btn'>এই বার্তাটি পাঠান</button></form></details>")
+        elif not r['phone']: action="<span class='sub'>No WhatsApp</span>"
+        body_rows.append(
+            f"<tr><td>{rank}</td><td>{escape(r['staff_id'])}<div class='sub'>{escape(r['name'])}</div>{badge}</td>"
+            f"<td><b>{r['score']}</b><div class='sub'>A{r['attendance']} · P{r['punctuality']} · C{r['completeness']}</div></td>"
+            f"<td>{int(r['worked'])}/{int(r['expected_days'])}</td><td>{r['late_minutes']}m</td>"
+            f"<td>{r['incomplete']}</td><td>{sent}</td><td>{action}</td></tr>")
+
+    body=(f"{notice}<div class='hero'><div><div class='eyebrow'>Recognition</div>"
+          f"<h2>Monthly Performance</h2><div class='sub'>Attendance 50 · Punctuality 35 · Completeness 15। "
+          f"Approved leave স্কোর কমায় না।</div></div>"
+          f"<form method='get'><input type='month' name='month' value='{escape(period)}'>"
+          f"<button class='btn secondary'>দেখুন</button></form></div>"
+          f"<div class='section-gap'></div>"
+          f"<div class='card'><p class='sub'>কোনো বার্তা স্বয়ংক্রিয়ভাবে যায় না। প্রতিটি বার্তা পাঠানোর আগে "
+          f"HR নিজে দেখে নিশ্চিত করবেন। দুর্বল মাসের বার্তা শুধু সংশ্লিষ্ট কর্মীর কাছেই যায় এবং তাতে কোনো "
+          f"তুলনা বা নেতিবাচক আখ্যা থাকে না।</p></div>"
+          f"<div class='section-gap'></div><div class='card' style='overflow:auto'>"
+          f"<h2>{escape(month_label(period))}</h2><table><thead><tr><th>Rank</th><th>Employee</th><th>Score</th>"
+          f"<th>Worked</th><th>Late</th><th>No checkout</th><th>Sent</th><th>Action</th></tr></thead>"
+          f"<tbody>{''.join(body_rows) or '<tr><td colspan=8>No employees.</td></tr>'}</tbody></table></div>")
+    return layout("Performance",body,request,"performance")
+
+@app.post("/performance-awards/send")
+async def performance_awards_send(request: Request, employee_id: int=Form(...),
+                                  period: str=Form(...), notice_type: str=Form(...)):
+    require_permission(request,"performance_manage")
+    if notice_type not in NOTICE_TYPES: raise HTTPException(400,"Unknown notice type")
+    if not re.fullmatch(r"\d{4}-\d{2}",period or ""): raise HTTPException(400,"Invalid month")
+    row=next((r for r in monthly_ranking(period) if r["employee_id"]==employee_id),None)
+    if not row: raise HTTPException(404,"Employee not found")
+    # The notice type comes from the server-side ranking. Do not allow a
+    # modified form request to send a different category of message.
+    if str(row.get("suggested") or "") != notice_type:
+        raise HTTPException(409,"Notice type no longer matches the current ranking")
+    if not row["phone"]: return RedirectResponse(f"/performance-awards?month={period}&error=phone",303)
+    message=build_message(row,notice_type,period)
+    actor=str(request.session.get("hr_id") or "super_admin")
+    # Reserve the UNIQUE row before calling Meta. This prevents two rapid
+    # button presses (or concurrent HR sessions) from sending twice.
+    if not record_notice(employee_id,period,notice_type,row,message,actor):
+        return RedirectResponse(f"/performance-awards?month={period}&error=duplicate",303)
+    try:
+        result=await send_text(row["phone"],message)
+    except Exception:
+        logger.exception("Performance notice delivery failed employee_id=%s period=%s",employee_id,period)
+        result={"sent":False}
+    if not isinstance(result,dict) or result.get("sent") is not True:
+        # Release the reservation when Meta did not accept the message, so HR
+        # can retry. Successful rows stay permanently protected by UNIQUE.
+        with get_db() as c:
+            c.execute(
+                "DELETE FROM performance_notices WHERE employee_id=? AND period=? AND notice_type=?",
+                (employee_id,period,notice_type),
+            )
+        return RedirectResponse(f"/performance-awards?month={period}&error=send",303)
+    audit(request,"send","performance_notice",str(employee_id),f"{period} {notice_type} score={row['score']}")
+    return RedirectResponse(f"/performance-awards?month={period}&saved=1",303)
+
 @app.get("/hr-operations", response_class=HTMLResponse)
 def operations_page(request: Request, saved: str = ""):
     require_permission(request,"leave_view")
@@ -2568,15 +2658,24 @@ def create_leave(request: Request, employee_id: int=Form(...), leave_type: str=F
     audit(request,"create","leave_request",str(employee_id),f"{start_date} to {end_date}"); return RedirectResponse("/hr-operations?saved=1",303)
 
 @app.post("/leave/{request_id}/{action}")
-def decide_leave(request: Request, request_id: int, action: str):
+def decide_leave(request: Request, request_id: int, action: str, background_tasks: BackgroundTasks):
     require_permission(request,"leave_manage"); status="approved" if action=="approve" else "rejected" if action=="reject" else None
     if not status: raise HTTPException(400)
+    notify=None
     with get_db() as c:
         row=c.execute("SELECT * FROM leave_requests WHERE id=?",(request_id,)).fetchone(); c.execute("UPDATE leave_requests SET status=?,decided_by=?,decided_at=CURRENT_TIMESTAMP WHERE id=?",(status,str(request.session.get('hr_id') or 'super_admin'),request_id))
         if row and status=="approved":
             d=datetime.fromisoformat(row['start_date']).date(); end=datetime.fromisoformat(row['end_date']).date()
             while d<=end:
                 c.execute("INSERT INTO attendance(employee_id,work_date,status,source) VALUES(?,?,?,?) ON CONFLICT(employee_id,work_date) DO UPDATE SET status=excluded.status,source=excluded.source,updated_at=CURRENT_TIMESTAMP",(row['employee_id'],d.isoformat(),'leave','hr')); d+=timedelta(days=1)
+        if row:
+            emp=c.execute("SELECT whatsapp_phone,phone FROM employees WHERE id=?",(row['employee_id'],)).fetchone()
+            phone=(emp['whatsapp_phone'] or emp['phone']) if emp else ""
+            # Only employee-filed requests are announced back: an HR-entered row
+            # may belong to someone who never used the WhatsApp bot.
+            if phone and str(row['requested_by'] or '')=="employee:whatsapp":
+                notify=(phone,decision_message(row,status))
+    if notify: background_tasks.add_task(send_text,*notify)
     audit(request,status,"leave_request",str(request_id),""); return RedirectResponse("/hr-operations?saved=1",303)
 
 def _missing_duty_days(employee_id: int, month: str) -> list[dict]:
