@@ -33,14 +33,14 @@ SETTING_KEYS = TIME_KEYS + (GRACE_KEY,)
 
 MAX_GRACE_MINUTES = 240
 
-# Default First Shift 08:30 AM - 04:00 PM, Second Shift 04:00 PM - 10:00 AM,
-# automatic Second Shift detection from 03:00 PM, no late grace.
+# Default First Shift 08:30 AM - 04:00 PM, Second Shift 04:00 PM - 10:00 PM,
+# automatic Second Shift detection from 04:00 PM, no late grace.
 DEFAULTS: dict[str, str] = {
     FIRST_START_KEY: "08:30",
     FIRST_END_KEY: "16:00",
     SECOND_START_KEY: "16:00",
-    SECOND_END_KEY: "10:00",
-    CUTOFF_KEY: "15:00",
+    SECOND_END_KEY: "22:00",
+    CUTOFF_KEY: "16:00",
     GRACE_KEY: "0",
 }
 

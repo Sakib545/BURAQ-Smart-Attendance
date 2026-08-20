@@ -449,6 +449,43 @@ def apply_feature_migrations() -> None:
     # v9.24 keeps the configurable shift rules as system_settings rows only, so
     # no table is created, altered, dropped or truncated for this release.
     mark_migration("v9.24-configurable-shift-rules")
+    # v9.24.0 accidentally shipped the complete default rule set with a
+    # 10:00 AM Second Shift end and a 3:00 PM cutoff. Correct only that exact
+    # generated set. Any HR-customized combination is deliberately preserved.
+    shift_fix_migration = "v9.24.1-correct-shift-defaults"
+    if not migration_applied(shift_fix_migration):
+        shift_keys = (
+            "shift_first_start", "shift_first_end", "shift_second_start",
+            "shift_second_end", "shift_second_cutoff",
+        )
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text("SELECT key,value FROM system_settings WHERE key IN "
+                     "(:first_start,:first_end,:second_start,:second_end,:cutoff)"),
+                {
+                    "first_start": shift_keys[0], "first_end": shift_keys[1],
+                    "second_start": shift_keys[2], "second_end": shift_keys[3],
+                    "cutoff": shift_keys[4],
+                },
+            ).mappings().all()
+            stored = {str(row["key"]): str(row["value"]) for row in rows}
+            broken_defaults = {
+                "shift_first_start": "08:30", "shift_first_end": "16:00",
+                "shift_second_start": "16:00", "shift_second_end": "10:00",
+                "shift_second_cutoff": "15:00",
+            }
+            if stored == broken_defaults:
+                conn.execute(
+                    text("UPDATE system_settings SET value=:value,updated_at=CURRENT_TIMESTAMP "
+                         "WHERE key=:key"),
+                    {"key": "shift_second_end", "value": "22:00"},
+                )
+                conn.execute(
+                    text("UPDATE system_settings SET value=:value,updated_at=CURRENT_TIMESTAMP "
+                         "WHERE key=:key"),
+                    {"key": "shift_second_cutoff", "value": "16:00"},
+                )
+        mark_migration(shift_fix_migration)
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.

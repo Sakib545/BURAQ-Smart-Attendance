@@ -1,6 +1,6 @@
-## v9.24.0 Configurable Shifts & Manual Overtime
+## v9.24.1 Configurable Shifts & Manual Overtime
 
-- Default First Shift **08:30 AM–04:00 PM**, Default Second Shift **04:00 PM–10:00 AM**, Second Shift auto-detection cutoff **03:00 PM**।
+- Default First Shift **08:30 AM–04:00 PM**, Default Second Shift **04:00 PM–10:00 PM**, Second Shift auto-detection cutoff **04:00 PM**।
 - `/duty` page-এ নতুন **Shift Rules** card থেকে Admin/HR প্রতিটি shift সময়, detection cutoff এবং late-grace minutes (default `0`) নিজে পরিবর্তন করতে পারবেন।
 - সব rule বিদ্যমান `system_settings` table-এ স্থায়ীভাবে সংরক্ষিত হয়; Admin আবার না বদলানো পর্যন্ত পরের মাসগুলোতেও একই নিয়ম চালু থাকে।
 - Duty priority অপরিবর্তিত এবং পরিষ্কার: **Employee custom duty → Employee weekly duty → Global Shift Rules**। এক employee-এর duty save করলে অন্য কারো duty বদলায় না।
@@ -9,12 +9,13 @@
 - Break minutes weekly ও custom duty-তে আগের মতোই configurable; salary break বাদ দিয়ে payable duty time থেকেই হিসাব হয়।
 - Basic Salary HR না বদলানো পর্যন্ত স্থায়ী থাকে; duty সম্পূর্ণ না হলে full Basic Salary স্বয়ংক্রিয়ভাবে যোগ হয় না। Payroll শুধু authorized HR/Admin দেখতে ও edit করতে পারেন।
 - Migration সম্পূর্ণ idempotent: কোনো table drop/truncate/recreate হয়নি; employees, attendance, duty, custom duty, face data, settings, payroll ও WhatsApp data অক্ষত থাকে।
+- v9.24.0-এর ভুল generated default (`04:00 PM–10:00 AM`, cutoff `03:00 PM`) শুধু exact default match হলে নিরাপদে `04:00 PM–10:00 PM`, cutoff `04:00 PM` করা হয়; HR-এর custom rule পরিবর্তন হয় না।
 
 ## v9.23.0 Automatic Attendance Shift
 
 - Check-in সম্পন্ন না হলে Check-out Location বা Selfie flow শুরু হবে না।
-- সকাল/দুপুরের Check-in স্বয়ংক্রিয়ভাবে First Shift এবং 3:00 PM থেকে Second Shift হিসেবে সংরক্ষিত হবে।
-- `SECOND_SHIFT_FROM` Railway variable দিয়ে Second Shift cutoff পরিবর্তন করা যাবে (default `15:00`)।
+- সকাল/দুপুরের Check-in স্বয়ংক্রিয়ভাবে First Shift এবং 4:00 PM থেকে Second Shift হিসেবে সংরক্ষিত হবে।
+- `SECOND_SHIFT_FROM` Railway variable দিয়ে Second Shift cutoff পরিবর্তন করা যাবে (default `16:00`)।
 - Dashboard, WhatsApp report এবং attendance exports-এ attendance-এর আসল shift দেখা যাবে।
 - পুরোনো database-এ `attendance_shift` column নিরাপদ migration-এর মাধ্যমে নিজে থেকে যোগ হবে।
 
@@ -246,7 +247,7 @@ Existing employee, attendance, HR, permission and WhatsApp data are preserved.
 
 - Fixed salary and default overtime rate are employee master values: set once and reuse automatically until HR changes them.
 - One central payroll engine powers preview, saved records, Excel, monthly PDF and individual payslips.
-- Regular/custom/Friday/night duty, half-day attendance, paid leave, unpaid leave, absence and automatic attendance overtime are calculated separately.
+- Regular/custom/Friday/night duty, half-day attendance, paid leave, unpaid leave and absence are calculated separately; overtime remains manual-only.
 - Bonus, advance, fine and other deductions require an adjustment reason; HR can override overtime manually.
 - Payroll follows Draft -> Finalized -> Paid. Finalized records are locked, and only Super Admin can reopen an unpaid record with a reason.
 - Paid payroll requires payment method and reference; every save, finalize, reopen and payment stores a snapshot audit log.

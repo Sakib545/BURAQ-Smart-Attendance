@@ -61,19 +61,19 @@ def test_first_shift_default_is_0830_to_1600():
     assert end.strftime("%H:%M") == "16:00"
 
 
-def test_second_shift_default_is_1600_to_1000():
+def test_second_shift_default_is_1600_to_2200():
     start, end = shift_times("evening")
     assert start.strftime("%H:%M") == "16:00"
-    assert end.strftime("%H:%M") == "10:00"
+    assert end.strftime("%H:%M") == "22:00"
 
 
 def test_second_shift_detection_uses_configured_cutoff():
     assert automatic_attendance_shift("2026-08-20T08:45:00+06:00") == "first"
     assert automatic_attendance_shift("2026-08-20T14:59:00+06:00") == "first"
-    assert automatic_attendance_shift("2026-08-20T15:00:00+06:00") == "second"
+    assert automatic_attendance_shift("2026-08-20T15:00:00+06:00") == "first"
     assert automatic_attendance_shift("2026-08-20T16:05:00+06:00") == "second"
 
-    shift_rules.save_shift_rules("08:30", "16:00", "16:00", "10:00", "16:00", 0)
+    shift_rules.save_shift_rules("08:30", "16:00", "16:00", "22:00", "16:00", 0)
     assert automatic_attendance_shift("2026-08-20T15:30:00+06:00") == "first"
     assert automatic_attendance_shift("2026-08-20T16:00:00+06:00") == "second"
 
@@ -101,11 +101,44 @@ def test_saved_rules_persist_in_system_settings():
 
 
 def test_invalid_rule_values_never_blank_the_configuration():
-    shift_rules.save_shift_rules("bad", "", "16:00", "10:00", "not-a-time", "abc")
+    shift_rules.save_shift_rules("bad", "", "16:00", "22:00", "not-a-time", "abc")
     rules = shift_rules.get_shift_rules()
     assert rules[shift_rules.FIRST_START_KEY] == "08:30"
-    assert rules[shift_rules.CUTOFF_KEY] == "15:00"
+    assert rules[shift_rules.CUTOFF_KEY] == "16:00"
     assert rules[shift_rules.GRACE_KEY] == 0
+
+
+def test_broken_v924_defaults_are_corrected_without_touching_custom_rules():
+    from app.database import apply_feature_migrations
+
+    with get_db() as db:
+        db.execute("DELETE FROM schema_migrations WHERE version=?", ("v9.24.1-correct-shift-defaults",))
+        for key, value in {
+            shift_rules.FIRST_START_KEY: "08:30",
+            shift_rules.FIRST_END_KEY: "16:00",
+            shift_rules.SECOND_START_KEY: "16:00",
+            shift_rules.SECOND_END_KEY: "10:00",
+            shift_rules.CUTOFF_KEY: "15:00",
+        }.items():
+            db.execute(
+                "INSERT INTO system_settings(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+    apply_feature_migrations()
+    corrected = shift_rules.get_shift_rules()
+    assert corrected[shift_rules.SECOND_END_KEY] == "22:00"
+    assert corrected[shift_rules.CUTOFF_KEY] == "16:00"
+
+    # A later customized combination does not match the broken generated set.
+    shift_rules.save_shift_rules("09:00", "17:00", "17:00", "23:00", "16:30", 5)
+    with get_db() as db:
+        db.execute("DELETE FROM schema_migrations WHERE version=?", ("v9.24.1-correct-shift-defaults",))
+    apply_feature_migrations()
+    custom = shift_rules.get_shift_rules()
+    assert custom[shift_rules.FIRST_START_KEY] == "09:00"
+    assert custom[shift_rules.SECOND_END_KEY] == "23:00"
+    assert custom[shift_rules.CUTOFF_KEY] == "16:30"
 
 
 def test_weekly_duty_overrides_global_shift_rules():
@@ -169,7 +202,7 @@ def test_overnight_duty_end_moves_to_the_next_day():
 def test_late_grace_is_applied_before_late_minutes_are_recorded():
     assert shift_rules.apply_late_grace(0) == 0
     assert shift_rules.apply_late_grace(25) == 25
-    shift_rules.save_shift_rules("08:30", "16:00", "16:00", "10:00", "15:00", 15)
+    shift_rules.save_shift_rules("08:30", "16:00", "16:00", "22:00", "16:00", 15)
     assert shift_rules.apply_late_grace(10) == 0
     assert shift_rules.apply_late_grace(15) == 0
     assert shift_rules.apply_late_grace(25) == 10
@@ -193,7 +226,7 @@ def _pending_selfie(employee_id: int, action: str, media_id: str, created_at: st
 
 def test_late_minutes_follow_duty_start_and_configured_grace():
     employee = _employee("TEST-RULE-LATE")
-    shift_rules.save_shift_rules("08:30", "16:00", "16:00", "10:00", "15:00", 10)
+    shift_rules.save_shift_rules("08:30", "16:00", "16:00", "22:00", "16:00", 10)
     fingerprint = _pending_selfie(employee["id"], "check_in", "rule-late-media", "2026-08-27T08:55:00+06:00")
     assert approve_pending_attendance(fingerprint, "test-admin")
     with get_db() as db:
@@ -316,8 +349,8 @@ def test_existing_data_survives_initialisation_and_migration():
 def test_health_and_ready_report_the_new_version(running_app):
     health = running_app.get("/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "9.24.0"
-    assert APP_VERSION == "9.24.0"
+    assert health.json()["version"] == "9.24.1"
+    assert APP_VERSION == "9.24.1"
 
     ready = running_app.get("/ready")
     assert ready.status_code == 200

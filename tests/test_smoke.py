@@ -31,7 +31,7 @@ def test_liveness_and_readiness():
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "9.24.0"
+        assert health.json()["version"] == "9.24.1"
         assert health.headers.get("x-request-id")
 
         ready = client.get("/ready")
@@ -126,7 +126,8 @@ def test_pending_selfie_approval_finalizes_once():
 
 def test_shift_is_automatic_and_checkout_requires_checkin():
     assert automatic_attendance_shift("2026-08-02T08:15:00+06:00") == "first"
-    assert automatic_attendance_shift("2026-08-02T15:00:00+06:00") == "second"
+    assert automatic_attendance_shift("2026-08-02T15:00:00+06:00") == "first"
+    assert automatic_attendance_shift("2026-08-02T16:00:00+06:00") == "second"
     with TestClient(app):
         with get_db() as db:
             db.execute("DELETE FROM employees WHERE staff_id=?", ("TEST-SHIFT-002",))
