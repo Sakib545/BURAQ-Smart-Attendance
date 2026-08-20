@@ -5,3 +5,5 @@
 - Rules are stored permanently in system_settings and stay active until an Admin changes them.
 - Duty priority: employee custom duty -> employee weekly duty -> global shift rules.
 - Overtime is manual-only: a late check-out never creates overtime; HR enters hours and rate in Payroll.
+- Health and readiness endpoints report version 9.24.0.
+- 
