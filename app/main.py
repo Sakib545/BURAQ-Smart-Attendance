@@ -35,8 +35,7 @@ from app.payroll import PayrollInput, adjustment_reason_required, calculate_payr
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 from app.services import approve_pending_attendance, phones_match, receive_location, state
 from app.leave_flow import decision_message
-from app.performance import (NOTICE_TYPES, build_message, month_label, monthly_ranking,
-                            record_notice, release_notice)
+from app.performance import NOTICE_TYPES, build_message, month_label, monthly_ranking, record_notice
 from app.shift_rules import (
     CUTOFF_KEY, FIRST_END_KEY, FIRST_START_KEY, GRACE_KEY,
     SECOND_END_KEY, SECOND_START_KEY, get_shift_rules, save_shift_rules, shift_window,
@@ -44,7 +43,7 @@ from app.shift_rules import (
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.26.0"
+APP_VERSION = "9.26.1"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -2545,7 +2544,6 @@ def performance_awards_page(request: Request, month: str = "", saved: str = "", 
     if saved: notice="<div class='notice'>Notice WhatsApp-এ পাঠানো হয়েছে।</div>"
     elif error=="duplicate": notice="<div class='notice'>এই notice আগেই পাঠানো হয়েছে।</div>"
     elif error=="phone": notice="<div class='notice'>এই employee-এর WhatsApp নম্বর নেই।</div>"
-    elif error=="send": notice="<div class='notice'>WhatsApp পাঠানো যায়নি। আবার চেষ্টা করুন।</div>"
     elif error: notice="<div class='notice'>Notice পাঠানো যায়নি।</div>"
 
     labels={"star":"🏆 Star","good":"👏 Good","coaching":"📋 Private note"}
@@ -2594,16 +2592,15 @@ async def performance_awards_send(request: Request, employee_id: int=Form(...),
     if not re.fullmatch(r"\d{4}-\d{2}",period or ""): raise HTTPException(400,"Invalid month")
     row=next((r for r in monthly_ranking(period) if r["employee_id"]==employee_id),None)
     if not row: raise HTTPException(404,"Employee not found")
-    # The category comes from the server-side ranking, never from the form: a
-    # tampered request must not be able to send a congratulation to someone the
-    # ranking flagged for a private note, or the reverse.
-    if str(row.get("suggested") or "")!=notice_type:
+    # The notice type comes from the server-side ranking. Do not allow a
+    # modified form request to send a different category of message.
+    if str(row.get("suggested") or "") != notice_type:
         raise HTTPException(409,"Notice type no longer matches the current ranking")
     if not row["phone"]: return RedirectResponse(f"/performance-awards?month={period}&error=phone",303)
     message=build_message(row,notice_type,period)
     actor=str(request.session.get("hr_id") or "super_admin")
-    # Reserve the UNIQUE row before calling Meta so two rapid presses cannot
-    # both send; release it again if delivery fails, so HR can retry.
+    # Reserve the UNIQUE row before calling Meta. This prevents two rapid
+    # button presses (or concurrent HR sessions) from sending twice.
     if not record_notice(employee_id,period,notice_type,row,message,actor):
         return RedirectResponse(f"/performance-awards?month={period}&error=duplicate",303)
     try:
@@ -2612,7 +2609,13 @@ async def performance_awards_send(request: Request, employee_id: int=Form(...),
         logger.exception("Performance notice delivery failed employee_id=%s period=%s",employee_id,period)
         result={"sent":False}
     if not isinstance(result,dict) or result.get("sent") is not True:
-        release_notice(employee_id,period,notice_type)
+        # Release the reservation when Meta did not accept the message, so HR
+        # can retry. Successful rows stay permanently protected by UNIQUE.
+        with get_db() as c:
+            c.execute(
+                "DELETE FROM performance_notices WHERE employee_id=? AND period=? AND notice_type=?",
+                (employee_id,period,notice_type),
+            )
         return RedirectResponse(f"/performance-awards?month={period}&error=send",303)
     audit(request,"send","performance_notice",str(employee_id),f"{period} {notice_type} score={row['score']}")
     return RedirectResponse(f"/performance-awards?month={period}&saved=1",303)

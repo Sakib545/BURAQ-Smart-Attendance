@@ -232,12 +232,7 @@ def build_message(row: dict, notice_type: str, period: str) -> str:
 
 def record_notice(employee_id: int, period: str, notice_type: str, row: dict,
                   message: str, sent_by: str) -> bool:
-    """Atomically reserve/log a notice; False means it already exists.
-
-    The database UNIQUE constraint is the duplicate guard, not a prior SELECT:
-    two HR users pressing send in the same second would both pass a read-then-
-    write check.
-    """
+    """Atomically reserve/log a notice; False means it already exists."""
     try:
         with get_db() as c:
             c.execute(
@@ -247,12 +242,6 @@ def record_notice(employee_id: int, period: str, notice_type: str, row: dict,
                  int(row.get("rank_position") or 0), message, sent_by))
         return True
     except IntegrityError:
+        # The database UNIQUE constraint is the concurrency-safe duplicate
+        # guard, including two HR users pressing send at the same moment.
         return False
-
-
-def release_notice(employee_id: int, period: str, notice_type: str) -> None:
-    """Undo a reservation when delivery failed, so HR can retry."""
-    with get_db() as c:
-        c.execute(
-            "DELETE FROM performance_notices WHERE employee_id=? AND period=? AND notice_type=?",
-            (employee_id, period, notice_type))

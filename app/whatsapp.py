@@ -138,8 +138,6 @@ async def send_menu(to: str, name: str | None = None):
                     {"id": "check_out", "title": "Check Out", "description": "GPS ও Face AI দিয়ে ছুটি"},
                     {"id": "my_attendance", "title": "My Attendance", "description": "সাম্প্রতিক ৭ দিনের রিপোর্ট"},
                     {"id": "my_duty", "title": "My Duty", "description": "আগামী duty schedule দেখুন"},
-                    {"id": "leave", "title": "ছুটির আবেদন", "description": "নতুন ছুটির আবেদন পাঠান"},
-                    {"id": "my_leave", "title": "My Leave", "description": "ছুটির আবেদনের অবস্থা দেখুন"},
                 ]}]
             }
         }

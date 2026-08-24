@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import date, datetime, time as clock_time
 import logging
 from pathlib import Path
 import re
 import time
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, Engine, Result
@@ -450,8 +452,6 @@ def apply_feature_migrations() -> None:
     # v9.24 keeps the configurable shift rules as system_settings rows only, so
     # no table is created, altered, dropped or truncated for this release.
     mark_migration("v9.24-configurable-shift-rules")
-    # Marker only: v9.26 adds performance_notices via CREATE TABLE IF NOT EXISTS
-    # and reuses the existing leave_requests table, so nothing is altered here.
     mark_migration("v9.26-leave-performance")
     # v9.24.0 accidentally shipped the complete default rule set with a
     # 10:00 AM Second Shift end and a 3:00 PM cutoff. Correct only that exact
@@ -490,6 +490,74 @@ def apply_feature_migrations() -> None:
                     {"key": "shift_second_cutoff", "value": "16:00"},
                 )
         mark_migration(shift_fix_migration)
+
+    # Existing deployments received attendance_shift='first' when the column
+    # was introduced. Repair those labels without deleting attendance, payroll,
+    # employees, or user-configured shift rules.
+    shift_backfill_migration = "v9.26.1-correct-existing-attendance-shifts"
+    if not migration_applied(shift_backfill_migration):
+        corrected = 0
+        with engine.begin() as conn:
+            cutoff_row = conn.execute(
+                text("SELECT value FROM system_settings WHERE key=:key"),
+                {"key": "shift_second_cutoff"},
+            ).mappings().first()
+            try:
+                cutoff = clock_time.fromisoformat(
+                    str(cutoff_row["value"] if cutoff_row else settings.second_shift_from)
+                )
+            except ValueError:
+                cutoff = clock_time(16, 0)
+            rows = conn.execute(text(
+                "SELECT a.id,a.employee_id,a.work_date,a.check_in,a.attendance_shift,"
+                "e.shift employee_shift FROM attendance a "
+                "JOIN employees e ON e.id=a.employee_id WHERE a.check_in IS NOT NULL"
+            )).mappings().all()
+            local_zone = ZoneInfo(settings.timezone)
+            for row in rows:
+                try:
+                    work_date = date.fromisoformat(str(row["work_date"]))
+                    checked_in = datetime.fromisoformat(
+                        str(row["check_in"]).replace("Z", "+00:00")
+                    )
+                    checked_in = (
+                        checked_in.replace(tzinfo=local_zone)
+                        if checked_in.tzinfo is None
+                        else checked_in.astimezone(local_zone)
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+                duty = conn.execute(text(
+                    "SELECT start_time FROM custom_duties WHERE employee_id=:employee_id "
+                    "AND duty_date=:duty_date AND is_active"
+                ), {"employee_id": row["employee_id"], "duty_date": work_date.isoformat()}).mappings().first()
+                if not duty:
+                    duty = conn.execute(text(
+                        "SELECT start_time FROM duty_schedules WHERE employee_id=:employee_id "
+                        "AND weekday=:weekday AND is_active"
+                    ), {"employee_id": row["employee_id"], "weekday": work_date.weekday()}).mappings().first()
+                assigned_start = None
+                if duty:
+                    try:
+                        assigned_start = clock_time.fromisoformat(str(duty["start_time"]))
+                    except ValueError:
+                        pass
+                explicit_second = str(row["employee_shift"] or "").strip().lower() in {
+                    "second", "second shift", "evening", "night", "2", "2nd"
+                }
+                if assigned_start is not None:
+                    expected = "second" if assigned_start >= cutoff else "first"
+                else:
+                    expected = "second" if explicit_second or checked_in.time() >= cutoff else "first"
+                if str(row["attendance_shift"] or "").lower() != expected:
+                    conn.execute(text(
+                        "UPDATE attendance SET attendance_shift=:shift,"
+                        "updated_at=CURRENT_TIMESTAMP WHERE id=:attendance_id"
+                    ), {"shift": expected, "attendance_id": row["id"]})
+                    corrected += 1
+        mark_migration(shift_backfill_migration)
+        logger.info("Attendance shift correction complete: %s existing records updated", corrected)
 
     # v9.2 employee profile fields. Each ALTER is independent so existing databases
     # upgrade safely and duplicate-column errors do not interrupt startup.

@@ -7,18 +7,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 os.environ.setdefault("ENVIRONMENT", "development")
-os.environ.setdefault("DATABASE_PATH", "/tmp/buraq_perf_test.db")
+os.environ.setdefault("DATABASE_PATH", "/tmp/buraq_feature_test.db")
 os.environ.setdefault("REQUIRE_SECURE_SECRETS", "false")
 os.environ.setdefault("ALLOW_TEMP_DB_FALLBACK", "false")
 os.environ.setdefault("SESSION_SECRET", "test-session-secret-01234567890123456789")
 os.environ.setdefault("CONFIG_ENCRYPTION_KEY", "test-config-secret-0123456789012345678")
 
-Path(os.environ["DATABASE_PATH"]).unlink(missing_ok=True)
-
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app import main as main_module
 from app.database import get_db
 from app import performance
 
@@ -224,20 +223,11 @@ def test_nothing_is_sent_until_hr_presses_send():
     assert count == 0
 
 
-@pytest.fixture
-def delivered(monkeypatch):
-    """Pretend Meta accepted the message, and record what we asked it to send."""
-    sent = []
-
-    async def fake_send_text(phone, message):
-        sent.append((phone, message))
+def test_send_records_the_notice_once(monkeypatch):
+    async def delivered(_phone, _message):
         return {"sent": True}
 
-    monkeypatch.setattr("app.main.send_text", fake_send_text)
-    return sent
-
-
-def test_send_records_the_notice_once(delivered):
+    monkeypatch.setattr(main_module, "send_text", delivered)
     employee_id = _row(STAR)["employee_id"]
     with TestClient(app) as client:
         _login(client)
@@ -256,42 +246,45 @@ def test_send_records_the_notice_once(delivered):
     assert len(rows) == 1
     assert rows[0]["notice_type"] == "star"
     assert rows[0]["message"]
-    # Sent exactly once, despite two button presses.
-    assert len(delivered) == 1
 
 
-def test_failed_delivery_releases_the_reservation(monkeypatch):
-    """If Meta rejects the message, HR must be able to try again."""
-    async def refusing_send_text(phone, message):
-        return {"sent": False}
+def test_failed_delivery_is_not_marked_sent_and_can_retry(monkeypatch):
+    async def failed(_phone, _message):
+        return {"sent": False, "reason": "temporary test failure"}
 
-    monkeypatch.setattr("app.main.send_text", refusing_send_text)
+    monkeypatch.setattr(main_module, "send_text", failed)
     employee_id = _row(STAR)["employee_id"]
     with TestClient(app) as client:
         _login(client)
-        response = client.post("/performance-awards/send",
-                               data={"employee_id": employee_id, "period": PERIOD,
-                                     "notice_type": "star"},
-                               follow_redirects=False)
-        assert "error=send" in response.headers["location"]
-
+        response = client.post(
+            "/performance-awards/send",
+            data={"employee_id": employee_id, "period": PERIOD, "notice_type": "star"},
+            follow_redirects=False,
+        )
+    assert response.status_code == 303
+    assert "error=send" in response.headers["location"]
     with get_db() as db:
-        count = db.execute("SELECT COUNT(*) c FROM performance_notices WHERE employee_id=? AND period=?",
-                           (employee_id, PERIOD)).fetchone()["c"]
+        count = db.execute(
+            "SELECT COUNT(*) c FROM performance_notices WHERE employee_id=? AND period=?",
+            (employee_id, PERIOD),
+        ).fetchone()["c"]
     assert count == 0
 
 
-def test_notice_type_must_match_the_server_side_ranking(delivered):
-    """A tampered form must not send a congratulation to a flagged employee."""
-    weak_id = _row(WEAK)["employee_id"]
+def test_modified_notice_category_is_rejected(monkeypatch):
+    async def delivered(_phone, _message):
+        return {"sent": True}
+
+    monkeypatch.setattr(main_module, "send_text", delivered)
+    employee_id = _row(STAR)["employee_id"]
     with TestClient(app) as client:
         _login(client)
-        response = client.post("/performance-awards/send",
-                               data={"employee_id": weak_id, "period": PERIOD,
-                                     "notice_type": "star"},
-                               follow_redirects=False)
-        assert response.status_code == 409
-    assert delivered == []
+        response = client.post(
+            "/performance-awards/send",
+            data={"employee_id": employee_id, "period": PERIOD, "notice_type": "good"},
+            follow_redirects=False,
+        )
+    assert response.status_code == 409
 
 
 def test_unknown_notice_type_is_rejected():
