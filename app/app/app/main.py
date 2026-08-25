@@ -34,7 +34,7 @@ from app.reminders import reminder_worker
 from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
-from app.services import approve_pending_attendance, phones_match, receive_location, resolve_attendance_shift, state
+from app.services import _submitted_at_local, approve_pending_attendance, phones_match, receive_location, resolve_attendance_shift, resolve_duty, state
 from app.leave_flow import decision_message
 from app.performance import (NOTICE_TYPES, build_message, month_label, monthly_ranking,
                             record_notice, release_notice)
@@ -2997,6 +2997,20 @@ def decide_correction(request: Request, request_id: int, action: str):
             if ci and len(ci)<=5: ci=f"{row['work_date']}T{ci}:00"
             if co and len(co)<=5: co=f"{row['work_date']}T{co}:00"
             c.execute("INSERT INTO attendance(employee_id,work_date,check_in,check_out,status,source) VALUES(?,?,?,?,?,?) ON CONFLICT(employee_id,work_date) DO UPDATE SET check_in=COALESCE(excluded.check_in,attendance.check_in),check_out=COALESCE(excluded.check_out,attendance.check_out),source='hr_correction',updated_at=CURRENT_TIMESTAMP",(row['employee_id'],row['work_date'],ci,co,'present','hr_correction'))
+            # Late/early/shift are derived from the timestamps, so recompute them
+            # against the employee's assigned duty instead of leaving stale values.
+            final=c.execute("SELECT id,check_in,check_out FROM attendance WHERE employee_id=? AND work_date=?",(row['employee_id'],row['work_date'])).fetchone()
+            emp=c.execute("SELECT id,shift FROM employees WHERE id=?",(row['employee_id'],)).fetchone()
+            if final and final['check_in'] and emp:
+                check_in_dt=_submitted_at_local(str(final['check_in']))
+                work_date=datetime.strptime(row['work_date'],'%Y-%m-%d').date()
+                shift_label,start_dt,end_dt=resolve_duty(dict(emp),check_in_dt,work_date,db=c)
+                late=apply_late_grace(int((check_in_dt-start_dt).total_seconds()//60))
+                early=0
+                if final['check_out']:
+                    check_out_dt=_submitted_at_local(str(final['check_out']))
+                    early=max(0,int((end_dt-check_out_dt).total_seconds()//60))
+                c.execute("UPDATE attendance SET attendance_shift=?,late_minutes=?,early_leave_minutes=? WHERE id=?",(shift_label,late,early,final['id']))
         c.execute("UPDATE attendance_corrections SET status=?,decided_by=?,decided_at=CURRENT_TIMESTAMP WHERE id=?",(status,str(request.session.get('hr_id') or 'super_admin'),request_id))
     audit(request,status,"attendance_correction",str(request_id),""); return RedirectResponse("/hr-operations?saved=1",303)
 
@@ -3022,6 +3036,11 @@ def duty_management_page(request: Request, saved: str="", error: str=""):
         employees=c.execute("SELECT id,staff_id,name,department,shift FROM employees WHERE is_active ORDER BY staff_id").fetchall()
         assigned=c.execute("SELECT COUNT(DISTINCT employee_id) AS n FROM custom_duties WHERE duty_date>=? AND is_active",(today.isoformat(),)).fetchone()
         upcoming=c.execute("SELECT d.*,e.staff_id,e.name FROM custom_duties d JOIN employees e ON e.id=d.employee_id WHERE d.duty_date>=? ORDER BY d.duty_date,e.staff_id LIMIT 120",(today.isoformat(),)).fetchall()
+        no_duty_today=c.execute("""SELECT e.staff_id,e.name FROM employees e
+            WHERE e.is_active AND e.registration_status='approved'
+            AND NOT EXISTS(SELECT 1 FROM duty_schedules d WHERE d.employee_id=e.id AND d.weekday=? AND d.is_active)
+            AND NOT EXISTS(SELECT 1 FROM custom_duties cd WHERE cd.employee_id=e.id AND cd.duty_date=? AND cd.is_active)
+            ORDER BY e.staff_id""",(today.weekday(),today.isoformat())).fetchall()
     total=len(employees); assigned_n=int((assigned or {}).get('n',0)); unassigned=max(0,total-assigned_n)
     rules=get_shift_rules()
     rule_fields=[("first_start","First Shift start",rules[FIRST_START_KEY]),("first_end","First Shift end",rules[FIRST_END_KEY]),
@@ -3066,7 +3085,13 @@ def duty_management_page(request: Request, saved: str="", error: str=""):
     rows=''.join(f"<tr><td><b>{escape(r['duty_date'])}</b></td><td>{escape(r['staff_id'])} - {escape(r['name'])}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}</td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{escape(r['note'] or '—')}</td></tr>" for r in upcoming) or '<tr><td colspan=5>No upcoming duty assigned.</td></tr>'
     saved_text={'shift':'Shift rules saved. These defaults stay active until you change them again.'}.get(saved,'Duty assigned successfully.')
     notice=f"<div class='notice'>{escape(saved_text)}</div>" if saved else (f"<div class='notice bad'>{escape(error)}</div>" if error else '')
-    body=f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty Management</div><h2>Manage Employee Duty</h2><div class='sub'>All employees, date range, regular schedule and separate Friday duty—সব এক page-এ। Saturday regular duty থাকবে।</div></div><div class='actions'><span class='pill'>Total {total}</span><span class='pill'>Assigned {assigned_n}</span><span class='pill'>Unassigned {unassigned}</span></div></div>{shift_card}{manage}<div class='section-gap'></div><div class='card' style='overflow:auto'><div class='card-head'><div><div class='eyebrow'>Assigned Duty</div><h2>Upcoming Duty List</h2></div><a class='btn secondary' href='/duty-schedules'>Advanced / Reminder Log</a></div><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th></tr></thead><tbody>{rows}</tbody></table></div>"""
+    if no_duty_today:
+        chips=''.join(f"<span class='pill'>{escape(r['staff_id'])} · {escape(r['name'])}</span>" for r in no_duty_today[:40])
+        more='' if len(no_duty_today)<=40 else f"<span class='sub'> +{len(no_duty_today)-40} more</span>"
+        no_duty_card=f"<div class='card' style='border-color:#f59e0b;background:rgba(245,158,11,.08)'><div class='card-head'><div><div class='eyebrow' style='color:#b45309'>Needs attention</div><h2>{len(no_duty_today)} employee(s) have no duty for today</h2><p class='sub'>Duty না থাকলে এরা global Shift Rules-এ পড়বে (rotating staff-এর জন্য ভুল হতে পারে)। নিচে duty assign করুন।</p></div></div><div style='display:flex;flex-wrap:wrap;gap:6px'>{chips}{more}</div></div><div class='section-gap'></div>"
+    else:
+        no_duty_card="<div class='notice'>✅ আজ সব active employee-র duty assign করা আছে।</div>"
+    body=f"""{notice}{no_duty_card}<div class='hero'><div><div class='eyebrow'>Duty Management</div><h2>Manage Employee Duty</h2><div class='sub'>All employees, date range, regular schedule and separate Friday duty—সব এক page-এ। Saturday regular duty থাকবে।</div></div><div class='actions'><span class='pill'>Total {total}</span><span class='pill'>Assigned {assigned_n}</span><span class='pill'>Unassigned {unassigned}</span></div></div>{shift_card}{manage}<div class='section-gap'></div><div class='card' style='overflow:auto'><div class='card-head'><div><div class='eyebrow'>Assigned Duty</div><h2>Upcoming Duty List</h2></div><a class='btn secondary' href='/duty-schedules'>Advanced / Reminder Log</a></div><table><thead><tr><th>Date</th><th>Employee</th><th>Duty</th><th>Office</th><th>Note</th></tr></thead><tbody>{rows}</tbody></table></div>"""
     extra="""<style>
 .duty-section{margin-top:16px}.shift-rule-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 @media(max-width:900px){.shift-rule-grid{grid-template-columns:1fr 1fr}}

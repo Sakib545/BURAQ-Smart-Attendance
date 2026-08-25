@@ -12,7 +12,6 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta
-from datetime import time as clock_time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from html import escape
@@ -34,13 +33,13 @@ from app.reminders import reminder_worker
 from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
-from app.services import approve_pending_attendance, phones_match, receive_location, resolve_attendance_shift, state
+from app.services import approve_pending_attendance, phones_match, receive_location, state
 from app.leave_flow import decision_message
 from app.performance import (NOTICE_TYPES, build_message, month_label, monthly_ranking,
                             record_notice, release_notice)
 from app.shift_rules import (
     CUTOFF_KEY, FIRST_END_KEY, FIRST_START_KEY, GRACE_KEY,
-    SECOND_END_KEY, SECOND_START_KEY, apply_late_grace, get_shift_rules, save_shift_rules, shift_window,
+    SECOND_END_KEY, SECOND_START_KEY, get_shift_rules, save_shift_rules, shift_window,
 )
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
@@ -550,7 +549,8 @@ def dashboard(request: Request):
                    SUM(CASE WHEN l.employee_id IS NULL AND a.check_in IS NOT NULL THEN 1 ELSE 0 END) present,
                    SUM(CASE WHEN l.employee_id IS NULL AND a.check_in IS NULL THEN 1 ELSE 0 END) absent,
                    SUM(CASE WHEN a.check_out IS NOT NULL THEN 1 ELSE 0 END) checked_out,
-                   SUM(CASE WHEN a.late_minutes>0 THEN 1 ELSE 0 END) late
+                   SUM(CASE WHEN a.late_minutes>0 THEN 1 ELSE 0 END) late,
+                   COALESCE(SUM(a.overtime_minutes),0) overtime
             FROM employees e
             LEFT JOIN attendance a ON a.employee_id=e.id AND a.work_date=?
             LEFT JOIN (SELECT DISTINCT employee_id FROM leave_requests
@@ -566,6 +566,7 @@ def dashboard(request: Request):
         on_leave = int(snap["on_leave"] or 0)
         checked_out = int(snap["checked_out"] or 0)
         late = int(snap["late"] or 0)
+        overtime = int(snap["overtime"] or 0)
 
         pending_registration = int(c.execute(
             "SELECT COUNT(*) c FROM pending_registrations WHERE status='pending'").fetchone()["c"] or 0)
@@ -1286,7 +1287,7 @@ def employee_duty_page(request: Request, employee_id: int, saved: str=""):
     forms=''
     if can_manage:
         day_options=''.join(f"<option value='{i}'>{d}</option>" for i,d in enumerate(days))
-        forms=f"""<div class='two'><div class='card'><div class='eyebrow'>Repeating Schedule</div><h2>Regular Duty by Shift</h2><form method='post' action='/employees/{employee_id}/duty/regular'><label>Weekday</label><select name='weekday'>{day_options}</select><label>Shift preset</label><select name='preset'><option value='morning'>First Shift ({first_preset})</option><option value='evening'>Second Shift ({second_preset})</option><option value='night'>Night (22:00-06:00)</option><option value='custom'>Custom selectable time</option></select><div class='two'><div><label>Custom start (optional)</label><input type='time' name='start_time'></div><div><label>Custom end (optional)</label><input type='time' name='end_time'></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Regular Duty</button></form></div><div class='card money-card'><div class='eyebrow'>One Specific Date</div><h2>Custom Duty</h2><form method='post' action='/employees/{employee_id}/duty/custom'><label>Date</label><input type='date' name='duty_date' required><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><label>Note</label><input name='note' placeholder='Special duty reason'><button class='btn'>Assign Custom Duty</button></form></div></div><div class='section-gap'></div><div class='card'><div class='eyebrow'>Date Range</div><h2>Assign Duty for a Date Range</h2><form method='post' action='/employees/{employee_id}/duty/range'><div class='two'><div><label>From date</label><input type='date' name='date_from' required></div><div><label>To date</label><input type='date' name='date_to' required></div></div><label>Shift preset</label><select name='preset'><option value='morning'>First Shift ({first_preset})</option><option value='evening'>Second Shift ({second_preset})</option><option value='night'>Night (22:00-06:00)</option><option value='custom'>Custom selectable time</option></select><div class='two'><div><label>Custom start (optional)</label><input type='time' name='start_time'></div><div><label>Custom end (optional)</label><input type='time' name='end_time'></div></div><label>Apply to</label><select name='scope'><option value='all'>Every day in range</option><option value='skip_fri'>Skip Fridays</option><option value='skip_fri_sat'>Skip Friday &amp; Saturday</option></select><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><label>Note</label><input name='note' placeholder='e.g. Ramadan schedule'><button class='btn'>Assign for Range</button></form></div><div class='section-gap'></div><div class='two'><div class='card'><div class='eyebrow'>Quick Assignment</div><h2>Assign Friday Duty</h2><form method='post' action='/employees/{employee_id}/duty/friday'><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Every Friday</button></form></div><div class='card payroll-panel'><div class='eyebrow' style='color:#8ff0cb'>Overnight Assignment</div><h2>Assign Night Duty</h2><form method='post' action='/employees/{employee_id}/duty/night'><label>Starting date</label><input type='date' name='duty_date' required><div class='two'><div><label>Night start</label><input type='time' name='start_time' value='22:00' required></div><div><label>Next-day end</label><input type='time' name='end_time' value='06:00' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Repeat</label><select name='repeat'><option value='once'>One-time night duty</option><option value='weekly'>Repeat every week on this weekday</option></select><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Night Duty</button></form></div></div>"""
+        forms=f"""<div class='two'><div class='card'><div class='eyebrow'>Repeating Schedule</div><h2>Regular Duty by Shift</h2><form method='post' action='/employees/{employee_id}/duty/regular'><label>Weekday</label><select name='weekday'>{day_options}</select><label>Shift preset</label><select name='preset'><option value='morning'>First Shift ({first_preset})</option><option value='evening'>Second Shift ({second_preset})</option><option value='night'>Night (22:00-06:00)</option><option value='custom'>Custom selectable time</option></select><div class='two'><div><label>Custom start (optional)</label><input type='time' name='start_time'></div><div><label>Custom end (optional)</label><input type='time' name='end_time'></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Regular Duty</button></form></div><div class='card money-card'><div class='eyebrow'>One Specific Date</div><h2>Custom Duty</h2><form method='post' action='/employees/{employee_id}/duty/custom'><label>Date</label><input type='date' name='duty_date' required><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><label>Note</label><input name='note' placeholder='Special duty reason'><button class='btn'>Assign Custom Duty</button></form></div></div><div class='section-gap'></div><div class='two'><div class='card'><div class='eyebrow'>Quick Assignment</div><h2>Assign Friday Duty</h2><form method='post' action='/employees/{employee_id}/duty/friday'><div class='two'><div><label>Start</label><input type='time' name='start_time' required></div><div><label>End</label><input type='time' name='end_time' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Every Friday</button></form></div><div class='card payroll-panel'><div class='eyebrow' style='color:#8ff0cb'>Overnight Assignment</div><h2>Assign Night Duty</h2><form method='post' action='/employees/{employee_id}/duty/night'><label>Starting date</label><input type='date' name='duty_date' required><div class='two'><div><label>Night start</label><input type='time' name='start_time' value='22:00' required></div><div><label>Next-day end</label><input type='time' name='end_time' value='06:00' required></div></div><label>Break (minutes)</label><input type='number' name='break_minutes' min='0' step='5' value='60'><label>Repeat</label><select name='repeat'><option value='once'>One-time night duty</option><option value='weekly'>Repeat every week on this weekday</option></select><label>Office</label><input name='office_name' value='{escape(e['office_name'] or 'BURAQ Office')}'><button class='btn'>Assign Night Duty</button></form></div></div>"""
     weekly_rows=''.join(f"<tr><td>{days[int(r['weekday'])]}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}<div class='sub'>Break: {int(r['break_minutes'] or 0)} min</div></td><td>{escape(r['office_name'] or 'BURAQ Office')}</td><td>{f'''<form method='post' action='/employees/{employee_id}/duty/weekly/{r['id']}/delete'><button class='btn danger'>Delete</button></form>''' if can_manage else ''}</td></tr>" for r in weekly) or '<tr><td colspan=4>No regular duty.</td></tr>'
     custom_rows=''.join(f"<tr><td>{escape(r['duty_date'])}</td><td>{escape(format_time_12h(r['start_time']))} - {escape(format_time_12h(r['end_time']))}{' (+1 day)' if r['end_time']<=r['start_time'] else ''}<div class='sub'>Break: {int(r['break_minutes'] or 0)} min</div></td><td>{escape(r['office_name'] or 'BURAQ Office')}<div class='sub'>{escape(r['note'] or '')}</div></td><td>{f'''<form method='post' action='/employees/{employee_id}/duty/custom/{r['id']}/delete'><button class='btn danger'>Delete</button></form>''' if can_manage else ''}</td></tr>" for r in custom) or '<tr><td colspan=4>No upcoming custom duty.</td></tr>'
     notice="<div class='notice'>Duty assignment saved.</div>" if saved else ''
@@ -1318,28 +1319,6 @@ def assign_employee_custom_duty(request: Request, employee_id: int, duty_date: s
     except ValueError: raise HTTPException(400,'Invalid date')
     break_minutes=_validated_break_minutes(start_time,end_time,break_minutes)
     with get_db() as c: c.execute("INSERT INTO custom_duties(employee_id,duty_date,start_time,end_time,break_minutes,office_name,note,created_by) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(employee_id,duty_date) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time,break_minutes=excluded.break_minutes,office_name=excluded.office_name,note=excluded.note,is_active=excluded.is_active,updated_at=CURRENT_TIMESTAMP",(employee_id,duty_date,start_time,end_time,break_minutes,office_name.strip() or 'BURAQ Office',note.strip() or None,str(request.session.get('hr_id') or 'super_admin')))
-    return RedirectResponse(f'/employees/{employee_id}/duty?saved=1',303)
-
-@app.post("/employees/{employee_id}/duty/range")
-def assign_range_duty(request: Request, employee_id: int, date_from: str=Form(...), date_to: str=Form(...), preset: str=Form('morning'), start_time: str=Form(''), end_time: str=Form(''), scope: str=Form('all'), office_name: str=Form('BURAQ Office'), note: str=Form(''), break_minutes: int=Form(0)):
-    require_permission(request,'duty_manage')
-    start_time,end_time=_duty_times(preset,start_time,end_time)
-    try:
-        d0=datetime.strptime(date_from,'%Y-%m-%d').date(); d1=datetime.strptime(date_to,'%Y-%m-%d').date()
-    except ValueError: raise HTTPException(400,'Invalid date')
-    if d1<d0: raise HTTPException(400,'End date must be on or after start date')
-    if (d1-d0).days>366: raise HTTPException(400,'Range too large (max 1 year)')
-    break_minutes=_validated_break_minutes(start_time,end_time,break_minutes)
-    skip={'skip_fri':{4},'skip_fri_sat':{4,5}}.get(scope,set())
-    actor=str(request.session.get('hr_id') or 'super_admin'); office=office_name.strip() or 'BURAQ Office'; note_val=note.strip() or None
-    created=0
-    with get_db() as c:
-        d=d0
-        while d<=d1:
-            if d.weekday() not in skip:
-                c.execute("INSERT INTO custom_duties(employee_id,duty_date,start_time,end_time,break_minutes,office_name,note,created_by) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(employee_id,duty_date) DO UPDATE SET start_time=excluded.start_time,end_time=excluded.end_time,break_minutes=excluded.break_minutes,office_name=excluded.office_name,note=excluded.note,is_active=excluded.is_active,updated_at=CURRENT_TIMESTAMP",(employee_id,d.isoformat(),start_time,end_time,break_minutes,office,note_val,actor))
-                created+=1
-            d+=timedelta(days=1)
     return RedirectResponse(f'/employees/{employee_id}/duty?saved=1',303)
 
 @app.post("/employees/{employee_id}/duty/friday")
@@ -1983,7 +1962,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
         </div>"""
 
     # ---------------- live breakdown panel ----------------
-    breakdown = """
+    breakdown = f"""
     <div class='card' id='payroll-breakdown'>
       <div class='card-head'><div><h3>How this salary is worked out</h3>
       <div class='sub' id='pb-who'>Select an employee to see their figures.</div></div></div>
@@ -2002,7 +1981,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
         duty_pct = _pct(worked, scheduled)
 
         if stage == "not_prepared":
-            actions = "<span class='sub'>Use the form to prepare</span>"
+            actions = (f"<span class='sub'>Use the form to prepare</span>")
             net_cell = "<span class='sub'>—</span>"
         else:
             net_cell = f"<b>৳{_money(r['net_salary'])}</b>"
@@ -2050,12 +2029,12 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
             f"<div class='mini-line'><span class='mini-present' style='width:{duty_pct}%'></span></div></td>"
             f"<td class='num'>৳{_money(r['earned_basic_salary'])}"
             f"<div class='sub'>of ৳{_money(r['fixed_salary'])}</div></td>"
-            "<td class='num'>"
+            f"<td class='num'>"
             + (f"+৳{_money(r['overtime_amount'])}" if float(r['overtime_amount'] or 0) else "—")
-            + "</td>"
-            "<td class='num'>"
+            + f"</td>"
+            f"<td class='num'>"
             + (f"−৳{_money(r['total_deduction'])}" if float(r['total_deduction'] or 0) else "—")
-            + "<div class='sub'>"
+            + f"<div class='sub'>"
             + (f"{int(r['late_minutes'] or 0)} min late" if int(r['late_minutes'] or 0) else "&nbsp;")
             + f"</div></td>"
             f"<td class='num'>{net_cell}</td>"
@@ -2368,7 +2347,7 @@ def salary_master(request: Request, employee_id: int, fixed_salary: float=Form(.
     require_permission(request,"payroll_manage")
     if fixed_salary<0 or overtime_rate<0: raise HTTPException(400,"Salary values cannot be negative")
     with get_db() as c: c.execute("UPDATE employees SET fixed_salary=?,default_overtime_rate=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(fixed_salary,overtime_rate,employee_id))
-    audit(request,"salary_master","employee",str(employee_id),"Fixed salary and OT rate updated")
+    audit(request,"salary_master","employee",str(employee_id),f"Fixed salary and OT rate updated")
     return RedirectResponse(f"/employees/{employee_id}?month={return_month}#payroll",303)
 
 @app.get("/payroll/export.xlsx")
@@ -2883,49 +2862,29 @@ def missing_duty_page(request: Request, employee_id: int = 0, month: str = "",
 
 def _write_backfill(c, employee_id: int, work_date: str, check_in: str,
                     check_out: str, status: str, actor: str) -> None:
-    """Insert one attendance row for a past duty day.
-
-    Late and early-leave are measured against that day's scheduled window using
-    the *same* rules as a live check-in: an explicit custom/weekly duty wins,
-    otherwise the global shift window for the employee's assigned shift is used
-    (never a silent 0), and the configured late-grace period is applied. This
-    keeps a backfilled record identical to what the WhatsApp flow would have
-    produced for the same times."""
+    """Insert one attendance row for a past duty day, with late minutes
+    measured against that day's scheduled start."""
     start_dt = datetime.fromisoformat(f"{work_date}T{check_in}:00")
     end_dt = datetime.fromisoformat(f"{work_date}T{check_out}:00")
     if end_dt <= start_dt:
         end_dt += timedelta(days=1)
-    emp = c.execute("SELECT shift FROM employees WHERE id=?", (employee_id,)).fetchone()
-    assigned = str((emp["shift"] if emp else "") or "").strip().lower()
-    # Rotating staff have no fixed shift, so classify this backfilled day from
-    # its own check-in time (respecting the configured cutoff), exactly like a
-    # live check-in. An explicit evening assignment still wins inside resolve.
-    attendance_shift = resolve_attendance_shift({"id": employee_id, "shift": assigned}, start_dt)
     duty = c.execute(
-        "SELECT start_time,end_time FROM custom_duties WHERE employee_id=? AND duty_date=? AND is_active",
+        "SELECT start_time FROM custom_duties WHERE employee_id=? AND duty_date=? AND is_active",
         (employee_id, work_date)).fetchone()
     if not duty:
         weekday = datetime.fromisoformat(work_date).date().weekday()
         duty = c.execute(
-            "SELECT start_time,end_time FROM duty_schedules WHERE employee_id=? AND weekday=? AND is_active",
+            "SELECT start_time FROM duty_schedules WHERE employee_id=? AND weekday=? AND is_active",
             (employee_id, weekday)).fetchone()
+    late = 0
     if duty:
-        sched_start = clock_time.fromisoformat(str(duty["start_time"]))
-        sched_end = clock_time.fromisoformat(str(duty["end_time"]))
-    else:
-        sched_start, sched_end = shift_window(attendance_shift)
-    scheduled_start = datetime.combine(start_dt.date(), sched_start)
-    scheduled_end = datetime.combine(start_dt.date(), sched_end)
-    if scheduled_end <= scheduled_start:
-        scheduled_end += timedelta(days=1)
-    late = apply_late_grace(int((start_dt - scheduled_start).total_seconds() // 60))
-    early = max(0, int((scheduled_end - end_dt).total_seconds() // 60))
+        scheduled_start = datetime.fromisoformat(f"{work_date}T{str(duty['start_time'])}:00")
+        late = max(0, int((start_dt - scheduled_start).total_seconds() // 60))
     c.execute(
-        "INSERT INTO attendance(employee_id,work_date,check_in,check_out,attendance_shift,"
-        "late_minutes,early_leave_minutes,status,source) "
-        "VALUES(?,?,?,?,?,?,?,?,'hr_backfill')",
+        "INSERT INTO attendance(employee_id,work_date,check_in,check_out,late_minutes,status,source) "
+        "VALUES(?,?,?,?,?,?,'hr_backfill')",
         (employee_id, work_date, start_dt.isoformat(timespec="seconds"),
-         end_dt.isoformat(timespec="seconds"), attendance_shift, late, early, status))
+         end_dt.isoformat(timespec="seconds"), late, status))
 
 
 @app.post("/attendance/backfill")
@@ -3291,9 +3250,9 @@ def duplicate_analysis(request: Request, decision: str="", review: str="", scope
     else:
         history=[]
         for r in rows:
-            row_state="bad" if r["review_status"]=="rejected" else "warn" if r["review_status"]=="pending" else "ok"
+            state="bad" if r["review_status"]=="rejected" else "warn" if r["review_status"]=="pending" else "ok"
             applied="Final" if r["attendance_applied"] else ("Rejected" if r["review_status"]=="rejected" else "Not final")
-            history.append(f"<tr><td>#{r['id']}</td><td><b>{escape(str(r['name']))}</b><br><span class='sub'>{escape(str(r['staff_id']))}</span></td><td>{'Check in' if r['action']=='check_in' else 'Check out'}</td><td><span class='status {row_state}'>{escape(str(r['review_status']).title())}</span><div class='sub'>{applied}</div></td><td>{float(r['face_score'] or 0)*100:.1f}%</td><td>{float(r['duplicate_score'] or 0)*100:.1f}%</td><td>{escape(str(r['attendance_result'] or '—'))}</td><td>{escape(str(r['created_at']))}</td></tr>")
+            history.append(f"<tr><td>#{r['id']}</td><td><b>{escape(str(r['name']))}</b><br><span class='sub'>{escape(str(r['staff_id']))}</span></td><td>{'Check in' if r['action']=='check_in' else 'Check out'}</td><td><span class='status {state}'>{escape(str(r['review_status']).title())}</span><div class='sub'>{applied}</div></td><td>{float(r['face_score'] or 0)*100:.1f}%</td><td>{float(r['duplicate_score'] or 0)*100:.1f}%</td><td>{escape(str(r['attendance_result'] or '—'))}</td><td>{escape(str(r['created_at']))}</td></tr>")
         content=f"<div style='overflow:auto'><table><thead><tr><th>ID</th><th>Employee</th><th>Action</th><th>Status</th><th>Face</th><th>Duplicate</th><th>Attendance result</th><th>Submitted</th></tr></thead><tbody>{''.join(history)}</tbody></table></div>" if history else empty
     error_messages={"checkin-first":"আগে ওই employee-এর Check-in selfie approve করুন; এরপর Check-out approve হবে।","invalid-action":"এই পুরোনো selfie-এর action সঠিক নয়। Employee-কে নতুন attendance দিতে বলুন।","failed":"Approval সাময়িকভাবে সম্পন্ন হয়নি। আবার চেষ্টা করুন; সমস্যা থাকলে Deploy Logs দেখুন।"}
     notice = "<div class='notice'>Attendance selfie approved and finalized.</div>" if saved=="approved" else ("<div class='notice'>Selfie rejected; employee notification queued.</div>" if saved=="rejected" else (f"<div class='notice bad'>{error_messages.get(error,'Approval সম্পন্ন হয়নি।')}</div>" if error else ""))

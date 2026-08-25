@@ -1,0 +1,1298 @@
+--- repo5/app/services.py	2026-08-20 19:20:17.558011269 +0000
++++ repo4/app/services.py	2026-08-20 19:05:33.702753877 +0000
+@@ -14,6 +14,7 @@
+ from app.face_ai import FaceAIError, extract_embedding, best_match, best_impostor, gallery_score
+ from app.face_log import invalidate_gallery_cache, load_impostor_gallery, log_face_event
+ from app.duplicate_detector import DuplicateThresholds, detect_duplicate, make_fingerprint
++from app.leave_flow import handle_leave_state, leave_report, start_leave_request
+ from app.config import settings, OFFICE_LATITUDE, OFFICE_LONGITUDE, OFFICE_RADIUS_METERS
+ from app.database import database_kind, get_db
+ from app.shift_rules import apply_late_grace, second_shift_cutoff, shift_window
+@@ -138,7 +139,8 @@
+ 
+ def menu(name=None):
+     greeting = f"স্বাগতম {name}" if name else "BURAQ Smart Attendance"
+-    return f"👋 {greeting}\n\n1️⃣ Register\n2️⃣ Check In\n3️⃣ Check Out\n4️⃣ My Attendance\n5️⃣ Help"
++    return (f"👋 {greeting}\n\n1️⃣ Register\n2️⃣ Check In\n3️⃣ Check Out\n"
++            f"4️⃣ My Attendance\n5️⃣ Help\n6️⃣ ছুটির আবেদন (Leave)\n7️⃣ My Leave")
+ 
+ 
+ def registration_preview(employee):
+@@ -325,6 +327,29 @@
+     return "second" if local_moment.time().replace(tzinfo=None) >= cutoff else "first"
+ 
+ 
++SECOND_SHIFT_ASSIGNMENTS = {"second", "evening", "night"}
++
++
++def resolve_attendance_shift(employee, moment):
++    """Which shift this check-in belongs to.
++
++    The clock-based cutoff alone cannot tell an early arrival from a late one:
++    a second-shift worker who reaches the office at 15:56 for a 16:00 duty sits
++    *before* a 16:00 cutoff and used to be filed as first shift, then measured
++    against the 08:30 start — over seven hours "late" for arriving four minutes
++    early.
++
++    So the employee's own assignment wins when it is explicitly a second-shift
++    one. Only when the roster says nothing useful (the default 'morning') do we
++    fall back to guessing from the clock, which keeps the previous behaviour for
++    anyone whose shift column was never set.
++    """
++    assigned = str((employee["shift"] if employee is not None else "") or "").strip().lower()
++    if assigned in SECOND_SHIFT_ASSIGNMENTS:
++        return "second"
++    return automatic_attendance_shift(moment)
++
++
+ def attendance_shift_label(value):
+     return "Second Shift" if (value or "").lower() == "second" else "First Shift"
+ 
+@@ -354,7 +379,7 @@
+ 
+ def check_in(employee):
+     current = now_local(); work_date = current.date().isoformat()
+-    attendance_shift = automatic_attendance_shift(current)
++    attendance_shift = resolve_attendance_shift(employee, current)
+     start_dt,_=duty_window(employee,current.date(),shift_override=_employee_shift_for_attendance(attendance_shift))
+     late = apply_late_grace(int((current-start_dt).total_seconds() // 60))
+     with get_db() as c:
+@@ -441,7 +466,7 @@
+ 
+         if action == "check_in":
+             work_date = submitted.date().isoformat()
+-            attendance_shift = automatic_attendance_shift(submitted)
++            attendance_shift = resolve_attendance_shift(item, submitted)
+             start_dt, _ = duty_window(
+                 item, submitted.date(), db=c,
+                 shift_override=_employee_shift_for_attendance(attendance_shift),
+@@ -711,12 +736,6 @@
+     current_state = state(phone)
+     if command in {"cancel", "বাতিল"}:
+         clear_state(phone); return "বর্তমান প্রক্রিয়া বাতিল হয়েছে। Menu খুলতে লিখুন: Menu"
+-    # Loaded lazily to avoid a module cycle: leave_flow reuses the same durable
+-    # conversation state and employee lookup helpers defined in this module.
+-    from app.leave_flow import handle_leave_message
+-    leave_response = handle_leave_message(phone, text)
+-    if leave_response is not None:
+-        return leave_response
+     if current_state:
+         value = current_state["state"]
+         if value == "awaiting_staff_id": return begin_registration(text, phone)
+@@ -731,6 +750,8 @@
+             parts = value.split(":")
+             pose = parts[4] if len(parts) > 4 else "straight"
+             return liveness_prompt(pose)
++        if value.startswith("leave_"):
++            return handle_leave_state(phone, value, text, employee_by_phone(phone))
+     if command in {"hi","hello","menu","start"}:
+         employee=employee_by_phone(phone); return menu(employee["name"] if employee else None)
+     if command in {"register","1"}:
+@@ -746,6 +767,8 @@
+     if not employee: return "❌ আগে Register করুন। শুধু লিখুন: Register"
+     if command in {"my attendance","my_attendance","attendance","report","4"}: return report(employee)
+     if command in {"my duty","my_duty","duty","5"}: return duty_report(employee)
++    if command in {"leave","ছুটি","apply leave","leave request","6"}: return start_leave_request(phone,employee)
++    if command in {"my leave","my_leave","leave status","আমার ছুটি","7"}: return leave_report(employee)
+     return "বুঝতে পারিনি। Menu দেখতে লিখুন: Menu"
+ 
+ 
+--- repo5/app/whatsapp.py	2026-08-20 19:20:17.564794770 +0000
++++ repo4/app/whatsapp.py	2026-08-20 14:53:13.323626902 +0000
+@@ -138,6 +138,8 @@
+                     {"id": "check_out", "title": "Check Out", "description": "GPS ও Face AI দিয়ে ছুটি"},
+                     {"id": "my_attendance", "title": "My Attendance", "description": "সাম্প্রতিক ৭ দিনের রিপোর্ট"},
+                     {"id": "my_duty", "title": "My Duty", "description": "আগামী duty schedule দেখুন"},
++                    {"id": "leave", "title": "ছুটির আবেদন", "description": "নতুন ছুটির আবেদন পাঠান"},
++                    {"id": "my_leave", "title": "My Leave", "description": "ছুটির আবেদনের অবস্থা দেখুন"},
+                 ]}]
+             }
+         }
+--- repo5/app/main.py	2026-08-20 19:20:17.558011269 +0000
++++ repo4/app/main.py	2026-08-20 19:06:07.817551535 +0000
+@@ -35,7 +35,8 @@
+ from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
+ from app.services import approve_pending_attendance, phones_match, receive_location, state
+ from app.leave_flow import decision_message
+-from app.performance import NOTICE_TYPES, build_message, month_label, monthly_ranking, record_notice
++from app.performance import (NOTICE_TYPES, build_message, month_label, monthly_ranking,
++                            record_notice, release_notice)
+ from app.shift_rules import (
+     CUTOFF_KEY, FIRST_END_KEY, FIRST_START_KEY, GRACE_KEY,
+     SECOND_END_KEY, SECOND_START_KEY, get_shift_rules, save_shift_rules, shift_window,
+@@ -2544,6 +2545,7 @@
+     if saved: notice="<div class='notice'>Notice WhatsApp-এ পাঠানো হয়েছে।</div>"
+     elif error=="duplicate": notice="<div class='notice'>এই notice আগেই পাঠানো হয়েছে।</div>"
+     elif error=="phone": notice="<div class='notice'>এই employee-এর WhatsApp নম্বর নেই।</div>"
++    elif error=="send": notice="<div class='notice'>WhatsApp পাঠানো যায়নি। আবার চেষ্টা করুন।</div>"
+     elif error: notice="<div class='notice'>Notice পাঠানো যায়নি।</div>"
+ 
+     labels={"star":"🏆 Star","good":"👏 Good","coaching":"📋 Private note"}
+@@ -2592,15 +2594,16 @@
+     if not re.fullmatch(r"\d{4}-\d{2}",period or ""): raise HTTPException(400,"Invalid month")
+     row=next((r for r in monthly_ranking(period) if r["employee_id"]==employee_id),None)
+     if not row: raise HTTPException(404,"Employee not found")
+-    # The notice type comes from the server-side ranking. Do not allow a
+-    # modified form request to send a different category of message.
+-    if str(row.get("suggested") or "") != notice_type:
++    # The category comes from the server-side ranking, never from the form: a
++    # tampered request must not be able to send a congratulation to someone the
++    # ranking flagged for a private note, or the reverse.
++    if str(row.get("suggested") or "")!=notice_type:
+         raise HTTPException(409,"Notice type no longer matches the current ranking")
+     if not row["phone"]: return RedirectResponse(f"/performance-awards?month={period}&error=phone",303)
+     message=build_message(row,notice_type,period)
+     actor=str(request.session.get("hr_id") or "super_admin")
+-    # Reserve the UNIQUE row before calling Meta. This prevents two rapid
+-    # button presses (or concurrent HR sessions) from sending twice.
++    # Reserve the UNIQUE row before calling Meta so two rapid presses cannot
++    # both send; release it again if delivery fails, so HR can retry.
+     if not record_notice(employee_id,period,notice_type,row,message,actor):
+         return RedirectResponse(f"/performance-awards?month={period}&error=duplicate",303)
+     try:
+@@ -2609,13 +2612,7 @@
+         logger.exception("Performance notice delivery failed employee_id=%s period=%s",employee_id,period)
+         result={"sent":False}
+     if not isinstance(result,dict) or result.get("sent") is not True:
+-        # Release the reservation when Meta did not accept the message, so HR
+-        # can retry. Successful rows stay permanently protected by UNIQUE.
+-        with get_db() as c:
+-            c.execute(
+-                "DELETE FROM performance_notices WHERE employee_id=? AND period=? AND notice_type=?",
+-                (employee_id,period,notice_type),
+-            )
++        release_notice(employee_id,period,notice_type)
+         return RedirectResponse(f"/performance-awards?month={period}&error=send",303)
+     audit(request,"send","performance_notice",str(employee_id),f"{period} {notice_type} score={row['score']}")
+     return RedirectResponse(f"/performance-awards?month={period}&saved=1",303)
+--- repo5/app/database.py	2026-08-20 19:20:17.555377056 +0000
++++ repo4/app/database.py	2026-08-20 19:22:45.676167058 +0000
+@@ -450,6 +450,8 @@
+     # v9.24 keeps the configurable shift rules as system_settings rows only, so
+     # no table is created, altered, dropped or truncated for this release.
+     mark_migration("v9.24-configurable-shift-rules")
++    # Marker only: v9.26 adds performance_notices via CREATE TABLE IF NOT EXISTS
++    # and reuses the existing leave_requests table, so nothing is altered here.
+     mark_migration("v9.26-leave-performance")
+     # v9.24.0 accidentally shipped the complete default rule set with a
+     # 10:00 AM Second Shift end and a 3:00 PM cutoff. Correct only that exact
+--- repo5/tests/test_smoke.py	2026-08-20 19:20:17.570402136 +0000
++++ repo4/tests/test_smoke.py	2026-08-20 19:06:11.318336598 +0000
+@@ -15,8 +15,15 @@
+ 
+ from fastapi.testclient import TestClient
+ from app.main import app
++import app.main as main_module
+ from app.database import get_db
+-from app.services import approve_pending_attendance, set_state, state
++from app.services import (
++    approve_pending_attendance,
++    automatic_attendance_shift,
++    begin_attendance_action,
++    set_state,
++    state,
++)
+ from app.location_links import create_location_token, verify_location_token
+ 
+ 
+@@ -24,7 +31,7 @@
+     with TestClient(app) as client:
+         health = client.get("/health")
+         assert health.status_code == 200
+-        assert health.json()["version"] == "9.22.1"
++        assert health.json()["version"] == "9.26.0"
+         assert health.headers.get("x-request-id")
+ 
+         ready = client.get("/ready")
+@@ -100,7 +107,7 @@
+                 employee_id,action,media_id,image_data,latitude,longitude,distance_meters,
+                 phash,ahash,dhash,embedding,decision,review_status,face_score,duplicate_score,created_at)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+-                (employee["id"], "check_in", "test-media-001", "", 23.0, 90.0, 12.0,
++                (employee["id"], "checkin", "test-media-001", "", 23.0, 90.0, 12.0,
+                  "p", "a", "d", "[]", "accept", "pending", 0.91, 0.02, "2026-08-02 09:02:00"))
+             fingerprint = db.execute("SELECT id FROM attendance_fingerprints WHERE media_id=?", ("test-media-001",)).fetchone()
+ 
+@@ -110,7 +117,108 @@
+ 
+         with get_db() as db:
+             selfie = db.execute("SELECT review_status,attendance_applied FROM attendance_fingerprints WHERE id=?", (fingerprint["id"],)).fetchone()
+-            attendance = db.execute("SELECT COUNT(*) c FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], "2026-08-02")).fetchone()
++            attendance = db.execute("SELECT COUNT(*) c,MAX(attendance_shift) attendance_shift FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], "2026-08-02")).fetchone()
+         assert selfie["review_status"] == "approved"
+         assert bool(selfie["attendance_applied"]) is True
+         assert int(attendance["c"]) == 1
++        assert attendance["attendance_shift"] == "first"
++
++
++def test_shift_is_automatic_and_checkout_requires_checkin():
++    assert automatic_attendance_shift("2026-08-02T08:15:00+06:00") == "first"
++    assert automatic_attendance_shift("2026-08-02T15:00:00+06:00") == "first"
++    assert automatic_attendance_shift("2026-08-02T16:00:00+06:00") == "second"
++    with TestClient(app):
++        with get_db() as db:
++            db.execute("DELETE FROM employees WHERE staff_id=?", ("TEST-SHIFT-002",))
++            db.execute(
++                "INSERT INTO employees(staff_id,name,phone,whatsapp_phone,shift,registration_status) VALUES(?,?,?,?,?,?)",
++                ("TEST-SHIFT-002", "Shift Test", "01700000002", "01700000002", "morning", "approved"),
++            )
++            employee = db.execute("SELECT id FROM employees WHERE staff_id=?", ("TEST-SHIFT-002",)).fetchone()
++
++        no_checkout = begin_attendance_action("01700000002", "checkout")
++        assert "আগে Check In" in no_checkout
++
++        with get_db() as db:
++            db.execute("""INSERT INTO attendance_fingerprints(
++                employee_id,action,media_id,image_data,latitude,longitude,distance_meters,
++                phash,ahash,dhash,embedding,decision,review_status,face_score,duplicate_score,created_at)
++                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
++                (employee["id"], "check_in", "test-media-shift-002", "", 23.0, 90.0, 12.0,
++                 "p2", "a2", "d2", "[]", "accept", "pending", 0.91, 0.02,
++                 "2026-08-02T16:02:00+06:00"))
++            fingerprint = db.execute("SELECT id FROM attendance_fingerprints WHERE media_id=?", ("test-media-shift-002",)).fetchone()
++
++        approved = approve_pending_attendance(int(fingerprint["id"]), "test-admin")
++        assert approved and "Second Shift" in approved["result"]
++        with get_db() as db:
++            attendance = db.execute(
++                "SELECT attendance_shift FROM attendance WHERE employee_id=? AND work_date=?",
++                (employee["id"], "2026-08-02"),
++            ).fetchone()
++        assert attendance["attendance_shift"] == "second"
++
++
++def test_dashboard_approve_button_is_idempotent(monkeypatch):
++    async def notification_ok(*_args, **_kwargs):
++        return {"sent": True}
++
++    monkeypatch.setattr(main_module, "send_selfie_review_result", notification_ok)
++    with TestClient(app) as client:
++        setup = client.post(
++            "/setup",
++            data={"email": "admin@buraq.com", "password": "password123", "confirm_password": "password123"},
++            follow_redirects=False,
++        )
++        if setup.status_code == 403:
++            login = client.post(
++                "/login",
++                data={"email": "admin@buraq.com", "password": "password123"},
++                follow_redirects=False,
++            )
++            assert login.status_code == 303
++
++        with get_db() as db:
++            db.execute("DELETE FROM employees WHERE staff_id=?", ("TEST-DASH-APPROVE",))
++            db.execute(
++                """INSERT INTO employees(staff_id,name,phone,whatsapp_phone,shift,registration_status)
++                   VALUES(?,?,?,?,?,?)""",
++                ("TEST-DASH-APPROVE", "Dashboard Approve", "01700000003", "8801700000003", "morning", "approved"),
++            )
++            employee = db.execute("SELECT id FROM employees WHERE staff_id=?", ("TEST-DASH-APPROVE",)).fetchone()
++            db.execute(
++                """INSERT INTO attendance_fingerprints(
++                    employee_id,action,media_id,image_data,latitude,longitude,distance_meters,
++                    phash,ahash,dhash,embedding,decision,review_status,face_score,duplicate_score,created_at)
++                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
++                (employee["id"], "check_in", "dashboard-approve-media", "", 23.0, 90.0, 5.0,
++                 "pd", "ad", "dd", "[]", "accept", "pending", 0.93, 0.01, "2026-08-04 08:05:00"),
++            )
++            fingerprint = db.execute(
++                "SELECT id FROM attendance_fingerprints WHERE media_id=?", ("dashboard-approve-media",)
++            ).fetchone()
++
++        page = client.get("/duplicates?review=pending")
++        assert page.status_code == 200
++        assert f"/duplicates/{fingerprint['id']}/approve" in page.text
++
++        first = client.post(f"/duplicates/{fingerprint['id']}/approve", follow_redirects=False)
++        second = client.post(f"/duplicates/{fingerprint['id']}/approve", follow_redirects=False)
++        assert first.status_code == 303
++        assert first.headers["location"].endswith("saved=approved")
++        assert second.status_code == 303
++        assert second.headers["location"].endswith("saved=approved")
++
++        with get_db() as db:
++            selfie = db.execute(
++                "SELECT review_status,attendance_applied FROM attendance_fingerprints WHERE id=?",
++                (fingerprint["id"],),
++            ).fetchone()
++            evidence = db.execute(
++                "SELECT COUNT(*) c FROM attendance_evidence WHERE image_media_id=?",
++                ("dashboard-approve-media",),
++            ).fetchone()
++        assert selfie["review_status"] == "approved"
++        assert bool(selfie["attendance_applied"]) is True
++        assert int(evidence["c"]) == 1
+--- repo5/tests/test_shift_rules.py	2026-08-20 19:20:17.570402136 +0000
++++ repo4/tests/test_shift_rules.py	2026-08-20 19:06:14.551786196 +0000
+@@ -349,8 +349,8 @@
+ def test_health_and_ready_report_the_new_version(running_app):
+     health = running_app.get("/health")
+     assert health.status_code == 200
+-    assert health.json()["version"] == "9.24.1"
+-    assert APP_VERSION == "9.24.1"
++    assert health.json()["version"] == "9.26.0"
++    assert APP_VERSION == "9.26.0"
+ 
+     ready = running_app.get("/ready")
+     assert ready.status_code == 200
+--- repo5/tests/test_leave_flow.py	2026-08-20 19:20:17.570402136 +0000
++++ repo4/tests/test_leave_flow.py	2026-08-20 14:55:59.680134163 +0000
+@@ -1,101 +1,258 @@
+-"""v9.26 guided WhatsApp leave request tests."""
++"""v9.25 — employee-side leave requests over WhatsApp."""
+ import os
+-from datetime import date, datetime, timedelta
++import sys
++from datetime import date, timedelta
++from pathlib import Path
+ 
+-import pytest
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ 
+ os.environ.setdefault("ENVIRONMENT", "development")
+-os.environ.setdefault("DATABASE_PATH", "/tmp/buraq_feature_test.db")
++os.environ.setdefault("DATABASE_PATH", "/tmp/buraq_leave_test.db")
+ os.environ.setdefault("REQUIRE_SECURE_SECRETS", "false")
+ os.environ.setdefault("ALLOW_TEMP_DB_FALLBACK", "false")
++os.environ.setdefault("SESSION_SECRET", "test-session-secret-01234567890123456789")
++os.environ.setdefault("CONFIG_ENCRYPTION_KEY", "test-config-secret-0123456789012345678")
+ 
+-from app import leave_flow
+-from app.database import get_db, init_db
++Path(os.environ["DATABASE_PATH"]).unlink(missing_ok=True)
+ 
+-init_db(max_attempts=1)
++import pytest
++from fastapi.testclient import TestClient
+ 
++from app.main import app
++from app.database import get_db
++from app.services import process, clear_state, state
++from app import leave_flow
+ 
+-PHONE = "8801700000099"
++PHONE = "8801799000111"
+ STAFF_ID = "TEST-LEAVE-001"
+ 
+ 
+ @pytest.fixture(autouse=True)
+ def employee():
+-    with get_db() as db:
+-        db.execute("DELETE FROM conversation_states WHERE phone=?", (PHONE,))
+-        old = db.execute("SELECT id FROM employees WHERE staff_id=?", (STAFF_ID,)).fetchone()
+-        if old:
+-            db.execute("DELETE FROM leave_requests WHERE employee_id=?", (old["id"],))
+-            db.execute("DELETE FROM employees WHERE id=?", (old["id"],))
+-        db.execute(
+-            "INSERT INTO employees(staff_id,name,registration_status,is_active,whatsapp_phone) "
+-            "VALUES(?,?,?,?,?)",
+-            (STAFF_ID, "Leave Test", "approved", True, PHONE),
+-        )
+-    yield
+-    with get_db() as db:
+-        row = db.execute("SELECT id FROM employees WHERE staff_id=?", (STAFF_ID,)).fetchone()
+-        if row:
+-            db.execute("DELETE FROM leave_requests WHERE employee_id=?", (row["id"],))
+-            db.execute("DELETE FROM employees WHERE id=?", (row["id"],))
+-        db.execute("DELETE FROM conversation_states WHERE phone=?", (PHONE,))
+-
+-
+-@pytest.mark.parametrize(
+-    ("raw", "expected"),
+-    [
+-        ("2026-08-25", date(2026, 8, 25)),
+-        ("25/08/2026", date(2026, 8, 25)),
+-        ("২৫/০৮/২০২৬", date(2026, 8, 25)),
+-        ("আজ", date(2026, 8, 20)),
+-        ("আগামীকাল", date(2026, 8, 21)),
+-    ],
+-)
+-def test_flexible_dates(raw, expected):
+-    assert leave_flow.parse_leave_date(raw, today=date(2026, 8, 20)) == expected
+-
+-
+-def test_invalid_ranges_are_blocked():
+-    today = date(2026, 8, 20)
+-    assert "৩০ দিনের" in leave_flow._date_error(today - timedelta(days=31), today=today)
+-    assert "আগে" in leave_flow._date_error(today, today - timedelta(days=1), today=today)
+-    assert "৬০" in leave_flow._date_error(today, today + timedelta(days=60), today=today)
+-
+-
+-def test_complete_guided_request_and_status(monkeypatch):
+-    monkeypatch.setattr(leave_flow, "now_local", lambda: datetime(2026, 8, 20, 12, 0))
+-
+-    assert "শুরু" in leave_flow.handle_leave_message(PHONE, "ছুটি")
+-    assert "শুরুর তারিখ" in leave_flow.handle_leave_message(PHONE, "1")
+-    assert "শেষ তারিখ" in leave_flow.handle_leave_message(PHONE, "আগামীকাল")
+-    assert "কারণ" in leave_flow.handle_leave_message(PHONE, "21/08/2026")
+-    assert "YES" in leave_flow.handle_leave_message(PHONE, "পারিবারিক প্রয়োজন")
+-    assert "HR-এর কাছে" in leave_flow.handle_leave_message(PHONE, "YES")
++    with TestClient(app):
++        with get_db() as db:
++            row = db.execute("SELECT id FROM employees WHERE staff_id=?", (STAFF_ID,)).fetchone()
++            if row:
++                db.execute("DELETE FROM leave_requests WHERE employee_id=?", (row["id"],))
++                # Approved leave writes attendance rows that reference the
++                # employee; they must go first or the DELETE below hits the FK.
++                db.execute("DELETE FROM attendance WHERE employee_id=?", (row["id"],))
++            db.execute("DELETE FROM employees WHERE staff_id=?", (STAFF_ID,))
++            db.execute(
++                "INSERT INTO employees(staff_id,name,shift,registration_status,whatsapp_phone) "
++                "VALUES(?,?,?,?,?)",
++                (STAFF_ID, "Leave Tester", "morning", "approved", PHONE),
++            )
++        clear_state(PHONE)
++        yield
++        clear_state(PHONE)
+ 
++
++def _requests():
+     with get_db() as db:
+-        row = db.execute(
++        return db.execute(
+             "SELECT l.* FROM leave_requests l JOIN employees e ON e.id=l.employee_id "
+-            "WHERE e.staff_id=?", (STAFF_ID,),
+-        ).fetchone()
+-    assert row["leave_type"] == "Casual"
+-    assert row["start_date"] == "2026-08-21"
+-    assert row["end_date"] == "2026-08-21"
+-    assert row["requested_by"] == "employee:whatsapp"
+-    assert "Pending" in leave_flow.handle_leave_message(PHONE, "my leave")
++            "WHERE e.staff_id=? ORDER BY l.id DESC", (STAFF_ID,)).fetchall()
+ 
+ 
+-def test_overlapping_pending_request_is_blocked(monkeypatch):
+-    monkeypatch.setattr(leave_flow, "now_local", lambda: datetime(2026, 8, 20, 12, 0))
+-    with get_db() as db:
+-        employee_id = db.execute("SELECT id FROM employees WHERE staff_id=?", (STAFF_ID,)).fetchone()["id"]
+-        db.execute(
+-            "INSERT INTO leave_requests(employee_id,leave_type,start_date,end_date,status,requested_by) "
+-            "VALUES(?,?,?,?,?,?)",
+-            (employee_id, "Sick", "2026-08-25", "2026-08-27", "pending", "employee:whatsapp"),
++# --- date parsing -----------------------------------------------------------
++
++def test_parse_iso_and_slash_dates():
++    assert leave_flow.parse_leave_date("2026-08-25") == date(2026, 8, 25)
++    assert leave_flow.parse_leave_date("25/08/2026") == date(2026, 8, 25)
++    assert leave_flow.parse_leave_date("25-08-2026") == date(2026, 8, 25)
++
++
++def test_parse_bengali_digits_and_relative_words():
++    base = date(2026, 8, 20)
++    assert leave_flow.parse_leave_date("২৫/০৮/২০২৬") == date(2026, 8, 25)
++    assert leave_flow.parse_leave_date("আজ", base) == base
++    assert leave_flow.parse_leave_date("আগামীকাল", base) == date(2026, 8, 21)
++
++
++def test_parse_rejects_garbage():
++    assert leave_flow.parse_leave_date("next week") is None
++    assert leave_flow.parse_leave_date("") is None
++
++
++def test_leave_type_aliases():
++    assert leave_flow.parse_leave_type("2") == "Sick"
++    assert leave_flow.parse_leave_type("SICK") == "Sick"
++    assert leave_flow.parse_leave_type("অসুস্থ") == "Sick"
++    assert leave_flow.parse_leave_type("holiday") is None
++
++
++# --- happy path -------------------------------------------------------------
++
++def test_full_request_is_saved_as_pending():
++    start = date.today() + timedelta(days=3)
++    end = start + timedelta(days=2)
++
++    assert "ছুটির আবেদন" in process(PHONE, "leave")
++    assert state(PHONE)["state"] == "leave_type"
++
++    process(PHONE, "2")
++    assert state(PHONE)["state"] == "leave_start:Sick"
++
++    process(PHONE, start.isoformat())
++    process(PHONE, end.isoformat())
++    assert state(PHONE)["state"].startswith("leave_reason:Sick")
++
++    preview = process(PHONE, "জ্বর ও কাশি")
++    assert "Sick" in preview and "3 দিন" in preview
++
++    done = process(PHONE, "YES")
++    assert "জমা হয়েছে" in done
++    assert state(PHONE) is None  # state cleared after submit
++
++    rows = _requests()
++    assert len(rows) == 1
++    assert rows[0]["leave_type"] == "Sick"
++    assert rows[0]["status"] == "pending"
++    assert rows[0]["requested_by"] == "employee:whatsapp"
++    assert rows[0]["reason"] == "জ্বর ও কাশি"
++
++
++def test_single_day_leave_uses_same_date_twice():
++    day = (date.today() + timedelta(days=5)).isoformat()
++    process(PHONE, "leave"); process(PHONE, "Casual")
++    process(PHONE, day); process(PHONE, day)
++    process(PHONE, "ব্যক্তিগত কাজ"); process(PHONE, "yes")
++    rows = _requests()
++    assert rows[0]["start_date"] == day and rows[0]["end_date"] == day
++
++
++# --- validation -------------------------------------------------------------
++
++def test_end_before_start_is_rejected_and_step_is_retried():
++    start = date.today() + timedelta(days=10)
++    process(PHONE, "leave"); process(PHONE, "Casual"); process(PHONE, start.isoformat())
++    reply = process(PHONE, (start - timedelta(days=2)).isoformat())
++    assert "শেষ তারিখ" in reply
++    # Still waiting on the end date rather than advancing with bad data.
++    assert state(PHONE)["state"].startswith("leave_end:")
++    assert _requests() == []
++
++
++def test_far_past_start_is_rejected():
++    old = date.today() - timedelta(days=leave_flow.MAX_PAST_DAYS + 5)
++    process(PHONE, "leave"); process(PHONE, "Sick")
++    reply = process(PHONE, old.isoformat())
++    assert "পুরোনো" in reply
++    assert _requests() == []
++
++
++def test_duration_cap_is_enforced():
++    start = date.today() + timedelta(days=1)
++    end = start + timedelta(days=leave_flow.MAX_DURATION_DAYS + 1)
++    process(PHONE, "leave"); process(PHONE, "Annual"); process(PHONE, start.isoformat())
++    reply = process(PHONE, end.isoformat())
++    assert str(leave_flow.MAX_DURATION_DAYS) in reply
++    assert _requests() == []
++
++
++def test_overlapping_request_is_blocked():
++    start = date.today() + timedelta(days=20)
++    end = start + timedelta(days=3)
++    process(PHONE, "leave"); process(PHONE, "Casual")
++    process(PHONE, start.isoformat()); process(PHONE, end.isoformat())
++    process(PHONE, "প্রথম আবেদন"); process(PHONE, "yes")
++    assert len(_requests()) == 1
++
++    # Second request overlapping the middle of the first one.
++    process(PHONE, "leave"); process(PHONE, "Casual")
++    reply = process(PHONE, (start + timedelta(days=1)).isoformat())
++    assert "মিলে যাচ্ছে" in reply
++    assert len(_requests()) == 1
++
++
++def test_unknown_type_reprompts_without_advancing():
++    process(PHONE, "leave")
++    reply = process(PHONE, "holiday")
++    assert "বুঝতে পারিনি" in reply
++    assert state(PHONE)["state"] == "leave_type"
++
++
++def test_short_reason_is_rejected():
++    day = (date.today() + timedelta(days=4)).isoformat()
++    process(PHONE, "leave"); process(PHONE, "Casual"); process(PHONE, day); process(PHONE, day)
++    reply = process(PHONE, "ok")
++    assert "৩ অক্ষরের" in reply
++    assert state(PHONE)["state"].startswith("leave_reason:")
++
++
++def test_cancel_aborts_and_saves_nothing():
++    process(PHONE, "leave"); process(PHONE, "Sick")
++    reply = process(PHONE, "cancel")
++    assert "বাতিল" in reply
++    assert state(PHONE) is None
++    assert _requests() == []
++
++
++def test_confirm_step_requires_yes():
++    day = (date.today() + timedelta(days=6)).isoformat()
++    process(PHONE, "leave"); process(PHONE, "Casual"); process(PHONE, day); process(PHONE, day)
++    process(PHONE, "পারিবারিক কারণ")
++    reply = process(PHONE, "maybe")
++    assert "YES" in reply
++    assert _requests() == []
++
++
++# --- reporting and approval -------------------------------------------------
++
++def test_my_leave_lists_status():
++    assert "কোনো ছুটির আবেদন নেই" in process(PHONE, "my leave")
++    day = (date.today() + timedelta(days=7)).isoformat()
++    process(PHONE, "leave"); process(PHONE, "Annual"); process(PHONE, day); process(PHONE, day)
++    process(PHONE, "ভ্রমণ"); process(PHONE, "yes")
++    report = process(PHONE, "my leave")
++    assert "Annual" in report and "pending" in report
++
++
++def test_reason_with_colon_survives_the_state_machine():
++    """Reasons are base64-encoded in state, so ':' must not corrupt parsing."""
++    day = (date.today() + timedelta(days=8)).isoformat()
++    process(PHONE, "leave"); process(PHONE, "Casual"); process(PHONE, day); process(PHONE, day)
++    process(PHONE, "ডাক্তার: সকাল ১০:৩০ appointment"); process(PHONE, "yes")
++    assert _requests()[0]["reason"] == "ডাক্তার: সকাল ১০:৩০ appointment"
++
++
++def test_approval_writes_leave_attendance_rows():
++    start = date.today() + timedelta(days=12)
++    end = start + timedelta(days=1)
++    process(PHONE, "leave"); process(PHONE, "Casual")
++    process(PHONE, start.isoformat()); process(PHONE, end.isoformat())
++    process(PHONE, "পারিবারিক অনুষ্ঠান"); process(PHONE, "yes")
++    request_id = _requests()[0]["id"]
++
++    with TestClient(app) as client:
++        setup = client.post(
++            "/setup",
++            data={"email": "admin@buraq.com", "password": "password123",
++                  "confirm_password": "password123"},
++            follow_redirects=False,
+         )
++        if setup.status_code == 403:
++            login = client.post(
++                "/login",
++                data={"email": "admin@buraq.com", "password": "password123"},
++                follow_redirects=False,
++            )
++            assert login.status_code == 303
++        client.post(f"/leave/{request_id}/approve", follow_redirects=False)
++
++    rows = _requests()
++    assert rows[0]["status"] == "approved"
++    with get_db() as db:
++        marked = db.execute(
++            "SELECT COUNT(*) c FROM attendance a JOIN employees e ON e.id=a.employee_id "
++            "WHERE e.staff_id=? AND a.status='leave'", (STAFF_ID,)).fetchone()["c"]
++    assert marked == 2
++
+ 
+-    leave_flow.handle_leave_message(PHONE, "leave")
+-    leave_flow.handle_leave_message(PHONE, "Sick")
+-    leave_flow.handle_leave_message(PHONE, "25/08/2026")
+-    response = leave_flow.handle_leave_message(PHONE, "26/08/2026")
+-    assert "মিলে গেছে" in response
++def test_decision_message_mentions_dates():
++    row = {"leave_type": "Sick", "start_date": "2026-09-01", "end_date": "2026-09-03"}
++    approved = leave_flow.decision_message(row, "approved")
++    rejected = leave_flow.decision_message(row, "rejected")
++    assert "অনুমোদিত হয়েছে" in approved and "2026-09-01" in approved
++    assert "অনুমোদিত হয়নি" in rejected
+--- repo5/tests/test_performance.py	2026-08-20 19:20:17.570402136 +0000
++++ repo4/tests/test_performance.py	2026-08-20 19:08:09.563916565 +0000
+@@ -7,17 +7,18 @@
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ 
+ os.environ.setdefault("ENVIRONMENT", "development")
+-os.environ.setdefault("DATABASE_PATH", "/tmp/buraq_feature_test.db")
++os.environ.setdefault("DATABASE_PATH", "/tmp/buraq_perf_test.db")
+ os.environ.setdefault("REQUIRE_SECURE_SECRETS", "false")
+ os.environ.setdefault("ALLOW_TEMP_DB_FALLBACK", "false")
+ os.environ.setdefault("SESSION_SECRET", "test-session-secret-01234567890123456789")
+ os.environ.setdefault("CONFIG_ENCRYPTION_KEY", "test-config-secret-0123456789012345678")
+ 
++Path(os.environ["DATABASE_PATH"]).unlink(missing_ok=True)
++
+ import pytest
+ from fastapi.testclient import TestClient
+ 
+ from app.main import app
+-from app import main as main_module
+ from app.database import get_db
+ from app import performance
+ 
+@@ -223,11 +224,20 @@
+     assert count == 0
+ 
+ 
+-def test_send_records_the_notice_once(monkeypatch):
+-    async def delivered(_phone, _message):
++@pytest.fixture
++def delivered(monkeypatch):
++    """Pretend Meta accepted the message, and record what we asked it to send."""
++    sent = []
++
++    async def fake_send_text(phone, message):
++        sent.append((phone, message))
+         return {"sent": True}
+ 
+-    monkeypatch.setattr(main_module, "send_text", delivered)
++    monkeypatch.setattr("app.main.send_text", fake_send_text)
++    return sent
++
++
++def test_send_records_the_notice_once(delivered):
+     employee_id = _row(STAR)["employee_id"]
+     with TestClient(app) as client:
+         _login(client)
+@@ -246,45 +256,42 @@
+     assert len(rows) == 1
+     assert rows[0]["notice_type"] == "star"
+     assert rows[0]["message"]
++    # Sent exactly once, despite two button presses.
++    assert len(delivered) == 1
+ 
+ 
+-def test_failed_delivery_is_not_marked_sent_and_can_retry(monkeypatch):
+-    async def failed(_phone, _message):
+-        return {"sent": False, "reason": "temporary test failure"}
++def test_failed_delivery_releases_the_reservation(monkeypatch):
++    """If Meta rejects the message, HR must be able to try again."""
++    async def refusing_send_text(phone, message):
++        return {"sent": False}
+ 
+-    monkeypatch.setattr(main_module, "send_text", failed)
++    monkeypatch.setattr("app.main.send_text", refusing_send_text)
+     employee_id = _row(STAR)["employee_id"]
+     with TestClient(app) as client:
+         _login(client)
+-        response = client.post(
+-            "/performance-awards/send",
+-            data={"employee_id": employee_id, "period": PERIOD, "notice_type": "star"},
+-            follow_redirects=False,
+-        )
+-    assert response.status_code == 303
+-    assert "error=send" in response.headers["location"]
++        response = client.post("/performance-awards/send",
++                               data={"employee_id": employee_id, "period": PERIOD,
++                                     "notice_type": "star"},
++                               follow_redirects=False)
++        assert "error=send" in response.headers["location"]
++
+     with get_db() as db:
+-        count = db.execute(
+-            "SELECT COUNT(*) c FROM performance_notices WHERE employee_id=? AND period=?",
+-            (employee_id, PERIOD),
+-        ).fetchone()["c"]
++        count = db.execute("SELECT COUNT(*) c FROM performance_notices WHERE employee_id=? AND period=?",
++                           (employee_id, PERIOD)).fetchone()["c"]
+     assert count == 0
+ 
+ 
+-def test_modified_notice_category_is_rejected(monkeypatch):
+-    async def delivered(_phone, _message):
+-        return {"sent": True}
+-
+-    monkeypatch.setattr(main_module, "send_text", delivered)
+-    employee_id = _row(STAR)["employee_id"]
++def test_notice_type_must_match_the_server_side_ranking(delivered):
++    """A tampered form must not send a congratulation to a flagged employee."""
++    weak_id = _row(WEAK)["employee_id"]
+     with TestClient(app) as client:
+         _login(client)
+-        response = client.post(
+-            "/performance-awards/send",
+-            data={"employee_id": employee_id, "period": PERIOD, "notice_type": "good"},
+-            follow_redirects=False,
+-        )
+-    assert response.status_code == 409
++        response = client.post("/performance-awards/send",
++                               data={"employee_id": weak_id, "period": PERIOD,
++                                     "notice_type": "star"},
++                               follow_redirects=False)
++        assert response.status_code == 409
++    assert delivered == []
+ 
+ 
+ def test_unknown_notice_type_is_rejected():
+--- repo5/app/leave_flow.py	2026-08-20 19:20:17.555377056 +0000
++++ repo4/app/leave_flow.py	2026-08-20 14:52:48.338993070 +0000
+@@ -1,230 +1,281 @@
+-"""Guided WhatsApp leave requests and HR decision messages (v9.26)."""
++"""Employee-side leave request flow over WhatsApp (v9.25).
++
++The HR side already exists: ``/hr-operations`` lists ``leave_requests`` and
++``POST /leave/{id}/approve`` writes ``status='leave'`` attendance rows that
++payroll reads as paid leave.  What was missing was a way for the *employee* to
++file the request, so HR had to type every one by hand.
++
++This module adds only the conversation.  It writes exactly one row into the
++existing ``leave_requests`` table with ``status='pending'`` and
++``requested_by='employee:whatsapp'``, so approval, payroll and audit behaviour
++stay byte-for-byte identical to an HR-entered request.
++
++State machine (stored in the existing ``conversation_states`` table):
++
++    leave_type
++        -> leave_start:<type>
++            -> leave_end:<type>:<start>
++                -> leave_reason:<type>:<start>:<end>
++                    -> leave_confirm:<type>:<start>:<end>:<reason_b64>
++                        -> INSERT, clear_state
++
++``CANCEL`` aborts at any step because ``services.process`` checks it before
++dispatching on state.
++"""
+ from __future__ import annotations
+ 
+-import json
+-import re
+-from datetime import date, timedelta
++import base64
++import logging
++from datetime import datetime, timedelta
++from zoneinfo import ZoneInfo
+ 
++from app.config import settings
+ from app.database import get_db
+-from app.services import clear_state, employee_by_phone, now_local, set_state, state
+ 
+-STATE_PREFIX = "leave:"
++logger = logging.getLogger(__name__)
++
++# Must match the HR dropdown in /hr-operations so both sources produce the same
++# leave_type values. 'Unpaid' is deliberately included: payroll treats it as an
++# unpaid unit rather than silently paying for it.
+ LEAVE_TYPES = ("Casual", "Sick", "Annual", "Unpaid")
+-MAX_LEAVE_DAYS = 60
+-MAX_PAST_DAYS = 30
+ 
+-_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
++MAX_PAST_DAYS = 30        # retroactive sick leave is normal; older needs HR
++MAX_FUTURE_DAYS = 365
++MAX_DURATION_DAYS = 60
++MAX_REASON_CHARS = 500
++
++_BENGALI_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
++
+ _TYPE_ALIASES = {
+-    "1": "Casual", "casual": "Casual", "নৈমিত্তিক": "Casual",
++    "1": "Casual", "casual": "Casual", "নৈমিত্তিক": "Casual", "ক্যাজুয়াল": "Casual",
+     "2": "Sick", "sick": "Sick", "অসুস্থ": "Sick", "অসুস্থতা": "Sick",
+     "3": "Annual", "annual": "Annual", "বার্ষিক": "Annual",
+-    "4": "Unpaid", "unpaid": "Unpaid", "বেতনবিহীন": "Unpaid", "বেতন ছাড়া": "Unpaid",
++    "4": "Unpaid", "unpaid": "Unpaid", "বিনা বেতনে": "Unpaid", "অবৈতনিক": "Unpaid",
+ }
+ 
++_TODAY_WORDS = {"আজ", "আজকে", "today"}
++_TOMORROW_WORDS = {"কাল", "আগামীকাল", "কালকে", "tomorrow"}
+ 
+-def _normalize(value: str) -> str:
+-    return " ".join(str(value or "").translate(_DIGITS).strip().lower().split())
+ 
++def today_local():
++    return datetime.now(ZoneInfo(settings.timezone)).date()
+ 
+-def parse_leave_date(value: str, today: date | None = None) -> date:
+-    """Accept ISO, DD/MM/YYYY, Bengali digits, today and tomorrow."""
+-    today = today or now_local().date()
+-    text = _normalize(value)
+-    if text in {"আজ", "today"}:
+-        return today
+-    if text in {"আগামীকাল", "আগামিকাল", "tomorrow"}:
+-        return today + timedelta(days=1)
+-
+-    iso = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", text)
+-    if iso:
+-        return date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+-    local = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", text)
+-    if local:
+-        return date(int(local.group(3)), int(local.group(2)), int(local.group(1)))
+-    raise ValueError("তারিখ বুঝতে পারিনি")
+-
+-
+-def _load(phone: str) -> dict | None:
+-    row = state(phone)
+-    raw = str(row["state"] or "") if row else ""
+-    if not raw.startswith(STATE_PREFIX):
+-        return None
+-    try:
+-        data = json.loads(raw[len(STATE_PREFIX):])
+-        return data if isinstance(data, dict) else None
+-    except (TypeError, ValueError, json.JSONDecodeError):
+-        clear_state(phone)
+-        return None
++
++def _encode_reason(reason: str) -> str:
++    return base64.urlsafe_b64encode(reason.encode("utf-8")).decode("ascii")
+ 
+ 
+-def _save(phone: str, data: dict) -> None:
+-    set_state(phone, STATE_PREFIX + json.dumps(data, ensure_ascii=False, separators=(",", ":")))
++def _decode_reason(blob: str) -> str:
++    try:
++        return base64.urlsafe_b64decode(blob.encode("ascii")).decode("utf-8")
++    except Exception:
++        return ""
+ 
+ 
+-def _type_from_text(value: str) -> str | None:
+-    return _TYPE_ALIASES.get(_normalize(value))
++def parse_leave_type(text: str) -> str | None:
++    key = " ".join((text or "").strip().lower().split())
++    return _TYPE_ALIASES.get(key)
+ 
+ 
+-def _date_error(start: date, end: date | None = None, today: date | None = None) -> str | None:
+-    today = today or now_local().date()
+-    if start < today - timedelta(days=MAX_PAST_DAYS):
+-        return f"❌ ৩০ দিনের বেশি পুরোনো তারিখে আবেদন করা যাবে না।"
+-    if end is not None:
+-        if end < start:
+-            return "❌ শেষ তারিখ শুরুর তারিখের আগে হতে পারে না।"
+-        days = (end - start).days + 1
+-        if days > MAX_LEAVE_DAYS:
+-            return "❌ একবারে সর্বোচ্চ ৬০ দিনের ছুটির আবেদন করা যাবে।"
++def parse_leave_date(text: str, base_date=None):
++    """Accept ISO, DD/MM/YYYY, DD-MM-YYYY and Bengali relative words.
++
++    Bengali digits are normalised first so ``২৫/০৮/২০২৬`` works exactly like
++    ``25/08/2026``. Returns ``None`` when nothing parses.
++    """
++    raw = " ".join((text or "").strip().lower().split()).translate(_BENGALI_DIGITS)
++    if not raw:
++        return None
++    base = base_date or today_local()
++    if raw in _TODAY_WORDS:
++        return base
++    if raw in _TOMORROW_WORDS:
++        return base + timedelta(days=1)
++    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d.%m.%Y"):
++        try:
++            return datetime.strptime(raw, fmt).date()
++        except ValueError:
++            continue
+     return None
+ 
+ 
+-def _overlap(employee_id: int, start: date, end: date) -> bool:
++def _overlapping(employee_id: int, start, end):
++    """Any pending/approved request covering part of the same range."""
+     with get_db() as c:
+-        row = c.execute(
+-            "SELECT 1 FROM leave_requests WHERE employee_id=? "
+-            "AND status IN ('pending','approved') AND NOT(end_date<? OR start_date>?) LIMIT 1",
+-            (employee_id, start.isoformat(), end.isoformat()),
++        return c.execute(
++            "SELECT leave_type,start_date,end_date,status FROM leave_requests "
++            "WHERE employee_id=? AND status IN ('pending','approved') "
++            "AND start_date<=? AND end_date>=? ORDER BY id DESC LIMIT 1",
++            (employee_id, end.isoformat(), start.isoformat()),
+         ).fetchone()
+-    return bool(row)
+ 
+ 
+-def leave_status(employee_id: int) -> str:
+-    with get_db() as c:
+-        rows = c.execute(
+-            "SELECT leave_type,start_date,end_date,status,created_at FROM leave_requests "
+-            "WHERE employee_id=? ORDER BY id DESC LIMIT 10", (employee_id,),
+-        ).fetchall()
+-    if not rows:
+-        return "📋 আপনার কোনো ছুটির আবেদন নেই।"
+-    labels = {"pending": "⏳ Pending", "approved": "✅ Approved", "rejected": "❌ Rejected"}
+-    lines = ["📋 আপনার সাম্প্রতিক ছুটির আবেদন", ""]
+-    for row in rows:
+-        lines.append(
+-            f"{labels.get(str(row['status']), str(row['status']).title())} · "
+-            f"{row['leave_type']} · {row['start_date']} → {row['end_date']}"
+-        )
+-    return "\n".join(lines)
+-
+-
+-def decision_message(request_row, status: str) -> str:
+-    approved = status == "approved"
+-    title = "✅ ছুটির আবেদন অনুমোদিত" if approved else "❌ ছুটির আবেদন বাতিল"
+-    result = "অনুমোদন করেছেন" if approved else "অনুমোদন করেননি"
+-    return (
+-        f"{title}\n\nHR আপনার {request_row['leave_type']} leave আবেদন {result}।\n"
+-        f"তারিখ: {request_row['start_date']} → {request_row['end_date']}\n\n"
+-        "নিজের আবেদনের অবস্থা দেখতে লিখুন: my leave"
+-    )
+-
+-
+-def handle_leave_message(phone: str, text: str) -> str | None:
+-    """Handle a leave command/state, or return None for the attendance router."""
+-    command = _normalize(text)
+-    employee = employee_by_phone(phone)
+-
+-    if command in {"my leave", "my_leave", "আমার ছুটি", "ছুটির অবস্থা"}:
+-        if not employee:
+-            return "❌ আগে Register করুন। শুধু লিখুন: Register"
+-        return leave_status(int(employee["id"]))
+-
+-    current = _load(phone)
+-    if command in {"leave", "ছুটি"} and current is None:
+-        if not employee:
+-            return "❌ আগে Register করুন। শুধু লিখুন: Register"
+-        existing = state(phone)
+-        if existing and not str(existing["state"] or "").startswith(STATE_PREFIX):
+-            return "আগের প্রক্রিয়াটি আগে শেষ করুন অথবা CANCEL লিখে বাতিল করুন।"
+-        _save(phone, {"stage": "type", "employee_id": int(employee["id"])})
+-        return (
+-            "🏖️ ছুটির আবেদন শুরু হয়েছে।\n\n"
+-            "ধরন লিখুন:\n1. Casual\n2. Sick\n3. Annual\n4. Unpaid\n\n"
+-            "বাতিল করতে লিখুন: CANCEL"
+-        )
++def validate_range(employee_id: int, start, end) -> str | None:
++    """Return a Bengali error message, or None when the range is acceptable."""
++    base = today_local()
++    if end < start:
++        return "❌ শেষ তারিখ শুরুর তারিখের আগে হতে পারে না। আবার শেষ তারিখ পাঠান।"
++    if start < base - timedelta(days=MAX_PAST_DAYS):
++        return (f"❌ {MAX_PAST_DAYS} দিনের বেশি পুরোনো তারিখে আবেদন করা যায় না। "
++                "এমন ক্ষেত্রে সরাসরি HR-এর সঙ্গে যোগাযোগ করুন।")
++    if start > base + timedelta(days=MAX_FUTURE_DAYS):
++        return "❌ এক বছরের বেশি ভবিষ্যতের তারিখে আবেদন করা যায় না।"
++    if (end - start).days + 1 > MAX_DURATION_DAYS:
++        return f"❌ একবারে সর্বোচ্চ {MAX_DURATION_DAYS} দিনের ছুটির আবেদন করা যায়।"
++    clash = _overlapping(employee_id, start, end)
++    if clash:
++        status = "অনুমোদিত" if str(clash["status"]) == "approved" else "অপেক্ষমাণ"
++        return (f"❌ এই তারিখগুলোর সঙ্গে আপনার একটি {status} ছুটি মিলে যাচ্ছে "
++                f"({clash['start_date']} → {clash['end_date']})। অন্য তারিখ দিন।")
++    return None
+ 
+-    if current is None:
+-        return None
+-    if not employee or int(current.get("employee_id") or 0) != int(employee["id"]):
++
++def type_prompt() -> str:
++    return ("🗓️ ছুটির আবেদন\n\nকোন ধরনের ছুটি চান? নম্বর বা নাম লিখুন:\n"
++            "1️⃣ Casual (নৈমিত্তিক)\n2️⃣ Sick (অসুস্থতা)\n"
++            "3️⃣ Annual (বার্ষিক)\n4️⃣ Unpaid (বিনা বেতনে)\n\n"
++            "বাতিল করতে লিখুন: CANCEL")
++
++
++def _date_prompt(label: str) -> str:
++    return (f"📅 ছুটির {label} তারিখ পাঠান।\n\n"
++            "উদাহরণ: 2026-08-25 অথবা 25/08/2026\n"
++            "চাইলে লিখতে পারেন: আজ / আগামীকাল")
++
++
++def start_leave_request(phone: str, employee) -> str:
++    """Entry point for the `leave` command."""
++    from app.services import set_state
++    if not employee:
++        return "❌ আগে Register করুন। শুধু লিখুন: Register"
++    set_state(phone, "leave_type")
++    return type_prompt()
++
++
++def handle_leave_state(phone: str, state_value: str, text: str, employee) -> str:
++    """Advance the leave conversation one step. Never raises to the webhook."""
++    from app.services import clear_state, set_state
++
++    if not employee:
+         clear_state(phone)
+-        return "❌ Employee verification পাওয়া যায়নি। আবার leave লিখুন।"
++        return "❌ আগে Register করুন। শুধু লিখুন: Register"
+ 
+-    stage = current.get("stage")
+-    if stage == "type":
+-        leave_type = _type_from_text(command)
+-        if not leave_type:
+-            return "সঠিক ধরন লিখুন: 1 Casual, 2 Sick, 3 Annual অথবা 4 Unpaid।"
+-        current.update(stage="start", leave_type=leave_type)
+-        _save(phone, current)
+-        return "📅 ছুটির শুরুর তারিখ লিখুন। উদাহরণ: 2026-08-25, 25/08/2026, আজ বা আগামীকাল"
++    parts = state_value.split(":")
++    step = parts[0]
+ 
+-    if stage == "start":
+-        try:
+-            start = parse_leave_date(text)
+-        except ValueError:
+-            return "❌ তারিখ বুঝতে পারিনি। লিখুন: 2026-08-25, 25/08/2026, আজ বা আগামীকাল"
+-        error = _date_error(start)
++    if step == "leave_type":
++        leave_type = parse_leave_type(text)
++        if not leave_type:
++            return "❌ বুঝতে পারিনি।\n\n" + type_prompt()
++        set_state(phone, f"leave_start:{leave_type}")
++        return _date_prompt("শুরুর")
++
++    if step == "leave_start":
++        leave_type = parts[1]
++        start = parse_leave_date(text)
++        if not start:
++            return "❌ তারিখ বুঝতে পারিনি।\n\n" + _date_prompt("শুরুর")
++        error = validate_range(employee["id"], start, start)
+         if error:
+             return error
+-        current.update(stage="end", start_date=start.isoformat())
+-        _save(phone, current)
+-        return "📅 ছুটির শেষ তারিখ লিখুন। এক দিনের হলে একই তারিখ আবার লিখুন।"
+-
+-    if stage == "end":
+-        try:
+-            start = date.fromisoformat(current["start_date"])
+-            end = parse_leave_date(text)
+-        except (KeyError, ValueError):
+-            return "❌ তারিখ বুঝতে পারিনি। শেষ তারিখ আবার লিখুন।"
+-        error = _date_error(start, end)
++        set_state(phone, f"leave_end:{leave_type}:{start.isoformat()}")
++        return (f"✅ শুরু: {start.isoformat()}\n\n" + _date_prompt("শেষ") +
++                "\n\nএক দিনের ছুটি হলে একই তারিখ আবার পাঠান।")
++
++    if step == "leave_end":
++        leave_type, start_iso = parts[1], parts[2]
++        start = datetime.fromisoformat(start_iso).date()
++        end = parse_leave_date(text)
++        if not end:
++            return "❌ তারিখ বুঝতে পারিনি।\n\n" + _date_prompt("শেষ")
++        error = validate_range(employee["id"], start, end)
+         if error:
+             return error
+-        if _overlap(int(employee["id"]), start, end):
+-            clear_state(phone)
+-            return "❌ এই তারিখের সঙ্গে আগের Pending/Approved ছুটির আবেদন মিলে গেছে। নতুন আবেদন করতে আবার leave লিখুন।"
+-        current.update(stage="reason", end_date=end.isoformat())
+-        _save(phone, current)
+-        return "📝 ছুটির কারণ সংক্ষেপে লিখুন।"
+-
+-    if stage == "reason":
+-        reason = str(text or "").strip()
+-        if len(reason) < 2:
+-            return "ছুটির কারণ লিখুন।"
+-        if len(reason) > 500:
+-            return "কারণটি ৫০০ অক্ষরের মধ্যে লিখুন।"
+-        current.update(stage="confirm", reason=reason)
+-        _save(phone, current)
+-        return (
+-            "📋 আবেদনটি যাচাই করুন\n\n"
+-            f"ধরন: {current['leave_type']}\n"
+-            f"তারিখ: {current['start_date']} → {current['end_date']}\n"
+-            f"কারণ: {reason}\n\n"
+-            "জমা দিতে YES লিখুন। পরিবর্তন করতে CANCEL লিখে আবার শুরু করুন।"
+-        )
+-
+-    if stage == "confirm":
+-        if command not in {"yes", "y", "হ্যাঁ", "হ্যা", "ha"}:
+-            return "জমা দিতে YES লিখুন, অথবা বাতিল করতে CANCEL লিখুন।"
+-        start = date.fromisoformat(current["start_date"])
+-        end = date.fromisoformat(current["end_date"])
+-        error = _date_error(start, end)
++        set_state(phone, f"leave_reason:{leave_type}:{start_iso}:{end.isoformat()}")
++        days = (end - start).days + 1
++        return (f"✅ {start_iso} → {end.isoformat()} ({days} দিন)\n\n"
++                "📝 ছুটির কারণ সংক্ষেপে লিখুন।")
++
++    if step == "leave_reason":
++        leave_type, start_iso, end_iso = parts[1], parts[2], parts[3]
++        reason = " ".join((text or "").strip().split())[:MAX_REASON_CHARS]
++        if len(reason) < 3:
++            return "❌ কারণটি অন্তত ৩ অক্ষরের হতে হবে। আবার লিখুন।"
++        set_state(phone, f"leave_confirm:{leave_type}:{start_iso}:{end_iso}:{_encode_reason(reason)}")
++        start = datetime.fromisoformat(start_iso).date()
++        end = datetime.fromisoformat(end_iso).date()
++        days = (end - start).days + 1
++        return (f"📋 আবেদন যাচাই করুন:\n\n"
++                f"ধরন: {leave_type}\n"
++                f"তারিখ: {start_iso} → {end_iso} ({days} দিন)\n"
++                f"কারণ: {reason}\n\n"
++                "সব ঠিক থাকলে লিখুন: YES\nবাতিল করতে লিখুন: CANCEL")
++
++    if step == "leave_confirm":
++        command = " ".join((text or "").strip().lower().split())
++        if command not in {"yes", "y", "confirm", "হ্যাঁ", "ha", "ok"}:
++            return "সব ঠিক থাকলে YES লিখুন, অথবা বাতিল করতে CANCEL লিখুন।"
++        leave_type, start_iso, end_iso = parts[1], parts[2], parts[3]
++        reason = _decode_reason(parts[4] if len(parts) > 4 else "")
++        start = datetime.fromisoformat(start_iso).date()
++        end = datetime.fromisoformat(end_iso).date()
++        # Re-validate at submit time: HR may have approved something else while
++        # the employee was typing.
++        error = validate_range(employee["id"], start, end)
+         if error:
+             clear_state(phone)
+-            return error + " আবার leave লিখে শুরু করুন।"
+-        if _overlap(int(employee["id"]), start, end):
++            return error + "\n\nআবার শুরু করতে লিখুন: Leave"
++        try:
++            with get_db() as c:
++                c.execute(
++                    "INSERT INTO leave_requests(employee_id,leave_type,start_date,end_date,reason,requested_by) "
++                    "VALUES(?,?,?,?,?,?)",
++                    (employee["id"], leave_type, start_iso, end_iso, reason, "employee:whatsapp"),
++                )
++        except Exception:
++            logger.exception("Leave request insert failed employee_id=%s", employee["id"])
+             clear_state(phone)
+-            return "❌ একই তারিখে আরেকটি Pending/Approved আবেদন আছে।"
+-        with get_db() as c:
+-            c.execute(
+-                "INSERT INTO leave_requests(employee_id,leave_type,start_date,end_date,reason,requested_by) "
+-                "VALUES(?,?,?,?,?,?)",
+-                (int(employee["id"]), current["leave_type"], start.isoformat(), end.isoformat(),
+-                 current["reason"], "employee:whatsapp"),
+-            )
++            return "⚠️ আবেদন সংরক্ষণ করা যায়নি। একটু পরে আবার চেষ্টা করুন।"
+         clear_state(phone)
+-        return (
+-            "✅ ছুটির আবেদন HR-এর কাছে পাঠানো হয়েছে।\n"
+-            f"{current['leave_type']} · {start.isoformat()} → {end.isoformat()}\n\n"
+-            "অবস্থা দেখতে লিখুন: my leave"
+-        )
++        days = (end - start).days + 1
++        return (f"✅ ছুটির আবেদন জমা হয়েছে।\n\n"
++                f"ধরন: {leave_type}\n"
++                f"তারিখ: {start_iso} → {end_iso} ({days} দিন)\n"
++                f"অবস্থা: ⏳ HR অনুমোদনের অপেক্ষায়\n\n"
++                "সিদ্ধান্ত হলে আপনাকে WhatsApp-এ জানানো হবে।\n"
++                "অবস্থা দেখতে লিখুন: My Leave")
+ 
++    # Unknown leave_* state: fail safe rather than trapping the employee.
+     clear_state(phone)
+-    return "প্রক্রিয়াটি আবার শুরু করতে লিখুন: leave"
++    return "প্রক্রিয়াটি বাতিল হয়েছে। আবার শুরু করতে লিখুন: Leave"
++
++
++def leave_report(employee) -> str:
++    """Recent requests and their status, for the `my leave` command."""
++    with get_db() as c:
++        rows = c.execute(
++            "SELECT leave_type,start_date,end_date,status FROM leave_requests "
++            "WHERE employee_id=? ORDER BY id DESC LIMIT 5",
++            (employee["id"],)).fetchall()
++    if not rows:
++        return "ℹ️ আপনার কোনো ছুটির আবেদন নেই।\n\nনতুন আবেদন করতে লিখুন: Leave"
++    icons = {"pending": "⏳", "approved": "✅", "rejected": "❌"}
++    output = [f"🗓️ {employee['name']}-এর সাম্প্রতিক ছুটির আবেদন:"]
++    for row in rows:
++        status = str(row["status"])
++        output.append(f"{icons.get(status,'•')} {row['leave_type']} | "
++                      f"{row['start_date']} → {row['end_date']} | {status}")
++    return "\n".join(output)
++
++
++def decision_message(row, status: str) -> str:
++    """Text pushed to the employee when HR approves or rejects."""
++    if status == "approved":
++        return (f"✅ আপনার ছুটির আবেদন অনুমোদিত হয়েছে।\n\n"
++                f"ধরন: {row['leave_type']}\n"
++                f"তারিখ: {row['start_date']} → {row['end_date']}\n\n"
++                "এই দিনগুলোতে Check In করার প্রয়োজন নেই।")
++    return (f"❌ আপনার ছুটির আবেদন অনুমোদিত হয়নি।\n\n"
++            f"ধরন: {row['leave_type']}\n"
++            f"তারিখ: {row['start_date']} → {row['end_date']}\n\n"
++            "বিস্তারিত জানতে HR-এর সঙ্গে যোগাযোগ করুন।")
+--- repo5/app/performance.py	2026-08-20 19:20:17.558011269 +0000
++++ repo4/app/performance.py	2026-08-20 19:05:50.504422534 +0000
+@@ -232,7 +232,12 @@
+ 
+ def record_notice(employee_id: int, period: str, notice_type: str, row: dict,
+                   message: str, sent_by: str) -> bool:
+-    """Atomically reserve/log a notice; False means it already exists."""
++    """Atomically reserve/log a notice; False means it already exists.
++
++    The database UNIQUE constraint is the duplicate guard, not a prior SELECT:
++    two HR users pressing send in the same second would both pass a read-then-
++    write check.
++    """
+     try:
+         with get_db() as c:
+             c.execute(
+@@ -242,6 +247,12 @@
+                  int(row.get("rank_position") or 0), message, sent_by))
+         return True
+     except IntegrityError:
+-        # The database UNIQUE constraint is the concurrency-safe duplicate
+-        # guard, including two HR users pressing send at the same moment.
+         return False
++
++
++def release_notice(employee_id: int, period: str, notice_type: str) -> None:
++    """Undo a reservation when delivery failed, so HR can retry."""
++    with get_db() as c:
++        c.execute(
++            "DELETE FROM performance_notices WHERE employee_id=? AND period=? AND notice_type=?",
++            (employee_id, period, notice_type))
