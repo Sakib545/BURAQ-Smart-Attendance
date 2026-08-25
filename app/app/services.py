@@ -333,16 +333,23 @@ SECOND_SHIFT_ASSIGNMENTS = {"second", "evening", "night"}
 def resolve_attendance_shift(employee, moment):
     """Which shift this check-in belongs to.
 
-    The clock-based cutoff alone cannot tell an early arrival from a late one:
-    a second-shift worker who reaches the office at 15:56 for a 16:00 duty sits
-    *before* a 16:00 cutoff and used to be filed as first shift, then measured
-    against the 08:30 start — over seven hours "late" for arriving four minutes
-    early.
+    The workforce rotates: the same person may work a morning duty one day and
+    an evening duty the next, so a fixed ``shift`` column cannot decide a single
+    day. Classification is therefore per-day and clock-based, using the
+    configurable "second shift detection cutoff" — a check-in at or after the
+    cutoff is an evening/second-shift arrival, otherwise a morning/first one.
 
-    So the employee's own assignment wins when it is explicitly a second-shift
-    one. Only when the roster says nothing useful (the default 'morning') do we
-    fall back to guessing from the clock, which keeps the previous behaviour for
-    anyone whose shift column was never set.
+    The cutoff must sit in the empty gap between the two arrival clusters
+    (morning arrivals in the morning, evening arrivals in the afternoon). If it
+    is set too late — e.g. 16:00 when evening staff clock in at 15:55 — those
+    early evening arrivals fall on the wrong side and get measured against the
+    08:30 start, which is the "hundreds of minutes late" bug. Set the cutoff
+    (Duty → Shift Rules) to a time between the clusters, e.g. 14:00.
+
+    An employee who is *genuinely* fixed to the evening shift can still be
+    pinned with an explicit ``evening`` assignment, which always wins; per-day
+    exceptions are handled by a custom/weekly duty row that ``duty_window``
+    honours ahead of the global rule.
     """
     assigned = str((employee["shift"] if employee is not None else "") or "").strip().lower()
     if assigned in SECOND_SHIFT_ASSIGNMENTS:
@@ -377,10 +384,55 @@ def duty_window(employee, duty_date, db=None, shift_override=None):
     return start_dt,end_dt
 
 
+def _shift_label_for_start(start_time_obj):
+    """A duty that starts at/after the second-shift start is a second-shift
+    duty; anything earlier is first shift. Keeps the report label consistent
+    with the window the attendance is actually measured against."""
+    second_start, _ = shift_window("second")
+    return "second" if start_time_obj >= second_start else "first"
+
+
+def resolve_duty(employee, moment, duty_date, db=None, fallback_shift=None):
+    """Return ``(shift_label, start_dt, end_dt)`` for a check-in/out.
+
+    The employee's own assigned duty always wins — a custom duty for the exact
+    date first, else the weekly duty for that weekday. When a duty exists the
+    window AND the first/second label both come from it, so every employee is
+    counted against the hours they were actually given (08:30–16:00, 10:00–18:00,
+    16:00–22:00, and so on). Only when no duty is assigned do we fall back to the
+    clock-based shift and the global shift window."""
+    date_text = duty_date.isoformat()
+    def load(c):
+        duty = c.execute(
+            "SELECT start_time,end_time FROM custom_duties WHERE employee_id=? AND duty_date=? AND is_active",
+            (employee['id'], date_text)).fetchone()
+        if not duty:
+            duty = c.execute(
+                "SELECT start_time,end_time FROM duty_schedules WHERE employee_id=? AND weekday=? AND is_active",
+                (employee['id'], duty_date.weekday())).fetchone()
+        return duty
+    if db is None:
+        with get_db() as c:
+            duty = load(c)
+    else:
+        duty = load(db)
+    if duty:
+        start = time.fromisoformat(str(duty['start_time']))
+        end = time.fromisoformat(str(duty['end_time']))
+        shift_label = _shift_label_for_start(start)
+    else:
+        shift_label = fallback_shift or resolve_attendance_shift(employee, moment)
+        start, end = shift_times(_employee_shift_for_attendance(shift_label))
+    start_dt = datetime.combine(duty_date, start, tzinfo=now_local().tzinfo)
+    end_dt = datetime.combine(duty_date, end, tzinfo=now_local().tzinfo)
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+    return shift_label, start_dt, end_dt
+
+
 def check_in(employee):
     current = now_local(); work_date = current.date().isoformat()
-    attendance_shift = resolve_attendance_shift(employee, current)
-    start_dt,_=duty_window(employee,current.date(),shift_override=_employee_shift_for_attendance(attendance_shift))
+    attendance_shift, start_dt, _ = resolve_duty(employee, current, current.date())
     late = apply_late_grace(int((current-start_dt).total_seconds() // 60))
     with get_db() as c:
         record = c.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], work_date)).fetchone()
@@ -409,7 +461,7 @@ def check_out(employee):
     with get_db() as c:
         record,duty_date=_open_attendance(employee,current,c)
     if not record: return "❌ আগে Check In করতে হবে।"
-    _,end_dt=duty_window(employee,duty_date,shift_override=_employee_shift_for_attendance(record['attendance_shift']))
+    _, _, end_dt = resolve_duty(employee, current, duty_date, fallback_shift=record['attendance_shift'])
     # Overtime is manual-only from v9.24: a late check-out keeps the real
     # timestamp but never generates automatic overtime.
     early=max(0,int((end_dt-current).total_seconds()//60))
@@ -466,11 +518,7 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
 
         if action == "check_in":
             work_date = submitted.date().isoformat()
-            attendance_shift = resolve_attendance_shift(item, submitted)
-            start_dt, _ = duty_window(
-                item, submitted.date(), db=c,
-                shift_override=_employee_shift_for_attendance(attendance_shift),
-            )
+            attendance_shift, start_dt, _ = resolve_duty(item, submitted, submitted.date(), db=c)
             late = apply_late_grace(int((submitted - start_dt).total_seconds() // 60))
             attendance = c.execute(
                 "SELECT * FROM attendance WHERE employee_id=? AND work_date=?",
@@ -502,9 +550,9 @@ def approve_pending_attendance(fingerprint_id: int, actor: str) -> dict | None:
                     attendance = previous_record; duty_date = yesterday
             if not attendance:
                 raise ValueError("Check-out approve করার আগে employee-এর Check-in approve করুন।")
-            _, end_dt = duty_window(
-                item, duty_date, db=c,
-                shift_override=_employee_shift_for_attendance(attendance["attendance_shift"]),
+            _, _, end_dt = resolve_duty(
+                item, submitted, duty_date, db=c,
+                fallback_shift=attendance["attendance_shift"],
             )
             checked_in = _submitted_at_local(attendance["check_in"])
             worked = max(0, int((submitted - checked_in).total_seconds() // 60))
