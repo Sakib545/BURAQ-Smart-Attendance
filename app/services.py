@@ -138,7 +138,9 @@ def has_face(employee_id):
 
 def menu(name=None):
     greeting = f"স্বাগতম {name}" if name else "BURAQ Smart Attendance"
-    return f"👋 {greeting}\n\n1️⃣ Register\n2️⃣ Check In\n3️⃣ Check Out\n4️⃣ My Attendance\n5️⃣ Help"
+    return (f"👋 {greeting}\n\n1️⃣ Register\n2️⃣ Check In\n3️⃣ Check Out\n"
+            f"4️⃣ My Attendance\n5️⃣ My Duty\n6️⃣ ছুটির আবেদন\n7️⃣ My Leave\n\n"
+            f"Help দেখতে লিখুন: Help")
 
 
 def registration_preview(employee):
@@ -776,13 +778,19 @@ def process(phone, text):
             if not has_face(existing["id"]): set_state(phone,"awaiting_face_registration"); return "✅ Registration approved। এখন Face Registration-এর জন্য একটি selfie পাঠান।"
             return "✅ এই WhatsApp নম্বর ইতিমধ্যে registered।"
         set_state(phone,"awaiting_staff_id"); return "আপনার Staff ID পাঠান। উদাহরণ: B520202"
-    if command in {"help","5"}: return menu()
+    if command in {"help","menu"}: return menu()
     if command in {"check in","checkin","check_in","in","2"}: return begin_attendance_action(phone,"checkin")
     if command in {"check out","checkout","check_out","out","3"}: return begin_attendance_action(phone,"checkout")
     employee=employee_by_phone(phone)
     if not employee: return "❌ আগে Register করুন। শুধু লিখুন: Register"
     if command in {"my attendance","my_attendance","attendance","report","4"}: return report(employee)
     if command in {"my duty","my_duty","duty","5"}: return duty_report(employee)
+    if command in {"leave","ছুটি","apply leave","leave request","6"}:
+        from app.leave_flow import handle_leave_message
+        return handle_leave_message(phone, "leave") or menu()
+    if command in {"my leave","my_leave","leave status","আমার ছুটি","7"}:
+        from app.leave_flow import handle_leave_message
+        return handle_leave_message(phone, "my leave") or menu()
     return "বুঝতে পারিনি। Menu দেখতে লিখুন: Menu"
 
 
