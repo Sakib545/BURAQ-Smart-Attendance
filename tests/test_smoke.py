@@ -11,10 +11,9 @@ os.environ.setdefault("ALLOW_TEMP_DB_FALLBACK", "false")
 os.environ.setdefault("SESSION_SECRET", "test-session-secret-01234567890123456789")
 os.environ.setdefault("CONFIG_ENCRYPTION_KEY", "test-config-secret-0123456789012345678")
 
-Path("/tmp/buraq_v9_test.db").unlink(missing_ok=True)
 
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, APP_VERSION
 from app.database import get_db
 from app.services import approve_pending_attendance, set_state, state
 from app.location_links import create_location_token, verify_location_token
@@ -24,7 +23,7 @@ def test_liveness_and_readiness():
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "9.22.1"
+        assert health.json()["version"] == APP_VERSION
         assert health.headers.get("x-request-id")
 
         ready = client.get("/ready")

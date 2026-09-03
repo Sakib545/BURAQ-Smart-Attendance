@@ -35,7 +35,10 @@ from app.payroll import PayrollInput, adjustment_reason_required, calculate_payr
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 from app.services import approve_pending_attendance, phones_match, receive_location, state
 from app.leave_flow import decision_message
-from app.performance import NOTICE_TYPES, build_message, month_label, monthly_ranking, record_notice
+from app.payroll_ops import (UNDO_WINDOW_HOURS, bulk_finalize, finalize_preview,
+                             last_undoable_batch, record_history, undo_batch)
+from app.performance import (MIN_SCHEDULED_DAYS, NOTICE_TYPES, build_message, month_label,
+                            monthly_ranking, record_notice)
 from app.shift_rules import (
     CUTOFF_KEY, FIRST_END_KEY, FIRST_START_KEY, GRACE_KEY,
     SECOND_END_KEY, SECOND_START_KEY, get_shift_rules, save_shift_rules, shift_window,
@@ -43,7 +46,7 @@ from app.shift_rules import (
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
-APP_VERSION = "9.26.1"
+APP_VERSION = "9.27.0"
 
 app = FastAPI(title=settings.app_name, version=APP_VERSION, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_urlsafe(32)), https_only=settings.environment == "production", same_site="lax")
@@ -855,6 +858,7 @@ def attendance_center(request: Request):
     cards=[]
     if has_permission(request,"reports_view"): cards.append(("📊","Attendance Reports","Daily records, late, overtime and employee attendance history.","/reports"))
     if has_permission(request,"duty_view"): cards.append(("🗓","Duty Schedule","Regular, custom, Friday and night duty with reminder status.","/duty-schedules"))
+    if has_permission(request,"performance_view"): cards.append(("🥇","Leaderboard","মাসিক উপস্থিতির র‍্যাঙ্কিং ও স্বীকৃতি।","/leaderboard"))
     if has_permission(request,"performance_view"): cards.append(("🏆","Monthly Performance","Duty score, ranking ও WhatsApp recognition notice.","/performance-awards"))
     if has_permission(request,"attendance_edit"): cards.append(("✅","Missing Duty Days","Scheduled duty with no attendance at all. Record a past day directly.","/attendance/missing"))
     if has_permission(request,"leave_view"): cards.append(("🏖","Leave & Corrections","Leave approval, attendance correction, shifts and departments.","/hr-operations"))
@@ -1356,6 +1360,76 @@ def add_performance_review(request: Request, employee_id: int, review_period: st
         audit(request,'performance_review_created','employee',str(employee_id),f'{review_period}: {overall}/5',db=c)
     return RedirectResponse(f'/employees/{employee_id}#performance',303)
 
+@app.get("/leaderboard", response_class=HTMLResponse)
+def leaderboard_page(request: Request, month: str=""):
+    """Attendance leaderboard — recognition only, never salary figures.
+
+    Pay is nobody else's business, so this page deliberately shows score and
+    attendance columns and no money at all. Payroll lives at /payroll.
+    """
+    require_permission(request,"performance_view")
+    period=month or datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m")
+    if not re.fullmatch(r"\d{4}-\d{2}",period): raise HTTPException(400,"Invalid month")
+
+    rows=monthly_ranking(period)
+    eligible=[r for r in rows if r["eligible"]]
+    ineligible=[r for r in rows if not r["eligible"]]
+
+    departments=sorted({str(r["department"] or "").strip() for r in eligible if r["department"]})
+    chosen=(request.query_params.get("department") or "").strip()
+    if chosen: eligible=[r for r in eligible if str(r["department"] or "")==chosen]
+
+    medals={1:"🥇",2:"🥈",3:"🥉"}
+    def row_html(r, rank):
+        badge=medals.get(rank,f"<span class='sub'>#{rank}</span>")
+        worked=int(r["worked"]); expected=int(r["expected_days"])
+        return (f"<tr><td style='font-size:20px'>{badge}</td>"
+                f"<td><b>{escape(str(r['name']))}</b>"
+                f"<div class='sub'>{escape(str(r['staff_id']))}</div></td>"
+                f"<td>{escape(str(r['department'] or '—'))}</td>"
+                f"<td><b>{r['score']}</b><div class='sub'>"
+                f"A{r['attendance']} · P{r['punctuality']} · C{r['completeness']}</div></td>"
+                f"<td>{worked}/{expected}</td>"
+                f"<td>{r['late_minutes']}m</td>"
+                f"<td>{r['incomplete']}</td></tr>")
+
+    body_rows="".join(row_html(r,i+1) for i,r in enumerate(eligible))
+    if not body_rows: body_rows="<tr><td colspan='7'>No ranked employees for this month.</td></tr>"
+
+    top=eligible[:3]
+    podium="".join(
+        f"<div class='card' style='flex:1'><div style='font-size:34px'>{medals.get(i+1,'')}</div>"
+        f"<h3 style='margin:8px 0 2px'>{escape(str(r['name']))}</h3>"
+        f"<div class='sub'>{escape(str(r['staff_id']))} · {escape(str(r['department'] or '—'))}</div>"
+        f"<div style='font-size:38px;font-weight:800;margin-top:10px'>{r['score']}</div>"
+        f"<div class='sub'>out of 100</div></div>"
+        for i,r in enumerate(top)) if top else ""
+
+    dept_options="".join(
+        f"<option value='{escape(d)}'{' selected' if d==chosen else ''}>{escape(d)}</option>"
+        for d in departments)
+
+    note=(f"<div class='card'><p class='sub'>Score = attendance 50 + punctuality 35 + "
+          f"check-out completeness 15. Approved leave never reduces a score. "
+          f"Employees with fewer than {MIN_SCHEDULED_DAYS} scheduled duty days are not ranked"
+          f"{f' ({len(ineligible)} this month)' if ineligible else ''}.</p></div>")
+
+    body=(f"<div class='hero'><div><div class='eyebrow'>Recognition</div>"
+          f"<h2>Attendance Leaderboard</h2>"
+          f"<div class='sub'>{escape(month_label(period))} · {len(eligible)} ranked</div></div>"
+          f"<form method='get' style='display:flex;gap:8px'>"
+          f"<input type='month' name='month' value='{escape(period)}'>"
+          f"<select name='department'><option value=''>All departments</option>{dept_options}</select>"
+          f"<button class='btn secondary'>Show</button></form></div>"
+          f"<div class='section-gap'></div>"
+          + (f"<div style='display:flex;gap:16px'>{podium}</div><div class='section-gap'></div>" if podium else "")
+          + note + "<div class='section-gap'></div>"
+          f"<div class='card' style='overflow:auto'><table><thead><tr>"
+          f"<th>Rank</th><th>Employee</th><th>Department</th><th>Score</th>"
+          f"<th>Worked</th><th>Late</th><th>No checkout</th></tr></thead>"
+          f"<tbody>{body_rows}</tbody></table></div>")
+    return layout("Leaderboard",body,request,"leaderboard")
+
 @app.get("/performance", response_class=HTMLResponse)
 def performance_page(request: Request):
     require_permission(request,"performance_view")
@@ -1698,6 +1772,14 @@ def _salary_sheet_rows(month: str):
         else: calculated=_calculate_employee_payroll(row['employee_id'],month,fixed,rate,mode,manual_hours,float(row['bonus'] or 0),float(row['advance_amount'] or 0),float(row['fine_amount'] or 0),float(row['deduction'] or 0))
         calculated.setdefault('earned_basic_salary',max(fixed-float(calculated.get('absent_deduction') or 0)-float(calculated.get('unpaid_leave_deduction') or 0),0))
         calculated.setdefault('late_minutes',0); calculated.setdefault('late_deduction',0); calculated.setdefault('payable_duty_minutes',0)
+        # Snapshots are historical JSON: one written by an older release will be
+        # missing any key added since, and the salary sheet then dies with a
+        # KeyError on a row it cannot render. Default every key the table reads.
+        for _key in ('gross_salary','total_deduction','net_salary','overtime_amount',
+                     'absent_deduction','unpaid_leave_deduction','scheduled','worked',
+                     'paid_leave','unpaid_leave','absent','overtime_hours'):
+            calculated.setdefault(_key, 0)
+        calculated.setdefault('incomplete_dates', [])
         item.update(calculated)
         output.append(item)
     return output
@@ -1760,6 +1842,57 @@ def payroll_preview(request: Request, employee_id: int, month: str,
     result["employee_name"] = employee["name"]
     return result
 
+
+
+def _bulk_finalize_panel(month: str, month_label: str, can_manage: bool) -> str:
+    """One-click finalize with an honest readiness list, plus batch undo."""
+    if not can_manage:
+        return ""
+    preview = finalize_preview(month)
+    ready, blocked = preview["ready"], preview["blocked"]
+    batch = last_undoable_batch(month)
+
+    parts = []
+
+    if ready or blocked:
+        blocked_html = ""
+        if blocked:
+            items = "".join(
+                f"<li><b>{escape(str(b['staff_id']))}</b> — {escape(str(b['name']))}"
+                f"<div class='sub'>{escape('; '.join(b['reasons']))}</div></li>"
+                for b in blocked
+            )
+            blocked_html = (
+                f"<div class='hint'><b>{len(blocked)} cannot be finalized yet</b> "
+                f"— these stay as drafts:</div><ul class='pay-blocked'>{items}</ul>"
+            )
+        button = (
+            f"<button class='btn'>Finalize {len(ready)} payslip"
+            f"{'' if len(ready) == 1 else 's'}</button>"
+            if ready else "<div class='hint'>Nothing is ready to finalize.</div>"
+        )
+        parts.append(
+            f"<details class='pay-details'><summary class='btn'>Finalize all "
+            f"({len(ready)} ready{f', {len(blocked)} blocked' if blocked else ''})</summary>"
+            f"<form method='post' action='/payroll/bulk-finalize' class='pay-form'>"
+            f"<input type='hidden' name='month' value='{escape(month)}'>"
+            f"<div class='hint'>{len(ready)} draft payslip"
+            f"{'' if len(ready) == 1 else 's'} for {escape(month_label)} will be locked, "
+            f"totalling {preview['ready_total']:,.2f}. You can undo this for "
+            f"{UNDO_WINDOW_HOURS} hours.</div>"
+            f"{blocked_html}{button}</form></details>"
+        )
+
+    if batch and batch.get("undoable"):
+        parts.append(
+            f"<form method='post' action='/payroll/undo-finalize' class='pay-form'>"
+            f"<input type='hidden' name='month' value='{escape(month)}'>"
+            f"<input type='hidden' name='batch_id' value='{escape(str(batch['batch_id']))}'>"
+            f"<button class='btn secondary'>Undo last finalize "
+            f"({batch['count']})</button></form>"
+        )
+
+    return "".join(parts)
 
 @app.get("/payroll", response_class=HTMLResponse)
 def payroll_page(request: Request, month: str = "", saved: str = "", error: str = "",
@@ -1844,6 +1977,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
            f"<input type='hidden' name='month' value='{month}'>"
            f"<button class='btn'>Prepare the remaining {len(missing)}</button></form>"
            if can_manage and missing else "")
+        + (_bulk_finalize_panel(month, month_label, can_manage))
         + (f"<details class='pay-details'><summary class='btn secondary'>Discard {counts['draft']} draft"
            f"{'' if counts['draft'] == 1 else 's'}</summary>"
            f"<form method='post' action='/payroll/bulk-discard' class='pay-form'>"
@@ -2320,6 +2454,33 @@ def payroll_discard(request: Request, payroll_id: int, month: str=Form(...)):
         c.execute("DELETE FROM payroll_records WHERE id=?",(payroll_id,))
     audit(request,"discard","payroll",str(payroll_id),f"Discarded draft payslip for {row['salary_month']} (net {float(row['net_salary'] or 0):.2f}) by {actor}")
     return RedirectResponse(f"/payroll?month={month}&saved=discard",303)
+
+@app.post("/payroll/bulk-finalize")
+def payroll_bulk_finalize(request: Request, month: str=Form(...)):
+    require_permission(request,"payroll_manage")
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    result=bulk_finalize(month,_payroll_actor(request))
+    audit(request,"bulk_finalize","payroll",month,
+          f"Finalized {result['finalized']}, blocked {len(result['blocked'])}, batch {result['batch_id']}")
+    return RedirectResponse(
+        f"/payroll?month={month}&saved=finalized&made={result['finalized']}"
+        f"&blocked={len(result['blocked'])}",303)
+
+@app.post("/payroll/undo-finalize")
+def payroll_undo_finalize(request: Request, month: str=Form(...), batch_id: str=Form(...)):
+    require_permission(request,"payroll_manage")
+    if not re.fullmatch(r"\d{4}-\d{2}",month): raise HTTPException(400,"Invalid salary month")
+    batch=last_undoable_batch(month)
+    # Re-check server-side: the button may have been rendered before someone
+    # else paid one of these payslips.
+    if not batch or batch["batch_id"]!=batch_id.strip():
+        raise HTTPException(409,"This batch is no longer the most recent one")
+    if not batch.get("undoable"): raise HTTPException(409,batch.get("why") or "Batch cannot be undone")
+    result=undo_batch(batch_id.strip(),_payroll_actor(request))
+    if result.get("error"): raise HTTPException(404,result["error"])
+    audit(request,"undo_finalize","payroll",month,
+          f"Restored {result['restored']}, skipped {len(result['skipped'])}, batch {batch_id}")
+    return RedirectResponse(f"/payroll?month={month}&saved=undone&made={result['restored']}",303)
 
 @app.post("/payroll/bulk-discard")
 def payroll_bulk_discard(request: Request, month: str=Form(...), confirm: str=Form("")):

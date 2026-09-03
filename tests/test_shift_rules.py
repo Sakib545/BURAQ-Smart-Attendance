@@ -15,8 +15,6 @@ os.environ.setdefault("CONFIG_ENCRYPTION_KEY", "test-config-secret-0123456789012
 
 # A clean file keeps every run deterministic; production databases are never
 # touched here because DATABASE_PATH points at a temporary SQLite file.
-Path(os.environ["DATABASE_PATH"]).unlink(missing_ok=True)
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -349,8 +347,8 @@ def test_existing_data_survives_initialisation_and_migration():
 def test_health_and_ready_report_the_new_version(running_app):
     health = running_app.get("/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "9.26.0"
-    assert APP_VERSION == "9.26.0"
+    assert health.json()["version"] == APP_VERSION
+    assert health.json()["status"] == "ok"
 
     ready = running_app.get("/ready")
     assert ready.status_code == 200

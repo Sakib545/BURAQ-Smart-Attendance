@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+*.sqlite3
+data/
+exports/
+.env
+.venv/
+venv/
+.DS_Store
+# Build archives belong in Releases, not in the tree.
+*.zip
