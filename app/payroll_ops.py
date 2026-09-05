@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from app.database import get_db
+from app.special_duties import snapshot_blockers, lock_employee
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,29 @@ def _now() -> datetime:
 
 # ---------------------------------------------------------------- readiness
 
-def finalize_blockers(record) -> list[str]:
+def _month_is_over(month: str) -> bool:
+    """Has `month` (YYYY-MM) finished in the configured local timezone?
+
+    Finalizing before the month ends locks a payslip whose remaining scheduled
+    days all still count as absent, so the employee is short-paid for days they
+    have not yet had the chance to work.
+    """
+    try:
+        first = datetime.strptime(f"{month}-01", "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return True  # an unparseable month is not this check's problem
+    last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    try:
+        from zoneinfo import ZoneInfo
+
+        from app.config import settings
+        today = datetime.now(ZoneInfo(settings.timezone)).date()
+    except Exception:
+        today = _now().date()
+    return today > last
+
+
+def finalize_blockers(record, connection=None) -> list[str]:
     """Why this draft cannot be finalized yet. Empty list means it can.
 
     Mirrors the per-record checks in the single-finalize route exactly, so the
@@ -59,6 +82,13 @@ def finalize_blockers(record) -> list[str]:
         snapshot = json.loads(record["calculation_snapshot"] or "{}")
     except (TypeError, ValueError):
         reasons.append("Calculation data is unreadable — re-prepare this payroll")
+
+    try:
+        month = str(record["salary_month"] or "")
+    except (KeyError, IndexError, TypeError):
+        month = ""
+    if month and not _month_is_over(month):
+        reasons.append("This month is not over yet — recalculate after month end before locking salary")
 
     if float(record["fixed_salary"] or 0) <= 0:
         reasons.append("Basic Salary is not set")
@@ -72,6 +102,8 @@ def finalize_blockers(record) -> list[str]:
         reasons.append(
             f"{count} day{'s' if count != 1 else ''} without Check Out — review first"
         )
+    reasons.extend(snapshot.get("special_duty_errors") or [])
+    reasons.extend(snapshot_blockers(record, snapshot, connection))
     return reasons
 
 
@@ -144,7 +176,9 @@ def bulk_finalize(month: str, actor: str) -> dict:
             # finalized or discarded this record while HR read the preview.
             if not row or str(row["payment_status"]) != "draft":
                 continue
-            if finalize_blockers(row):
+            lock_employee(c,row["employee_id"])
+            row=c.execute("SELECT * FROM payroll_records WHERE id=?",(entry["id"],)).fetchone()
+            if str(row["payment_status"]) != "draft" or finalize_blockers(row, connection=c):
                 continue
 
             # Snapshot BEFORE the update — this is what undo restores.

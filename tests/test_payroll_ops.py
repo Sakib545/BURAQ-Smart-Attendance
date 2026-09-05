@@ -351,3 +351,36 @@ def test_return_paid_rolls_back_if_history_cannot_be_written(monkeypatch):
     with get_db() as db:
         assert not db.execute('SELECT id FROM payroll_change_logs WHERE payroll_id=?',
                               (before['id'],)).fetchall()
+
+
+def test_unfinished_month_blocks_finalize():
+    # Finalizing before the month ends locks a payslip in which every remaining
+    # scheduled day still counts as absent, short-paying the employee for days
+    # they have not had the chance to work yet.
+    from datetime import date
+
+    today = date.today()
+    current = f"{today.year:04d}-{today.month:02d}"
+    reasons = payroll_ops.finalize_blockers(
+        {"salary_month": current, "fixed_salary": 15000.0,
+         "calculation_snapshot": _good_snapshot()}
+    )
+    assert any("not over yet" in r for r in reasons)
+
+
+def test_finished_month_has_no_month_blocker():
+    reasons = payroll_ops.finalize_blockers(
+        {"salary_month": "2020-01", "fixed_salary": 15000.0,
+         "calculation_snapshot": _good_snapshot()}
+    )
+    assert reasons == []
+
+
+def test_unparseable_month_does_not_block():
+    # A malformed month is some other check's problem; it must not silently
+    # wedge finalize behind a confusing calendar message.
+    reasons = payroll_ops.finalize_blockers(
+        {"salary_month": "not-a-month", "fixed_salary": 15000.0,
+         "calculation_snapshot": _good_snapshot()}
+    )
+    assert not any("not over yet" in r for r in reasons)

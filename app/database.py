@@ -596,7 +596,16 @@ def apply_feature_migrations() -> None:
         ("fine_amount", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("gross_salary", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("total_deduction", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
-        ("overtime_mode", "TEXT NOT NULL DEFAULT 'auto'"),
+        # Earning components the salary sheet has always carried by hand. Each
+        # is a plain amount entered by HR and added to gross pay; none of them
+        # is derived from attendance.
+        ("night_allowance", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("friday_allowance", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("eid_duty_allowance", "REAL NOT NULL DEFAULT 0" if _active_url.startswith("sqlite") else "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        # Every write path stores 'manual' — overtime is never derived
+        # automatically. A default of 'auto' left legacy rows whose overtime
+        # hours were then silently read as zero. See scripts/migrate_overtime_mode.py
+        ("overtime_mode", "TEXT NOT NULL DEFAULT 'manual'"),
         ("adjustment_reason", "TEXT"),
         ("payment_method", "TEXT"),
         ("payment_reference", "TEXT"),
@@ -616,6 +625,22 @@ def apply_feature_migrations() -> None:
         conn.execute(text("UPDATE payroll_records SET payment_status='draft' WHERE payment_status='unpaid'"))
     mark_migration("v9.11-duty-based-salary")
     mark_migration("v9.12-payroll-pro")
+    sqlite = _active_url.startswith("sqlite")
+    pk = "INTEGER PRIMARY KEY AUTOINCREMENT" if sqlite else "BIGSERIAL PRIMARY KEY"
+    fk = "INTEGER" if sqlite else "BIGINT"
+    stamp = "TEXT" if sqlite else "TIMESTAMPTZ"
+    with engine.begin() as conn:
+        conn.execute(text(f"""CREATE TABLE IF NOT EXISTS special_duties(
+            id {pk}, employee_id {fk} NOT NULL REFERENCES employees(id),
+            duty_date TEXT NOT NULL, duty_type TEXT NOT NULL CHECK(duty_type IN ('night','friday','eid','other')),
+            start_time TEXT NOT NULL, end_time TEXT NOT NULL,
+            payment_amount NUMERIC(14,2) NOT NULL CHECK(payment_amount>0),
+            note TEXT NOT NULL, created_by TEXT NOT NULL,
+            created_at {stamp} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            cancelled_at {stamp}, cancelled_by TEXT, cancel_reason TEXT
+        )"""))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_special_duty_active ON special_duties(employee_id,duty_date,duty_type) WHERE cancelled_at IS NULL"))
+    mark_migration("payroll-special-duties-v1")
     apply_face_ai_migrations()
 
 
