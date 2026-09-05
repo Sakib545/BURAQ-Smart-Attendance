@@ -250,3 +250,104 @@ def test_salary_sheet_survives_a_snapshot_written_by_an_older_release():
     # Every key the salary sheet reads must be present, defaulted if absent.
     for key in ("total_deduction", "gross_salary", "overtime_amount", "late_minutes"):
         assert key in row, f"{key} missing — the page would raise KeyError"
+
+# --- Admin-only return from Paid to Finalized ---------------------------------
+
+def _session_client(role=None):
+    from base64 import b64encode
+    from itsdangerous import TimestampSigner
+    client = TestClient(app)
+    if role:
+        session = {'role': role, 'user_name': 'Payroll test admin'}
+        session.update({'admin': True} if role == 'super_admin' else {'hr_id': 987654})
+        token = TimestampSigner(os.environ['SESSION_SECRET']).sign(
+            b64encode(json.dumps(session).encode())).decode()
+        client.cookies.set('session', token)
+    return client
+
+
+def _paid_record():
+    with get_db() as db:
+        row = db.execute("SELECT p.id FROM payroll_records p JOIN employees e ON e.id=p.employee_id "
+                         "WHERE e.staff_id=?", (STAFF[0],)).fetchone()
+        pid = row['id']
+        db.execute("UPDATE payroll_records SET payment_status='paid',payment_method='Bank',"
+                   "payment_reference='OLD-123',paid_at=CURRENT_TIMESTAMP,"
+                   "finalized_at=CURRENT_TIMESTAMP,locked_at=CURRENT_TIMESTAMP,locked_by='original' "
+                   "WHERE id=?", (pid,))
+        return dict(db.execute('SELECT * FROM payroll_records WHERE id=?', (pid,)).fetchone())
+
+
+@pytest.mark.parametrize('role', ['admin', 'super_admin'])
+def test_admin_can_return_paid_preserving_payment_and_salary(role):
+    before = _paid_record()
+    client = _session_client(role)
+    response = client.post(f"/payroll/{before['id']}/return-to-finalized",
+                           data={'month': 'wrong', 'reason': 'Correct mistaken payment'},
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert f'month={MONTH}' in response.headers['location']
+    with get_db() as db:
+        after = dict(db.execute('SELECT * FROM payroll_records WHERE id=?', (before['id'],)).fetchone())
+        logs = db.execute('SELECT * FROM payroll_change_logs WHERE payroll_id=? ORDER BY id',
+                          (before['id'],)).fetchall()
+    assert after['payment_status'] == 'finalized'
+    assert after['paid_at'] is None and after['payment_reference'] is None
+    assert after['payment_method'] is None
+    for key in ['net_salary', 'calculation_snapshot', 'fixed_salary', 'locked_at', 'finalized_at']:
+        assert after[key] == before[key]
+    assert json.loads(logs[-2]['snapshot']) == before
+    assert logs[-2]['actor'] == 'Payroll test admin'
+    assert json.loads(logs[-1]['snapshot'])['payment_status'] == 'finalized'
+    page = client.get(response.headers['location'])
+    assert page.status_code == 200
+    assert 'Previous payment details are preserved' in page.text
+    assert 'OLD-123' in page.text
+    # A repeated submission must not create another reversal.
+    repeat = client.post(f"/payroll/{before['id']}/return-to-finalized",
+                         data={'month': MONTH, 'reason': 'Correct mistaken payment'})
+    assert repeat.status_code == 409
+    # The original payment workflow still accepts a fresh method and reference.
+    paid = client.post(f"/payroll/{before['id']}/status",
+                       data={'month': MONTH, 'status': 'paid', 'payment_method': 'Cash',
+                             'payment_reference': 'NEW-456'}, follow_redirects=False)
+    assert paid.status_code == 303
+    assert _status(STAFF[0]) == 'paid'
+
+
+@pytest.mark.parametrize('role,expected', [(None, 401), ('hr_manager', 403),
+                                          ('hr_executive', 403), ('viewer', 403)])
+def test_non_admin_cannot_return_paid_even_with_payroll_permissions(role, expected):
+    before = _paid_record()
+    client = _session_client(role)
+    response = client.post(f"/payroll/{before['id']}/return-to-finalized",
+                           data={'month': MONTH, 'reason': 'Correct mistaken payment'})
+    assert response.status_code == expected
+    assert _status(STAFF[0]) == 'paid'
+    if role == 'hr_manager':
+        assert 'Return to Finalized' not in client.get(f'/payroll?month={MONTH}').text
+
+
+@pytest.mark.parametrize('reason', ['', '   ', 'oops', 'x' * 1001])
+def test_return_paid_requires_valid_reason(reason):
+    before = _paid_record()
+    response = _session_client('admin').post(f"/payroll/{before['id']}/return-to-finalized",
+                                            data={'month': MONTH, 'reason': reason})
+    assert response.status_code in (400, 422)
+    assert _status(STAFF[0]) == 'paid'
+
+
+def test_return_paid_rolls_back_if_history_cannot_be_written(monkeypatch):
+    from app import main as main_module
+    before = _paid_record()
+    def fail_history(*args, **kwargs):
+        raise RuntimeError('simulated log failure')
+    monkeypatch.setattr(main_module, '_log_payroll_change', fail_history)
+    response = _session_client('super_admin').post(
+        f"/payroll/{before['id']}/return-to-finalized",
+        data={'month': MONTH, 'reason': 'Correct mistaken payment'})
+    assert response.status_code == 500
+    assert _status(STAFF[0]) == 'paid'
+    with get_db() as db:
+        assert not db.execute('SELECT id FROM payroll_change_logs WHERE payroll_id=?',
+                              (before['id'],)).fetchall()

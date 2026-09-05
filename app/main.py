@@ -1907,6 +1907,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
     can_manage = has_permission(request, "payroll_manage")
     can_export = has_permission(request, "payroll_export")
     is_super = request.session.get("role") == "super_admin"
+    can_return_paid = can_manage and (is_super or request.session.get("role") == "admin")
 
     # Every active employee, including those with no payslip yet. The old
     # page dropped them with `if row['payroll_id']`, so the one question a
@@ -1941,6 +1942,10 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
                    f"{'' if made == 1 else 's'}. Finalized and paid payslips were "
                    f"left untouched.</div>" if made else
                    "<div class='notice notice-ok'>Draft payslip discarded.</div>")
+    elif saved == "returned_to_finalized":
+        notices = ("<div class='notice notice-ok'>Payment status returned to Finalized. "
+                   "Previous payment details are preserved in history. This does not reverse "
+                   "an actual transfer. The payslip remains locked.</div>")
     elif saved == "bulk":
         notices = f"<div class='notice notice-ok'>Prepared {made} payslip{'' if made == 1 else 's'}."
         if skipped:
@@ -2140,6 +2145,15 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
                     f"<label>Reference number</label>"
                     f"<input name='payment_reference' placeholder='Transaction or voucher no.' required>"
                     f"<button class='btn small'>Confirm payment</button></form></details>")
+            if can_return_paid and stage == "paid":
+                bits.append(
+                    f"<details class='pay-details'><summary class='btn small secondary'>Return to Finalized</summary>"
+                    f"<form method='post' action='/payroll/{r['id']}/return-to-finalized' class='pay-form'>"
+                    f"<input type='hidden' name='month' value='{month}'>"
+                    f"<label>Reason for correcting payment status</label>"
+                    f"<input name='reason' minlength='5' maxlength='1000' required>"
+                    f"<div class='hint'>Previous payment details stay in history. This does not reverse a transfer.</div>"
+                    f"<button class='btn small secondary'>Confirm return to Finalized</button></form></details>")
             if is_super and stage == "finalized":
                 bits.append(
                     f"<details class='pay-details'><summary class='btn small secondary'>Reopen</summary>"
@@ -2151,6 +2165,14 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
             if can_export:
                 bits.append(f"<a class='btn small secondary' "
                             f"href='/payroll/{r['id']}/payslip.pdf'>Payslip</a>")
+            changes = record_history(r['id'])
+            if changes:
+                entries = ''.join(
+                    f"<li><b>{escape(h['label'])}</b> · {escape(str(h['actor']))} · "
+                    f"{escape(str(h['at']))}<div>{escape(h['reason'])}</div>"
+                    f"<div>{escape(h['payment_details'])}</div></li>"
+                    for h in changes)
+                bits.append(f"<details class='pay-details'><summary>History</summary><ul>{entries}</ul></details>")
             actions = "".join(bits) or "<span class='sub'>—</span>"
 
         table.append(
@@ -2399,6 +2421,43 @@ def payroll_status(request: Request, background_tasks: BackgroundTasks, payroll_
         background_tasks.add_task(send_document_bytes,delivery['whatsapp_phone'] or delivery['phone'],pdf_bytes,filename,f"Salary payslip - {delivery['salary_month']}")
     if return_employee_id: return RedirectResponse(f"/employees/{return_employee_id}?month={month}#payroll",303)
     return RedirectResponse(f"/payroll?month={month}",303)
+
+@app.post("/payroll/{payroll_id}/return-to-finalized")
+def payroll_return_to_finalized(request: Request, payroll_id: int,
+                                month: str=Form(...), reason: str=Form(...)):
+    require_permission(request, "payroll_manage")
+    if request.session.get("role") not in {"admin", "super_admin"}:
+        raise HTTPException(403, "Admin access required")
+    reason = reason.strip()
+    if not 5 <= len(reason) <= 1000:
+        raise HTTPException(400, "A reason of 5 to 1000 characters is required")
+    actor = _payroll_actor(request)
+    with get_db() as c:
+        row = c.execute("SELECT * FROM payroll_records WHERE id=?", (payroll_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Payroll not found")
+        if row['payment_status'] != 'paid':
+            raise HTTPException(409, "Only paid payroll can be returned to Finalized")
+        # Compare-and-set prevents repeated submissions from recording duplicate reversals.
+        changed = c.execute(
+            "UPDATE payroll_records SET payment_status='finalized',paid_at=NULL,"
+            "payment_method=NULL,payment_reference=NULL,updated_by=?,"
+            "locked_at=COALESCE(locked_at,CURRENT_TIMESTAMP),"
+            "locked_by=COALESCE(locked_by,?),"
+            "finalized_at=COALESCE(finalized_at,CURRENT_TIMESTAMP),"
+            "updated_at=CURRENT_TIMESTAMP WHERE id=? AND payment_status='paid'",
+            (actor, actor, payroll_id))
+        if changed.result.rowcount != 1:
+            raise HTTPException(409, "Payroll status changed; refresh and try again")
+        # Store the complete pre-change record in the same transaction as the update.
+        c.execute(
+            "INSERT INTO payroll_change_logs(payroll_id,action,actor,reason,snapshot) VALUES(?,?,?,?,?)",
+            (payroll_id, 'payment_returned', actor, reason, json.dumps(dict(row), default=str)))
+        _log_payroll_change(c, payroll_id, 'returned_to_finalized', actor, reason)
+        salary_month = row['salary_month']
+    audit(request, "return_to_finalized", "payroll", str(payroll_id), reason)
+    return RedirectResponse(f"/payroll?month={salary_month}&saved=returned_to_finalized", 303)
+
 
 @app.post("/payroll/{payroll_id}/reopen")
 def payroll_reopen(request: Request, payroll_id: int, month: str=Form(...), reason: str=Form(...)):
