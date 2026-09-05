@@ -1712,7 +1712,7 @@ def _payroll_duty_metrics(employee_id: int, month: str):
     if today<first: effective_last=first-timedelta(days=1)
     with get_db() as c:
         weekly=c.execute("SELECT * FROM duty_schedules WHERE employee_id=? AND is_active",(employee_id,)).fetchall()
-        custom=c.execute("SELECT * FROM custom_duties WHERE employee_id=? AND duty_date>=? AND duty_date<=? AND is_active",(employee_id,first.isoformat(),effective_last.isoformat())).fetchall() if effective_last>=first else []
+        custom=c.execute("SELECT * FROM custom_duties WHERE employee_id=? AND duty_date>=? AND duty_date<=? AND is_active",(employee_id,first.isoformat(),last.isoformat())).fetchall()
         attendance=c.execute("SELECT work_date,check_in,check_out,status,late_minutes FROM attendance WHERE employee_id=? AND work_date>=? AND work_date<=?",(employee_id,first.isoformat(),effective_last.isoformat())).fetchall() if effective_last>=first else []
         leaves=c.execute("SELECT leave_type,start_date,end_date FROM leave_requests WHERE employee_id=? AND status='approved' AND start_date<=? AND end_date>=?",(employee_id,effective_last.isoformat(),first.isoformat())).fetchall() if effective_last>=first else []
     weekly_by_day={int(r['weekday']):r for r in weekly}
@@ -1723,6 +1723,16 @@ def _payroll_duty_metrics(employee_id: int, month: str):
         if duty:
             duration=_duty_duration_minutes(duty['start_time'],duty['end_time'])
             scheduled[day.isoformat()]=max(duration-int(duty['break_minutes'] or 0),1)
+        day+=timedelta(days=1)
+    # Full-month scheduled duty (first..last, not truncated to today). Used only
+    # as the per-day-rate divisor so a mid-month payroll spreads the fixed salary
+    # over the whole month rather than just the days elapsed so far.
+    full_scheduled={}; day=first
+    while day<=last:
+        duty=custom_by_date.get(day.isoformat()) or weekly_by_day.get(day.weekday())
+        if duty:
+            duration=_duty_duration_minutes(duty['start_time'],duty['end_time'])
+            full_scheduled[day.isoformat()]=max(duration-int(duty['break_minutes'] or 0),1)
         day+=timedelta(days=1)
     attendance_by_date={r['work_date']:r for r in attendance if r['work_date'] in scheduled}; worked_units=0.0; incomplete=[]; late_minutes=0; late_fraction_units=0.0
     for work_date,row in attendance_by_date.items():
@@ -1745,13 +1755,14 @@ def _payroll_duty_metrics(employee_id: int, month: str):
                 target.add(day.isoformat())
             day+=timedelta(days=1)
     scheduled_units=float(len(scheduled)); paid_units=float(len(paid_leave_dates)); unpaid_units=float(len(unpaid_leave_dates)); absent_units=max(scheduled_units-worked_units-paid_units-unpaid_units,0)
-    return {"scheduled":scheduled_units,"worked":worked_units,"paid_leave":paid_units,"unpaid_leave":unpaid_units,"absent":absent_units,"late_minutes":late_minutes,"late_fraction_units":late_fraction_units,"payable_duty_minutes":sum(scheduled.values()),"incomplete_dates":incomplete}
+    return {"scheduled":scheduled_units,"full_scheduled":float(len(full_scheduled)),"worked":worked_units,"paid_leave":paid_units,"unpaid_leave":unpaid_units,"absent":absent_units,"late_minutes":late_minutes,"late_fraction_units":late_fraction_units,"payable_duty_minutes":sum(scheduled.values()),"full_payable_duty_minutes":sum(full_scheduled.values()),"incomplete_dates":incomplete}
 
 def _calculate_employee_payroll(employee_id: int, month: str, fixed_salary: float, overtime_rate: float, overtime_mode: str="manual", manual_overtime_hours: float=0, bonus: float=0, advance: float=0, fine: float=0, deduction: float=0):
     duty=_payroll_duty_metrics(employee_id,month)
-    per_day=(float(fixed_salary or 0)/duty['scheduled']) if duty['scheduled'] else 0
+    divisor=duty.get('full_scheduled') or duty['scheduled']
+    per_day=(float(fixed_salary or 0)/divisor) if divisor else 0
     late_deduction=per_day*duty['late_fraction_units']
-    result=calculate_payroll(PayrollInput(fixed_salary=fixed_salary,scheduled_units=duty['scheduled'],worked_units=duty['worked'],paid_leave_units=duty['paid_leave'],unpaid_leave_units=duty['unpaid_leave'],late_minutes=duty['late_minutes'],late_deduction=late_deduction,payable_duty_minutes=duty['payable_duty_minutes'],overtime_hours=manual_overtime_hours,overtime_rate=overtime_rate,bonus=bonus,advance=advance,fine=fine,other_deduction=deduction))
+    result=calculate_payroll(PayrollInput(fixed_salary=fixed_salary,scheduled_units=duty['scheduled'],full_scheduled_units=duty.get('full_scheduled',0),worked_units=duty['worked'],paid_leave_units=duty['paid_leave'],unpaid_leave_units=duty['unpaid_leave'],late_minutes=duty['late_minutes'],late_deduction=late_deduction,payable_duty_minutes=duty['payable_duty_minutes'],overtime_hours=manual_overtime_hours,overtime_rate=overtime_rate,bonus=bonus,advance=advance,fine=fine,other_deduction=deduction))
     result['incomplete_dates']=duty['incomplete_dates']; result['overtime_mode']='manual'
     return result
 
