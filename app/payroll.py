@@ -15,11 +15,9 @@ def money(value) -> Decimal:
 class PayrollInput:
     fixed_salary: float = 0
     scheduled_units: float = 0
-    # Total scheduled duty for the WHOLE month, used only as the divisor for the
-    # daily rate. Kept separate from `scheduled_units` (which is truncated to
-    # today) so a payroll prepared mid-month divides the fixed salary over the
-    # full month, not just the days elapsed. Defaults to `scheduled_units` when 0.
-    full_scheduled_units: float = 0
+    # Whole month's regular roster, before the elapsed-date/join-date filter.
+    # Special duty is a separate earning and never changes this divisor.
+    salary_divisor_units: float = 0
     worked_units: float = 0
     paid_leave_units: float = 0
     unpaid_leave_units: float = 0
@@ -28,15 +26,20 @@ class PayrollInput:
     payable_duty_minutes: float = 0
     overtime_hours: float = 0
     overtime_rate: float = 0
+    # Supplied by the dated Special Duty ledger, never normal shift labels.
+    night_allowance: float = 0
+    friday_allowance: float = 0
+    eid_duty_allowance: float = 0
     bonus: float = 0
     advance: float = 0
     fine: float = 0
     other_deduction: float = 0
+    other_special_allowance: float = 0
 
 
 def calculate_payroll(data: PayrollInput) -> dict:
     values = asdict(data)
-    if any(Decimal(str(value or 0)) < 0 for value in values.values()):
+    if any(not Decimal(str(value or 0)).is_finite() or Decimal(str(value or 0)) < 0 for value in values.values()):
         raise ValueError("Payroll values cannot be negative")
     scheduled = Decimal(str(data.scheduled_units or 0))
     worked = min(Decimal(str(data.worked_units or 0)), scheduled)
@@ -44,11 +47,12 @@ def calculate_payroll(data: PayrollInput) -> dict:
     unpaid = min(Decimal(str(data.unpaid_leave_units or 0)), max(scheduled - worked - paid, Decimal("0")))
     absent = max(scheduled - worked - paid - unpaid, Decimal("0"))
     fixed = money(data.fixed_salary)
-    # Divide the fixed salary over the full month's duty, not just the days
-    # elapsed so far — otherwise a payroll prepared on the 10th of a 30-day
-    # month pays a full month's salary for 10 days of work. Falls back to the
-    # (possibly truncated) scheduled count when no full-month figure is given.
-    divisor = Decimal(str(data.full_scheduled_units or 0)) or scheduled
+    # Divide the fixed salary over the employee's standard duty month, not over
+    # the days assigned or elapsed — otherwise someone given only 7 duty days
+    # earns a full month's salary for working those 7, and a payroll prepared on
+    # the 10th pays a full month for 10 days. Falls back to the scheduled count
+    # when no divisor is supplied.
+    divisor = Decimal(str(data.salary_divisor_units or 0)) or scheduled
     per_day = (fixed / divisor).quantize(TWOPLACES, rounding=ROUND_HALF_UP) if divisor else Decimal("0.00")
     # A fixed salary is payable against assigned/completed duty. With no duty
     # at all, the employee does not receive the full fixed salary by accident.
@@ -63,8 +67,11 @@ def calculate_payroll(data: PayrollInput) -> dict:
     earned_basic = min(earned_basic, fixed)
     late_deduction = money(data.late_deduction)
     overtime_amount = money(Decimal(str(data.overtime_hours or 0)) * Decimal(str(data.overtime_rate or 0)))
+    night = money(data.night_allowance); friday = money(data.friday_allowance); eid = money(data.eid_duty_allowance)
+    other_special = money(data.other_special_allowance)
+    allowances = money(night + friday + eid + other_special)
     bonus = money(data.bonus); advance = money(data.advance); fine = money(data.fine); other = money(data.other_deduction)
-    gross = money(earned_basic + overtime_amount + bonus)
+    gross = money(earned_basic + allowances + overtime_amount + bonus)
     total_deduction = money(late_deduction + advance + fine + other)
     net = money(gross - total_deduction)
     return {
@@ -76,6 +83,9 @@ def calculate_payroll(data: PayrollInput) -> dict:
         "payable_duty_minutes": float(data.payable_duty_minutes or 0),
         "overtime_hours": float(data.overtime_hours or 0),
         "overtime_rate": float(data.overtime_rate or 0), "overtime_amount": float(overtime_amount),
+        "night_allowance": float(night), "friday_allowance": float(friday),
+        "other_special_allowance": float(other_special), "salary_divisor": float(divisor),
+        "eid_duty_allowance": float(eid), "total_allowance": float(allowances),
         "bonus": float(bonus), "advance": float(advance), "fine": float(fine),
         "deduction": float(other), "gross_salary": float(gross),
         "total_deduction": float(total_deduction), "net_salary": float(net),

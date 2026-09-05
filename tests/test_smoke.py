@@ -44,7 +44,9 @@ def test_location_fallback_token_is_signed_and_scoped():
     assert payload["employee_id"] == 42
     assert payload["action"] == "checkin"
 
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    # Change a significant signature character, not unused Base64 padding bits.
+    payload_part, signature = token.rsplit(".", 1)
+    tampered = payload_part + "." + ("A" if signature[0] != "A" else "B") + signature[1:]
     try:
         verify_location_token(tampered)
     except ValueError:
