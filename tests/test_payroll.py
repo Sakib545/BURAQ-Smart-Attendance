@@ -43,3 +43,32 @@ def test_adjustments_require_reason():
     assert adjustment_reason_required(1,0,0,0)
     assert adjustment_reason_required(0,1,0,0)
     assert not adjustment_reason_required(0,0,0,0)
+
+
+def test_midmonth_divisor_does_not_overpay():
+    # Prepared on the 10th of a 30-day month: only 10 days elapsed, all worked.
+    # The daily rate must divide the fixed salary over the FULL month (30), not
+    # over the 10 days elapsed, so the employee earns 10/30 of the salary.
+    result=calculate_payroll(PayrollInput(
+        fixed_salary=30000, scheduled_units=10, full_scheduled_units=30, worked_units=10,
+    ))
+    assert result['per_day_salary']==1000
+    assert result['earned_basic_salary']==10000
+    assert result['net_salary']==10000
+
+
+def test_full_attendance_reconciles_exactly_without_rounding_drift():
+    # A full month of perfect attendance must pay exactly the fixed salary even
+    # when fixed/scheduled is not a clean number (10000/30 = 333.33...).
+    result=calculate_payroll(PayrollInput(
+        fixed_salary=10000, scheduled_units=30, full_scheduled_units=30, worked_units=30,
+    ))
+    assert result['earned_basic_salary']==10000
+    assert result['net_salary']==10000
+
+
+def test_full_scheduled_defaults_to_scheduled_for_old_callers():
+    # Callers that don't pass full_scheduled_units keep the previous behaviour.
+    without=calculate_payroll(PayrollInput(fixed_salary=30000, scheduled_units=30, worked_units=27))
+    withfull=calculate_payroll(PayrollInput(fixed_salary=30000, scheduled_units=30, full_scheduled_units=30, worked_units=27))
+    assert without['net_salary']==withfull['net_salary']==27000

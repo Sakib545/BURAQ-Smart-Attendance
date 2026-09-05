@@ -15,6 +15,11 @@ def money(value) -> Decimal:
 class PayrollInput:
     fixed_salary: float = 0
     scheduled_units: float = 0
+    # Total scheduled duty for the WHOLE month, used only as the divisor for the
+    # daily rate. Kept separate from `scheduled_units` (which is truncated to
+    # today) so a payroll prepared mid-month divides the fixed salary over the
+    # full month, not just the days elapsed. Defaults to `scheduled_units` when 0.
+    full_scheduled_units: float = 0
     worked_units: float = 0
     paid_leave_units: float = 0
     unpaid_leave_units: float = 0
@@ -39,15 +44,22 @@ def calculate_payroll(data: PayrollInput) -> dict:
     unpaid = min(Decimal(str(data.unpaid_leave_units or 0)), max(scheduled - worked - paid, Decimal("0")))
     absent = max(scheduled - worked - paid - unpaid, Decimal("0"))
     fixed = money(data.fixed_salary)
-    per_day = (fixed / scheduled).quantize(TWOPLACES, rounding=ROUND_HALF_UP) if scheduled else Decimal("0.00")
+    # Divide the fixed salary over the full month's duty, not just the days
+    # elapsed so far — otherwise a payroll prepared on the 10th of a 30-day
+    # month pays a full month's salary for 10 days of work. Falls back to the
+    # (possibly truncated) scheduled count when no full-month figure is given.
+    divisor = Decimal(str(data.full_scheduled_units or 0)) or scheduled
+    per_day = (fixed / divisor).quantize(TWOPLACES, rounding=ROUND_HALF_UP) if divisor else Decimal("0.00")
     # A fixed salary is payable against assigned/completed duty. With no duty
     # at all, the employee does not receive the full fixed salary by accident.
-    absent_deduction = fixed if scheduled == 0 else (per_day * absent).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
+    absent_deduction = fixed if divisor == 0 else (per_day * absent).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
     unpaid_leave_deduction = (per_day * unpaid).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
     # Basic salary is earned only for completed duties and approved paid leave.
-    # Absence/unpaid leave are kept as informational values and are not
-    # subtracted a second time from the already reduced earned salary.
-    earned_basic = money(per_day * (worked + paid)) if scheduled else Decimal("0.00")
+    # Computed straight from the fixed amount (not the rounded per-day rate) so a
+    # full month of attendance reconciles to exactly the fixed salary instead of
+    # losing a few paisa to per-day rounding. Absence/unpaid leave stay as
+    # informational values and are not subtracted a second time from earned pay.
+    earned_basic = money(fixed * (worked + paid) / divisor) if divisor else Decimal("0.00")
     earned_basic = min(earned_basic, fixed)
     late_deduction = money(data.late_deduction)
     overtime_amount = money(Decimal(str(data.overtime_hours or 0)) * Decimal(str(data.overtime_rate or 0)))
