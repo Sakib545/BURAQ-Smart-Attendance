@@ -12,9 +12,8 @@ Two things HR asked for, both built on tables that already exist:
   ``undo_last_batch`` does, restoring every record a batch touched to exactly
   the state it was in beforehand.
 
-The one thing that is deliberately *not* undoable is ``paid``. Once money has
-gone out, silently rewriting the record makes the books unreliable; a mistake
-there belongs in next month's adjustment, where it stays visible.
+Bulk undo never rewrites ``paid`` records. An Admin can separately return a
+paid record to Finalized with a reason and preserved payment snapshots.
 """
 from __future__ import annotations
 
@@ -286,7 +285,7 @@ def record_history(payroll_id: int, limit: int = 12) -> list[dict]:
     """Human-readable 'who changed what, when' for one payslip."""
     with get_db() as c:
         rows = c.execute(
-            "SELECT action, actor, reason, created_at FROM payroll_change_logs "
+            "SELECT action, actor, reason, created_at, snapshot FROM payroll_change_logs "
             "WHERE payroll_id=? ORDER BY id DESC LIMIT ?",
             (payroll_id, limit),
         ).fetchall()
@@ -298,9 +297,21 @@ def record_history(payroll_id: int, limit: int = 12) -> list[dict]:
         "undo_finalize": "Finalize undone",
         "reopened": "Reopened for editing",
         "paid": "Marked paid",
+        "payment_returned": "Previous payment preserved",
+        "returned_to_finalized": "Returned from Paid to Finalized",
         "updated": "Edited",
         "discarded": "Discarded",
     }
+    def payment_details(row):
+        if row['action'] not in {'paid', 'payment_returned'}:
+            return ''
+        try:
+            snapshot = json.loads(row['snapshot'] or '{}')
+            return ' · '.join(str(snapshot.get(key) or '—') for key in
+                              ('payment_method', 'payment_reference', 'paid_at', 'net_salary'))
+        except (ValueError, TypeError, AttributeError):
+            return ''
+
     return [
         {
             "action": str(r["action"]),
@@ -308,6 +319,7 @@ def record_history(payroll_id: int, limit: int = 12) -> list[dict]:
             "actor": r["actor"] or "—",
             "reason": r["reason"] or "",
             "at": r["created_at"],
+            "payment_details": payment_details(r),
         }
         for r in rows
     ]
