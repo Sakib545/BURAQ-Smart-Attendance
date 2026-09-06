@@ -1,3 +1,13 @@
+# Current payroll rule (version 3)
+
+Basic uses the full calendar month excluding Fridays as its divisor. Only completed first/day-shift attendance earns basic; no weekly/custom assignment is required. Recorded second/night shifts and Fridays are excluded. Half-days count 0.5. Existing approved paid-leave credit and deductions remain. Late deductions use recorded late minutes and the global first-shift duration, not assigned break times.
+
+Friday, Night, Eid/special and Bonus are manual amounts. Overtime is manually entered hours × rate. The form reloads saved monthly amounts before edits. Legacy Special Duty records remain visible as history but are no longer automatically added; review and save version-2 drafts before finalizing. Finalized/Paid snapshots and admin payment reversal are preserved. Performance ranking continues to use its original roster metrics. No database migration or bulk recalculation is performed.
+
+Example: September 2026 has 26 non-Friday days. Basic 10,000 with 5 completed day duties earns 1,923.08 before manual additions and deductions. Future attendance does not earn salary and future days are not yet absences.
+
+## Historical version-2 design (superseded)
+
 # Regular salary and completed Special Duty
 
 All normal roster entries, including Friday and night shifts and normal custom

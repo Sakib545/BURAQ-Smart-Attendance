@@ -302,7 +302,7 @@ def test_no_completed_duty_means_no_full_basic_salary():
     assert result["net_salary"] == 0
 
 
-def test_break_minutes_reduce_payable_duty_time():
+def test_assigned_break_does_not_change_basic_calendar():
     from app.main import _calculate_employee_payroll
 
     employee = _employee("TEST-RULE-BREAK")
@@ -313,8 +313,8 @@ def test_break_minutes_reduce_payable_duty_time():
             (employee["id"], "2026-07-02", "08:30", "16:00", 60, "BURAQ Office", "Regular duty"),
         )
     result = _calculate_employee_payroll(employee["id"], "2026-07", 30000, 0)
-    # 7h30m duty minus a 60 minute break.
-    assert result["payable_duty_minutes"] == 390
+    # 26 non-Friday days, using the global first-shift duration.
+    assert result["payable_duty_minutes"] == 26 * 450
 
 
 def test_existing_data_survives_initialisation_and_migration():

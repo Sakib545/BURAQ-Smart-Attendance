@@ -127,6 +127,12 @@ def snapshot_blockers(row, snapshot, connection=None):
     row = dict(row)
     if not row.get('employee_id') or not row.get('salary_month'):
         return []
+    if snapshot.get('payroll_rule_version') == 3:
+        first = date.fromisoformat(row['salary_month'] + '-01')
+        last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        return ['This draft was calculated before month end. Save/recalculate it first.'] if snapshot.get('calculated_through', '') < last.isoformat() else []
+    if snapshot.get('payroll_rule_version') == 2:
+        return ['Payroll rules changed. Review manual extras and save this draft again.']
     state = summary(row['employee_id'], row['salary_month'], connection)
     errors = list(state['errors'])
     if snapshot.get('special_duty_records', []) != state['records']:

@@ -1265,7 +1265,7 @@ def employee_profile(request: Request, employee_id: int, month: str = ""):
         eid_allow=float(current_payroll['eid_duty_allowance'] or 0) if current_payroll else 0.0
         payroll_form=''
         if can_payroll_manage:
-            payroll_form=f"""<div class='card'><div class='card-head'><div><h3>{'Update' if current_payroll else 'Create'} Salary</h3><div class='sub'>Basic salary stays active until HR changes it.</div></div><span class='tag'>Private</span></div><form method='post' action='/payroll'><input type='hidden' name='employee_id' value='{employee_id}'><input type='hidden' name='profile_employee_id' value='{employee_id}'><input type='hidden' name='overtime_mode' value='manual'><div class='two'><div><label>Salary Month</label><input type='month' name='salary_month' value='{escape(month)}' required></div><div><label>Basic Salary</label><input type='number' min='0' step='0.01' name='fixed_salary' value='{fixed:.2f}' required></div></div><div class='two'><div><div class='sub'>Overtime is never added automatically.</div><label>Manual OT Hours</label><input type='number' min='0' step='0.01' name='overtime_hours' value='{hours:.2f}'></div><div><label>Manual OT Rate</label><input type='number' min='0' step='0.01' name='overtime_rate' value='{rate:.2f}'></div></div><p><a class='btn secondary' href='/payroll/special-duties?month={month}'>Manage Special Duty</a></p><div class='two'><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='{bonus:.2f}'><label>Advance</label><input type='number' min='0' step='0.01' name='advance' value='{advance:.2f}'></div><div><label>Fine</label><input type='number' min='0' step='0.01' name='fine' value='{fine:.2f}'><label>Other Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='{deduction:.2f}'></div></div><label>Adjustment Reason</label><input name='adjustment_reason' value='{escape(adjustment_reason)}'><label>Private Note</label><textarea name='note'>{escape(current_payroll['note'] or '') if current_payroll else ''}</textarea><button class='btn'>Calculate & Save Draft</button></form></div>"""
+            payroll_form=f"""<div class='card'><div class='card-head'><div><h3>{'Update' if current_payroll else 'Create'} Salary</h3><div class='sub'>Basic salary stays active until HR changes it.</div></div><span class='tag'>Private</span></div><form method='post' action='/payroll'><input type='hidden' name='employee_id' value='{employee_id}'><input type='hidden' name='profile_employee_id' value='{employee_id}'><input type='hidden' name='overtime_mode' value='manual'><div class='two'><div><label>Salary Month</label><input type='month' name='salary_month' value='{escape(month)}' required></div><div><label>Basic Salary</label><input type='number' min='0' step='0.01' name='fixed_salary' value='{fixed:.2f}' required></div></div><div class='two'><div><div class='sub'>Overtime is never added automatically.</div><label>Manual OT Hours</label><input type='number' min='0' step='0.01' name='overtime_hours' value='{hours:.2f}'></div><div><label>Manual OT Rate</label><input type='number' min='0' step='0.01' name='overtime_rate' value='{rate:.2f}'></div></div><div class='two'><div><label>Night amount (manual)</label><input type='number' min='0' step='0.01' name='night_allowance' value='{night_allow:.2f}'></div><div><label>Friday amount (manual)</label><input type='number' min='0' step='0.01' name='friday_allowance' value='{friday_allow:.2f}'></div></div><label>Eid / special amount (manual)</label><input type='number' min='0' step='0.01' name='eid_duty_allowance' value='{eid_allow:.2f}'><div class='two'><div><label>Bonus</label><input type='number' min='0' step='0.01' name='bonus' value='{bonus:.2f}'><label>Advance</label><input type='number' min='0' step='0.01' name='advance' value='{advance:.2f}'></div><div><label>Fine</label><input type='number' min='0' step='0.01' name='fine' value='{fine:.2f}'><label>Other Deduction</label><input type='number' min='0' step='0.01' name='deduction' value='{deduction:.2f}'></div></div><label>Adjustment Reason</label><input name='adjustment_reason' value='{escape(adjustment_reason)}'><label>Private Note</label><textarea name='note'>{escape(current_payroll['note'] or '') if current_payroll else ''}</textarea><button class='btn'>Calculate & Save Draft</button></form></div>"""
         history=[]
         for p in payroll:
             actions=f"<a class='btn secondary' href='/payroll/{p['id']}/payslip.pdf'>PDF</a>" if can_payroll_export else ''
@@ -1708,7 +1708,7 @@ def _validated_break_minutes(start_time: str, end_time: str, break_minutes: int)
         raise HTTPException(400,'Break must be shorter than the duty time')
     return minutes
 
-def _payroll_duty_metrics(employee_id: int, month: str):
+def _performance_duty_metrics(employee_id: int, month: str):
     first=datetime.strptime(month+'-01','%Y-%m-%d').date(); next_month=(first.replace(day=28)+timedelta(days=4)).replace(day=1); last=next_month-timedelta(days=1)
     today=datetime.now(ZoneInfo(settings.timezone)).date()
     effective_last=min(last,today) if first<=today<=last else last
@@ -1772,17 +1772,70 @@ def _payroll_duty_metrics(employee_id: int, month: str):
     scheduled_units=float(len(scheduled)); paid_units=float(len(paid_leave_dates)); unpaid_units=float(len(unpaid_leave_dates)); absent_units=max(scheduled_units-worked_units-paid_units-unpaid_units,0)
     return {"scheduled":scheduled_units,"salary_divisor":standard_units,"full_scheduled":standard_units,"worked":worked_units,"paid_leave":paid_units,"unpaid_leave":unpaid_units,"absent":absent_units,"late_minutes":late_minutes,"late_fraction_units":late_fraction_units,"payable_duty_minutes":sum(scheduled.values()),"standard_duty_minutes":sum(full_scheduled.values()),"fridays_worked":int(fridays_worked),"incomplete_dates":incomplete}
 
+def _payroll_duty_metrics(employee_id: int, month: str):
+    first=datetime.strptime(month+'-01','%Y-%m-%d').date(); next_month=(first.replace(day=28)+timedelta(days=4)).replace(day=1); last=next_month-timedelta(days=1)
+    today=datetime.now(ZoneInfo(settings.timezone)).date()
+    effective_last=min(last,today) if first<=today<=last else last
+    if today<first: effective_last=first-timedelta(days=1)
+    with get_db() as c:
+        employee=c.execute("SELECT join_date FROM employees WHERE id=?",(employee_id,)).fetchone()
+        attendance=c.execute("SELECT work_date,check_in,check_out,status,late_minutes,attendance_shift FROM attendance WHERE employee_id=? AND work_date>=? AND work_date<=?",(employee_id,first.isoformat(),effective_last.isoformat())).fetchall() if effective_last>=first else []
+        leaves=c.execute("SELECT leave_type,start_date,end_date FROM leave_requests WHERE employee_id=? AND status='approved' AND start_date<=? AND end_date>=?",(employee_id,effective_last.isoformat(),first.isoformat())).fetchall() if effective_last>=first else []
+    # Someone who joined on the 24th did not skip the 1st–23rd. Those days are
+    # not duty they owe, so they are neither scheduled nor absent.
+    join_date=None
+    try:
+        raw_join=str((employee['join_date'] if employee else '') or '').strip()[:10]
+        if raw_join: join_date=datetime.fromisoformat(raw_join).date()
+    except (TypeError, ValueError, KeyError, IndexError): join_date=None
+    def _employed_on(day): return join_date is None or day>=join_date
+    # Calendar rate, independent of whether a roster has been assigned.
+    rules=get_shift_rules()
+    duration=max(_duty_duration_minutes(rules[FIRST_START_KEY],rules[FIRST_END_KEY]),1)
+    full_scheduled={}; scheduled={}; day=first
+    while day<=last:
+        if day.weekday()!=4:
+            full_scheduled[day.isoformat()]=duration
+            if day<=effective_last and _employed_on(day):
+                scheduled[day.isoformat()]=duration
+        day+=timedelta(days=1)
+    standard_units=float(len(full_scheduled))
+    attendance_by_date={r['work_date']:r for r in attendance if r['work_date'] in scheduled and str(r['attendance_shift'] or 'first').lower() in {'first','morning','day'}}; worked_units=0.0; incomplete=[]; late_minutes=0; late_fraction_units=0.0
+    for work_date,row in attendance_by_date.items():
+        if not row['check_in'] or not row['check_out']:
+            incomplete.append(work_date)
+            continue
+        status=str(row['status'] or '').lower()
+        if status in {'absent','leave','on_leave'}: continue
+        unit=0.5 if status in {'half_day','half-day','half day'} else 1.0
+        worked_units += unit
+        daily_late=max(int(row['late_minutes'] or 0),0)
+        daily_late=min(daily_late,scheduled[work_date])
+        late_minutes+=daily_late
+        late_fraction_units+=min(daily_late/scheduled[work_date],unit)
+    paid_leave_dates=set(); unpaid_leave_dates=set()
+    for leave in leaves:
+        day=max(datetime.fromisoformat(leave['start_date']).date(),first); end=min(datetime.fromisoformat(leave['end_date']).date(),effective_last)
+        while day<=end:
+            if day.isoformat() in scheduled and (day.isoformat() not in attendance_by_date or day.isoformat() in incomplete):
+                leave_name=str(leave['leave_type'] or '').strip().lower()
+                target=unpaid_leave_dates if leave_name in {'unpaid','unpaid leave','lwp','leave without pay','without pay'} else paid_leave_dates
+                target.add(day.isoformat())
+            day+=timedelta(days=1)
+    # Friday payments are entered manually; count completed Friday attendance.
+    fridays_worked=sum(1 for row in attendance if row['check_in'] and row['check_out'] and datetime.fromisoformat(row['work_date']).date().weekday()==4)
+    scheduled_units=float(len(scheduled)); paid_units=float(len(paid_leave_dates)); unpaid_units=float(len(unpaid_leave_dates)); absent_units=max(scheduled_units-worked_units-paid_units-unpaid_units,0)
+    return {"scheduled":scheduled_units,"salary_divisor":standard_units,"full_scheduled":standard_units,"worked":worked_units,"paid_leave":paid_units,"unpaid_leave":unpaid_units,"absent":absent_units,"late_minutes":late_minutes,"late_fraction_units":late_fraction_units,"payable_duty_minutes":sum(scheduled.values()),"standard_duty_minutes":sum(full_scheduled.values()),"fridays_worked":int(fridays_worked),"incomplete_dates":incomplete}
+
 def _calculate_employee_payroll(employee_id: int, month: str, fixed_salary: float, overtime_rate: float, overtime_mode: str="manual", manual_overtime_hours: float=0, bonus: float=0, advance: float=0, fine: float=0, deduction: float=0, night_allowance: float=0, friday_allowance: float=0, eid_duty_allowance: float=0):
     duty=_payroll_duty_metrics(employee_id,month)
-    extra=special_duties.summary(employee_id,month)
-    night_allowance=extra['totals']['night']; friday_allowance=extra['totals']['friday']; eid_duty_allowance=extra['totals']['eid']
     divisor=duty.get('salary_divisor') or duty['scheduled']
     per_day=(float(fixed_salary or 0)/divisor) if divisor else 0
     late_deduction=per_day*duty['late_fraction_units']
-    result=calculate_payroll(PayrollInput(fixed_salary=fixed_salary,scheduled_units=duty['scheduled'],salary_divisor_units=duty.get('salary_divisor',0),worked_units=duty['worked'],paid_leave_units=duty['paid_leave'],unpaid_leave_units=duty['unpaid_leave'],late_minutes=duty['late_minutes'],late_deduction=late_deduction,payable_duty_minutes=duty['payable_duty_minutes'],overtime_hours=manual_overtime_hours,overtime_rate=overtime_rate,night_allowance=night_allowance,friday_allowance=friday_allowance,eid_duty_allowance=eid_duty_allowance,other_special_allowance=extra["totals"]["other"],bonus=bonus,advance=advance,fine=fine,other_deduction=deduction))
+    result=calculate_payroll(PayrollInput(fixed_salary=fixed_salary,scheduled_units=duty['scheduled'],salary_divisor_units=duty.get('salary_divisor',0),worked_units=duty['worked'],paid_leave_units=duty['paid_leave'],unpaid_leave_units=duty['unpaid_leave'],late_minutes=duty['late_minutes'],late_deduction=late_deduction,payable_duty_minutes=duty['payable_duty_minutes'],overtime_hours=manual_overtime_hours,overtime_rate=overtime_rate,night_allowance=night_allowance,friday_allowance=friday_allowance,eid_duty_allowance=eid_duty_allowance,other_special_allowance=0,bonus=bonus,advance=advance,fine=fine,other_deduction=deduction))
     result['incomplete_dates']=duty['incomplete_dates']; result['overtime_mode']='manual'
-    result['special_duty_records']=extra['records']; result['special_duty_errors']=extra['errors']
-    result['payroll_rule_version']=2
+    result['special_duty_records']=[]; result['special_duty_errors']=[]
+    result['payroll_rule_version']=3
     result['calculated_through']=datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
     result['fridays_worked']=duty.get('fridays_worked',0)
     return result
@@ -1839,6 +1892,15 @@ PAYROLL_STAGES = {
     "paid":         ("Paid", "stage-paid",
                      "Payment recorded with a method and reference."),
 }
+
+
+@app.get('/payroll/inputs')
+def payroll_inputs(request: Request, employee_id: int, month: str):
+    require_permission(request, 'payroll_manage')
+    with get_db() as db:
+        row=db.execute('SELECT * FROM payroll_records WHERE employee_id=? AND salary_month=?',(employee_id,month)).fetchone()
+    fields=('fixed_salary','overtime_rate','overtime_hours','night_allowance','friday_allowance','eid_duty_allowance','bonus','advance_amount','fine_amount','deduction','adjustment_reason','note')
+    return {key:row[key] for key in fields} if row else {}
 
 
 @app.get("/payroll/preview")
@@ -2106,9 +2168,10 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
               <div class='hint'>Entered by hand. Overtime is never added automatically.</div>
             </div>
 
-            <div class='field-group'><a class='btn secondary' href='/payroll/special-duties?month={month}'>Manage completed Special Duty</a>
-              <p>Extra duty payments are calculated from dated records.</p>
-              <input id='pf-night' type='hidden' value='0'><input id='pf-friday' type='hidden' value='0'><input id='pf-eid' type='hidden' value='0'>
+            <div class='field-group'><div class='field-group-title'>Manual extras</div>
+              <label>Night amount</label><input id='pf-night' name='night_allowance' type='number' min='0' step='0.01' value='0'>
+              <label>Friday amount</label><input id='pf-friday' name='friday_allowance' type='number' min='0' step='0.01' value='0'>
+              <label>Eid / special amount</label><input id='pf-eid' name='eid_duty_allowance' type='number' min='0' step='0.01' value='0'>
               <span id='pf-friday-hint' hidden></span>
             </div>
 
@@ -2229,7 +2292,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
             f"<div class='mini-line'><span class='mini-present' style='width:{duty_pct}%'></span></div></td>"
             f"<td class='num'>৳{_money(r['earned_basic_salary'])}"
             f"<div class='sub'>of ৳{_money(r['fixed_salary'])}</div></td>"
-            f"<td class='num'>৳{_money(r.get('total_allowance',0))}</td>"
+            f"<td class='num'>৳{_money(r.get('total_allowance',0))}<div class='sub'>Friday ৳{_money(r.get('friday_allowance',0))} · Night ৳{_money(r.get('night_allowance',0))}</div></td>"
             f"<td class='num'>"
             + (f"+৳{_money(r['overtime_amount'])}" if float(r['overtime_amount'] or 0) else "—")
             + f"</td>"
@@ -2241,7 +2304,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
             f"<td class='num'>{net_cell}</td>"
             f"<td class='cell-actions'>{actions}</td></tr>")
 
-    export_buttons = f"<a class='btn secondary' href='/payroll/special-duties?month={month}'>Special Duty</a>"
+    export_buttons = f"<a class='btn secondary' href='/payroll/special-duties?month={month}'>Previous Special Duty records</a>"
     if can_export:
         export_buttons += (f"<a class='btn secondary' href='/payroll/export.xlsx?month={month}'>Excel</a>"
                            f"<a class='btn secondary' href='/payroll/export.pdf?month={month}'>PDF</a>")
@@ -2287,12 +2350,12 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
     <div class='section-gap'></div>
     <div class='card'>
       <div class='card-head'><div><h3>Salary sheet — {month_label}</h3>
-      <div class='sub'>Regular Friday and night shifts are included in Basic. Completed Special Duty is added separately.</div></div></div>
+      <div class='sub'>Basic = monthly salary ÷ calendar days excluding Fridays × completed day duties (plus approved paid leave). No assignment required. Friday, Night, Bonus and Overtime are manual.</div></div></div>
       <div class='table-scroll'>
         <table class='dashboard-table payroll-table'>
           <thead><tr>
             <th>Employee</th><th>Stage</th><th class='num'>Duty done</th>
-            <th class='num'>Earned basic</th><th class='num'>Special Duty</th><th class='num'>Overtime</th>
+            <th class='num'>Earned basic</th><th class='num'>Manual extras</th><th class='num'>Overtime</th>
             <th class='num'>Deductions</th><th class='num'>Net payable</th><th>Action</th>
           </tr></thead>
           <tbody>{''.join(table) or "<tr><td colspan='9'><div class='empty-cell'>No active employees.</div></td></tr>"}</tbody>
@@ -2327,18 +2390,34 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
 
       // Fill basic salary and OT rate from the chosen employee, so the
       // officer is not retyping figures the system already knows.
+      var loadSeq = 0, inputsReady = false;
       function fillFromEmployee() {{
         var opt = emp.options[emp.selectedIndex];
         if (!opt) return;
         basic.value = opt.dataset.salary || '0';
         otRate.value = opt.dataset.ot || '0';
+        inputsReady = false;
+        var mine = ++loadSeq;
+        fetch('/payroll/inputs?' + new URLSearchParams({{employee_id:emp.value,month:document.getElementById('pf-month').value}}), {{credentials:'same-origin'}})
+          .then(function(r) {{ if (!r.ok) throw new Error(); return r.json(); }})
+          .then(function(d) {{
+            if (mine !== loadSeq) return;
+            var fields = {{'pf-basic':'fixed_salary','pf-otrate':'overtime_rate','pf-othours':'overtime_hours','pf-night':'night_allowance','pf-friday':'friday_allowance','pf-eid':'eid_duty_allowance','pf-bonus':'bonus','pf-advance':'advance_amount','pf-fine':'fine_amount','pf-other':'deduction','pf-reason':'adjustment_reason','pf-note':'note'}};
+            Object.keys(fields).forEach(function(id) {{
+              var fallback = id==='pf-basic' ? opt.dataset.salary : id==='pf-otrate' ? opt.dataset.ot : (id==='pf-note'||id==='pf-reason' ? '' : '0');
+              document.getElementById(id).value = d[fields[id]] == null ? fallback : d[fields[id]];
+            }});
+            inputsReady = true; refresh();
+          }})
+          .catch(function() {{ if (mine === loadSeq) body.textContent='Could not load saved amounts. Select the employee again before saving.'; }});
+
       }}
 
       function render(d) {{
         who.textContent = d.employee_name + ' · ' + d.staff_id;
         var rows = '';
         rows += line('Earned basic',
-                     d.worked + ' of ' + d.scheduled + ' duty units at ' +
+                     d.worked + ' completed day units; monthly divisor ' + d.salary_divisor + '; ' +
                      taka(d.per_day_salary) + ' each',
                      taka(d.earned_basic_salary));
         if (d.paid_leave > 0) rows += line('Includes paid leave', d.paid_leave + ' units', '', 'muted');
@@ -2403,7 +2482,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
       function debounced() {{ clearTimeout(timer); timer = setTimeout(refresh, 280); }}
 
       emp.addEventListener('change', function () {{ fillFromEmployee(); refresh(); }});
-      document.getElementById('pf-month').addEventListener('change', refresh);
+      document.getElementById('pf-month').addEventListener('change', fillFromEmployee);
       ['pf-basic','pf-otrate','pf-othours','pf-night','pf-friday','pf-eid',
        'pf-bonus','pf-advance','pf-fine','pf-other']
         .forEach(function (id) {{
@@ -2414,6 +2493,7 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
       // Block submit when an adjustment has no reason, instead of letting the
       // server bounce the officer back and lose everything they typed.
       form.addEventListener('submit', function (e) {{
+        if (!inputsReady) {{ e.preventDefault(); return; }}
         var needs = val('pf-bonus') + val('pf-advance') + val('pf-fine') + val('pf-other');
         var reason = document.getElementById('pf-reason');
         if (needs > 0 && !reason.value.trim()) {{
@@ -2434,8 +2514,6 @@ def payroll_page(request: Request, month: str = "", saved: str = "", error: str 
 @app.post("/payroll")
 def save_payroll(request: Request, employee_id: int=Form(...), salary_month: str=Form(...), fixed_salary: float=Form(...), overtime_hours: float=Form(0), overtime_rate: float=Form(0), overtime_mode: str=Form("manual"), night_allowance: float=Form(0), friday_allowance: float=Form(0), eid_duty_allowance: float=Form(0), bonus: float=Form(0), advance: float=Form(0), fine: float=Form(0), deduction: float=Form(0), adjustment_reason: str=Form(""), note: str=Form(""), return_month: str=Form(""), profile_employee_id: int=Form(0)):
     require_permission(request,"payroll_manage")
-    if any(v != 0 for v in (night_allowance, friday_allowance, eid_duty_allowance)):
-        raise HTTPException(400,"Record completed Special Duty with its date and time instead of monthly allowances")
     values=(fixed_salary,overtime_hours,overtime_rate,night_allowance,friday_allowance,eid_duty_allowance,bonus,advance,fine,deduction); overtime_mode='manual'
     if not re.fullmatch(r"\d{4}-\d{2}",salary_month) or any(v<0 for v in values): return RedirectResponse(f"/payroll?month={return_month or salary_month}&error=1",303)
     if adjustment_reason_required(bonus,advance,fine,deduction) and not adjustment_reason.strip(): return RedirectResponse(f"/payroll?month={salary_month}&error=reason",303)

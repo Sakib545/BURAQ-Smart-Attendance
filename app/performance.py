@@ -25,7 +25,7 @@ Two deliberate design decisions, both about not doing harm with automation:
    resentment and turnover, not attendance.
 
 Duty maths is not reimplemented here: ``employee_metrics`` calls the same
-``_payroll_duty_metrics`` that payroll uses, so a score can never disagree with
+``_performance_duty_metrics`` for roster-based performance, independently of
 a payslip.
 """
 from __future__ import annotations
@@ -123,13 +123,13 @@ def month_label(period: str) -> str:
 
 
 def employee_metrics(employee_id: int, period: str) -> dict:
-    """Duty metrics for one employee/month, from payroll's own function.
+    """Duty metrics for one employee/month, from the roster-based performance function.
 
     Imported lazily: ``app.main`` imports this module, so a module-level import
     would be circular. By call time main is fully loaded.
     """
-    from app.main import _payroll_duty_metrics
-    return _payroll_duty_metrics(employee_id, period)
+    from app.main import _performance_duty_metrics
+    return _performance_duty_metrics(employee_id, period)
 
 
 def monthly_ranking(period: str) -> list[dict]:
