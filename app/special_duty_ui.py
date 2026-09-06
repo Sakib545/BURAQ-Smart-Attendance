@@ -31,22 +31,6 @@ def special_page(request: Request, month: str='', error: str=''):
         employees = c.execute('SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id').fetchall()
         rows = c.execute('SELECT s.*,e.name,e.staff_id,p.payment_status FROM special_duties s JOIN employees e ON e.id=s.employee_id LEFT JOIN payroll_records p ON p.employee_id=s.employee_id AND p.salary_month=? WHERE s.duty_date LIKE ? ORDER BY s.duty_date,s.id', (month,month+'-%')).fetchall()
     form = ''
-    if manage:
-        options = ''.join(f"<option value='{e['id']}'>{escape(e['staff_id'])} — {escape(e['name'])}</option>" for e in employees)
-        kinds = ''.join(f"<option value='{key}'>{label}</option>" for key,label in special_duties.KINDS.items())
-        form = f"""<div class='card'><h2>Add completed Special Duty</h2>
-        <p>Normal Friday and night shifts are covered by Basic Salary. Enter only extra work outside the regular duty time.</p>
-        <form method='post'><input type='hidden' name='month' value='{month}'>
-        <label for='sd-employee'>Employee</label><select id='sd-employee' name='employee_id' required>{options}</select>
-        <div class='two'><div><label for='sd-date'>Duty date</label><input id='sd-date' type='date' name='duty_date' required></div>
-        <div><label for='sd-kind'>Type</label><select id='sd-kind' name='duty_type'>{kinds}</select></div></div>
-        <div class='two'><div><label for='sd-start'>Start time</label><input id='sd-start' type='time' name='start_time' required></div>
-        <div><label for='sd-end'>End time</label><input id='sd-end' type='time' name='end_time' required></div></div>
-        <p class='sub'>An end time earlier than start means the next day.</p>
-        <label for='sd-amount'>Payment amount (BDT)</label><input id='sd-amount' type='number' min='0.01' max='10000000' step='0.01' name='payment_amount' required>
-        <label for='sd-note'>Completion note</label><textarea id='sd-note' name='note' minlength='5' maxlength='1000' required></textarea>
-        <label><input type='checkbox' name='completed' value='yes' required> I confirm this extra duty was completed and is not also included in manual overtime.</label>
-        <button class='btn'>Save Special Duty</button></form></div>"""
     entries=[]
     for row in rows:
         status='Cancelled' if row['cancelled_at'] else 'Recorded'
@@ -61,7 +45,7 @@ def special_page(request: Request, month: str='', error: str=''):
         entries.append(f"<tr><td>{escape(row['name'])}<br>{escape(row['staff_id'])}</td><td>{row['duty_date']}<br>{row['start_time']}–{row['end_time']}</td><td>{special_duties.KINDS[row['duty_type']]}</td><td>{float(row['payment_amount']):,.2f}</td><td>{status}<br>{notes}<br>By {escape(row['created_by'])} · {escape(str(row['created_at']))}</td><td>{action}</td></tr>")
     body=f"""<div class='card'><h1>Special Duty</h1><a class='btn secondary' href='/payroll?month={month}'>Back to Payroll</a>
     <form method='get'><label>Month</label><input type='month' name='month' value='{month}'><button class='btn'>Open month</button></form>
-    <p>After adding or cancelling duty, save/recalculate the employee's Draft payslip before finalizing.</p></div>
+    <p>Historical records only. New payroll uses manual Friday, Night and special amounts entered on the Payroll form. These records are not automatically added.</p></div>
     {f"<div class='notice bad'>{escape(error)}</div>" if error else ''}{form}
     <div class='card table-scroll'><table><thead><tr><th>Employee</th><th>Duty</th><th>Type</th><th>Amount</th><th>History</th><th>Action</th></tr></thead><tbody>{''.join(entries) or '<tr><td colspan=6>No special duties recorded.</td></tr>'}</tbody></table></div>"""
     return layout('Special Duty',body,request,'payroll')
@@ -73,13 +57,7 @@ def add(request: Request, employee_id: int=Form(...), duty_date: str=Form(...), 
         completed: str=Form(''), month: str=Form('')):
     from app.main import require_permission, _payroll_actor
     require_permission(request,'payroll_manage')
-    try:
-        if completed != 'yes':
-            raise ValueError('Confirm that the extra duty has been completed')
-        special_duties.add_completed(employee_id,duty_date,duty_type,start_time,end_time,payment_amount,note,_payroll_actor(request))
-    except ValueError as exc:
-        return redirect(month,str(exc))
-    return redirect(duty_date[:7])
+    return redirect(month, 'Enter manual extras on the Payroll form. This ledger is historical.')
 
 
 @router.post('/payroll/special-duties/{record_id}/cancel')

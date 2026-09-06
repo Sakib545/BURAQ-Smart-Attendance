@@ -70,9 +70,9 @@ def test_regular_friday_and_night_stay_in_basic(employee):
 def test_dated_extra_added_once_and_does_not_change_basic(employee,kind):
     add(employee,kind=kind)
     r=main._calculate_employee_payroll(employee,MONTH,31000,0)
-    assert r['salary_divisor']==31 and r['worked']==31
-    assert r['earned_basic_salary']==31000 and r['net_salary']==31300
-    assert len(r['special_duty_records'])==1
+    assert r['salary_divisor']==26 and r['worked']==26
+    assert r['earned_basic_salary']==31000 and r['net_salary']==31000
+    assert len(r['special_duty_records'])==0
     # Caller-supplied monthly allowances cannot double the dated payment.
     r=main._calculate_employee_payroll(employee,MONTH,31000,0,night_allowance=300)
     assert r['net_salary']==31300
@@ -89,7 +89,7 @@ def test_overlap_duplicate_cancel_and_replacement(employee):
     special_duties.cancel(sid,'Wrong duty amount','Admin')
     add(employee,amount='450')
     r=main._calculate_employee_payroll(employee,MONTH,31000,0)
-    assert r['net_salary']==31450
+    assert r['net_salary']==31000
     with get_db() as c:
         old=c.execute('SELECT * FROM special_duties WHERE id=?',(sid,)).fetchone()
         assert old['payment_amount']==300 and old['cancel_reason']=='Wrong duty amount'
@@ -101,17 +101,21 @@ def test_roster_change_blocks_special_and_finalize(employee):
     with get_db() as c:
         c.execute("UPDATE duty_schedules SET end_time='20:00' WHERE employee_id=?",(employee,))
     blockers=finalize_blockers(row)
-    assert any('overlaps regular' in s for s in blockers)
+    assert not blockers
     assert main._calculate_employee_payroll(employee,MONTH,31000,0)['total_allowance']==0
 
 
 def test_stale_draft_must_be_resaved_before_single_or_bulk_finalize(employee):
     row=save(employee)
     add(employee)
+    snapshot=json.loads(row['calculation_snapshot']); snapshot['payroll_rule_version']=2
+    row['calculation_snapshot']=json.dumps(snapshot)
+    with get_db() as db:
+        db.execute('UPDATE payroll_records SET calculation_snapshot=? WHERE id=?',(row['calculation_snapshot'],row['id']))
     c=client()
     response=c.post(f"/payroll/{row['id']}/status",data={'month':MONTH,'status':'finalized'})
     assert response.status_code==409
-    assert any('Special duty changed' in x for x in finalize_blockers(row))
+    assert any('rules changed' in x for x in finalize_blockers(row))
     bulk=bulk_finalize(MONTH,'Reviewer')
     assert not any(r['id']==row['id'] for r in bulk['ready'])
     row=save(employee,c)
@@ -131,15 +135,15 @@ def test_preview_sheet_payslip_and_excel_agree(employee):
     c=client(); row=save(employee,c)
     preview=c.get('/payroll/preview',params={'employee_id':employee,'month':MONTH,'fixed_salary':31000})
     assert preview.status_code==200
-    assert preview.json()['net_salary']==31456.78
-    assert '31,456.78' in c.get('/payroll?month='+MONTH).text
+    assert preview.json()['net_salary']==31000
+    assert '31,000.00' in c.get('/payroll?month='+MONTH).text
     workbook=load_workbook(io.BytesIO(c.get('/payroll/export.xlsx?month='+MONTH).content))
     sheet=workbook['Salary Sheet']
     data=next(r for r in sheet.iter_rows(min_row=5,values_only=True) if r[1]=='SPECIAL-TEST')
-    assert data[23]==31456.78 and data[26]==456.78
+    assert data[23]==31000 and data[26]==0
     extra=workbook['Special Duty']
     extra_row=next(r for r in extra.iter_rows(min_row=2,values_only=True) if r[0]=='SPECIAL-TEST')
-    assert extra_row[5]==456.78
+    assert extra_row[5]==0
     for url in ['/payroll/export.pdf?month='+MONTH,f"/payroll/{row['id']}/payslip.pdf"]:
         response=c.get(url)
         assert response.status_code==200 and response.content.startswith(b'%PDF'),response.text[:200]
@@ -153,22 +157,21 @@ def test_special_write_permission(employee,role,status):
     assert r.status_code==status
 
 
-def test_http_create_cancel_and_manual_allowance_rejected(employee):
+def test_manual_allowances_saved_and_reloadable(employee):
     c=client('admin')
-    r=c.post('/payroll/special-duties',data={'employee_id':employee,'duty_date':'2026-07-02','duty_type':'night','start_time':'18:00','end_time':'20:00','payment_amount':300,'note':'Completed work','completed':'yes','month':MONTH},follow_redirects=False)
-    assert r.status_code==303 and 'error=' in r.headers['location'] and r.headers['location'].endswith('error=')
-    r=c.post('/payroll',data={'employee_id':employee,'salary_month':MONTH,'fixed_salary':31000,'night_allowance':300})
-    assert r.status_code==400
-    with get_db() as db: sid=db.execute('SELECT id FROM special_duties WHERE employee_id=?',(employee,)).fetchone()['id']
-    r=c.post(f'/payroll/special-duties/{sid}/cancel',data={'reason':'Wrong date entered','month':MONTH},follow_redirects=False)
+    r=c.post('/payroll',data={'employee_id':employee,'salary_month':MONTH,'fixed_salary':31000,'night_allowance':300,'friday_allowance':200,'overtime_hours':2,'overtime_rate':50},follow_redirects=False)
     assert r.status_code==303
-    assert main._calculate_employee_payroll(employee,MONTH,31000,0)['net_salary']==31000
+    saved=c.get('/payroll/inputs',params={'employee_id':employee,'month':MONTH}).json()
+    assert saved['night_allowance']==300 and saved['friday_allowance']==200
+    with get_db() as db:
+        row=db.execute('SELECT net_salary FROM payroll_records WHERE employee_id=?',(employee,)).fetchone()
+    assert row['net_salary']==31600
 
 
 def test_joining_date_and_future_special_rejected(employee):
     with get_db() as c: c.execute("UPDATE employees SET join_date='2026-07-11' WHERE id=?",(employee,))
     r=main._calculate_employee_payroll(employee,MONTH,31000,0)
-    assert r['scheduled']==21 and r['absent']==0 and r['net_salary']==21000
+    assert r['scheduled']==18 and r['absent']==0 and r['net_salary']==21461.54
     with pytest.raises(ValueError,match='joining'):
         add(employee)
     with pytest.raises(ValueError,match='completed'):

@@ -34,11 +34,11 @@ def employee(monkeypatch):
 
 def test_midmonth_real_custom_roster(employee):
     result = main._calculate_employee_payroll(employee, '2026-09', 30000, 0)
-    assert result['scheduled'] == 10
-    assert result['worked'] == 10
+    assert result['scheduled'] == 9
+    assert result['worked'] == 9
     assert result['absent'] == 0  # The next twenty duties are not absences.
-    assert result['per_day_salary'] == 1000
-    assert result['earned_basic_salary'] == result['net_salary'] == 10000
+    assert result['per_day_salary'] == 1153.85
+    assert result['earned_basic_salary'] == result['net_salary'] == 10384.62
 
 
 def test_late_half_day_and_leave_use_full_month_rate(employee):
@@ -51,10 +51,10 @@ def test_late_half_day_and_leave_use_full_month_rate(employee):
                        (employee, kind, date, date, 'approved'))
     result = main._calculate_employee_payroll(employee, '2026-09', 30000, 0)
     assert result['paid_leave'] == result['unpaid_leave'] == 1
-    assert result['worked'] == 7.5
-    assert result['earned_basic_salary'] == 8500
-    assert result['late_deduction'] == 250
-    assert result['net_salary'] == 8250
+    assert result['worked'] == 6.5
+    assert result['earned_basic_salary'] == 8653.85
+    assert result['late_deduction'] == 307.69
+    assert result['net_salary'] == 8346.16
     assert result['absent'] == 0.5
 
 
@@ -65,7 +65,7 @@ def test_future_month_has_rate_but_no_earnings_or_absence(employee, monkeypatch)
             return cls(2026, 8, 31, 12, tzinfo=tz)
     monkeypatch.setattr(main, 'datetime', Clock)
     result = main._calculate_employee_payroll(employee, '2026-09', 30000, 0)
-    assert result['per_day_salary'] == 1000
+    assert result['per_day_salary'] == 1153.85
     assert result['scheduled'] == result['worked'] == result['absent'] == 0
     assert result['net_salary'] == result['absent_deduction'] == 0
 
@@ -76,6 +76,21 @@ def test_weekly_roster_and_custom_override_count_each_date_once(employee):
             db.execute("INSERT INTO duty_schedules(employee_id,weekday,start_time,end_time,break_minutes,is_active) VALUES(?,?,?,?,?,?)",
                        (employee, weekday, '08:00', '16:00', 0, True))
     metrics = main._payroll_duty_metrics(employee, '2026-09')
-    assert metrics['full_scheduled'] == 30
-    assert metrics['scheduled'] == 10
-    assert main._calculate_employee_payroll(employee, '2026-09', 30000, 0)['net_salary'] == 10000
+    assert metrics['full_scheduled'] == 26
+    assert metrics['scheduled'] == 9
+    assert main._calculate_employee_payroll(employee, '2026-09', 30000, 0)['net_salary'] == 10384.62
+
+
+def test_actual_attendance_needs_no_assignment_and_excludes_night(employee):
+    with get_db() as db:
+        db.execute('DELETE FROM custom_duties WHERE employee_id=?',(employee,))
+        db.execute("UPDATE attendance SET attendance_shift='second' WHERE employee_id=? AND work_date='2026-09-01'",(employee,))
+    r=main._calculate_employee_payroll(employee,'2026-09',10000,50,manual_overtime_hours=2,friday_allowance=200,night_allowance=300,bonus=100)
+    assert r['salary_divisor']==26 and r['worked']==8
+    assert r['earned_basic_salary']==3076.92
+    assert r['net_salary']==3776.92
+
+
+@pytest.mark.parametrize('month,divisor',[('2024-02',25),('2025-02',24),('2026-07',26),('2026-09',26)])
+def test_calendar_divisor_handles_month_lengths(employee,month,divisor):
+    assert main._payroll_duty_metrics(employee,month)['salary_divisor']==divisor
