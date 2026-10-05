@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "BURAQ Duty Browsing Tracker",
+  "version": "1.0.0",
+  "description": "Records website names and time during duty hours for BURAQ Smart Attendance. Nothing is recorded off duty.",
+  "permissions": ["tabs", "storage", "alarms", "idle"],
+  "host_permissions": ["https://smart-attendance.pro/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "BURAQ Tracker", "default_popup": "popup.html" }
+}

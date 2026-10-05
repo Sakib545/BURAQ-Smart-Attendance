@@ -144,6 +144,8 @@ PERMISSION_CATALOG = {
     "attendance_edit": ("Attendance: Correct", "Attendance correction request করবে"),
     "shift_manage": ("Shift Management", "Shift manage করবে"),
     "department_manage": ("Department Management", "Department manage করবে"),
+    "browsing_view": ("Browsing Time: View", "Duty-time website usage দেখবে"),
+    "browsing_manage": ("Browsing Time: Manage", "Staff PC connect/disconnect করবে"),
     "audit_view": ("Audit Log: View", "Activity log দেখবে"),
     "settings_view": ("Settings: View", "সাধারণ settings page দেখবে"),
     "whatsapp_settings": ("WhatsApp Settings", "Token, Phone ID ও Webhook দেখবে/পরিবর্তন করবে"),
@@ -1559,7 +1561,7 @@ def reset_employee_all(request: Request, employee_id: int, confirmation: str=For
         for row in payroll_rows:
             c.execute("DELETE FROM payroll_change_logs WHERE payroll_id=?",(row['id'],))
         # Delete dependent records in a safe order. The employee master row is preserved.
-        for table in ("attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
+        for table in ("browsing_usage","browsing_devices","browsing_pair_codes","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
             c.execute(f"DELETE FROM {table} WHERE employee_id=?",(employee_id,))
         for phone in {employee["whatsapp_phone"], employee["phone"]}:
             if phone: c.execute("DELETE FROM conversation_states WHERE phone=?",(re.sub(r"\D","",phone),))
@@ -3913,3 +3915,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 from app.special_duty_ui import router as special_duty_router
 app.include_router(special_duty_router)
+
+from app.browsing import router as browsing_router
+app.include_router(browsing_router)

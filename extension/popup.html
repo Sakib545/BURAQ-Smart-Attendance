@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 14px/1.45 system-ui, sans-serif; width: 300px; margin: 0; padding: 16px; color: #111827; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p { margin: 6px 0; }
+  .muted { color: #6b7280; font-size: 12.5px; }
+  label { display: block; font-size: 12.5px; margin: 10px 0 4px; color: #374151; }
+  input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; }
+  button { margin-top: 12px; width: 100%; padding: 9px; border: 0; border-radius: 8px; background: #111827; color: #fff; font: inherit; cursor: pointer; }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600; }
+  .on { background: #dcfce7; color: #166534; }
+  .off { background: #f3f4f6; color: #4b5563; }
+  .error { color: #b91c1c; font-size: 12.5px; }
+  .box { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; margin-top: 12px; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+  <h1>BURAQ Duty Tracker</h1>
+
+  <div id="paired" hidden>
+    <p><b id="employee"></b></p>
+    <p><span id="state" class="pill off"></span></p>
+    <p class="muted" id="detail"></p>
+    <div class="box muted">
+      এই PC-তে শুধু duty চলাকালীন (Check In থেকে Check Out) website-এর নাম ও সময় record হয়।
+      পুরো link, page-এর লেখা, password বা duty-র বাইরের browsing record হয় না।
+    </div>
+  </div>
+
+  <form id="setup" hidden>
+    <p class="muted">Admin-এর দেওয়া one-time code দিন।</p>
+    <label for="code">Code</label>
+    <input id="code" placeholder="ABCD-EFGH" autocomplete="off" required>
+    <label for="label">PC name (optional)</label>
+    <input id="label" placeholder="Front desk PC" maxlength="60">
+    <label for="server">Server</label>
+    <input id="server" value="https://smart-attendance.pro" required>
+    <button type="submit">Connect</button>
+  </form>
+
+  <p class="error" id="error"></p>
+  <script src="popup.js"></script>
+</body>
+</html>

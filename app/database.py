@@ -683,3 +683,6 @@ def apply_face_ai_migrations() -> None:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE face_samples ADD COLUMN source TEXT NOT NULL DEFAULT 'enroll'"))
     mark_migration("v9.20-face-ai-telemetry")
+    from app.browsing import apply_browsing_migrations
+    apply_browsing_migrations(engine, sqlite)
+    mark_migration("browsing-tracker-v1")
