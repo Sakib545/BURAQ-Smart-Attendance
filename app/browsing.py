@@ -10,13 +10,16 @@ Deliberately narrow, because this is monitoring of real people:
   cannot report under someone else's Staff ID.
 """
 import hashlib
+import io
 import logging
 import re
 import secrets
 import threading
 import time
+import zipfile
 from datetime import datetime, timedelta
 from html import escape
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -44,6 +47,9 @@ CORS = {
     "Access-Control-Max-Age": "86400",
     "Cache-Control": "no-store",
 }
+
+EXTENSION_DIR = Path(__file__).resolve().parent.parent / "extension"
+EXTENSION_FILES = ("manifest.json", "background.js", "popup.html", "popup.js")
 
 _pair_attempts: dict[str, list[float]] = {}
 _pair_lock = threading.Lock()
@@ -237,6 +243,55 @@ async def browsing_report(request: Request):
     return _json({"ok": True, "tracking": True, "saved": saved})
 
 
+# ---------------------------------------------------------- public install page
+
+def _public_base(request: Request) -> str:
+    return settings.public_base_url or str(request.base_url).rstrip("/")
+
+
+@router.get("/tracker/extension.zip")
+def tracker_extension_zip(request: Request):
+    """The extension, with this server's address already filled in."""
+    base = _public_base(request)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in EXTENSION_FILES:
+            path = EXTENSION_DIR / name
+            if not path.is_file():
+                raise HTTPException(404, "Extension files are not installed on this server")
+            content = path.read_text(encoding="utf-8").replace("https://smart-attendance.pro", base)
+            archive.writestr(f"buraq-tracker/{name}", content)
+    return Response(buffer.getvalue(), media_type="application/zip", headers={
+        "Content-Disposition": "attachment; filename=buraq-tracker.zip", "Cache-Control": "no-store"})
+
+
+@router.get("/tracker", response_class=HTMLResponse)
+def tracker_install_page(request: Request, code: str = ""):
+    """Shareable page: staff open it, download the extension and follow the steps.
+    Public on purpose — the extension is useless without an Admin-issued code."""
+    from app.main import layout
+    code = re.sub(r"[^A-Z0-9-]", "", code.upper())[:9]
+    code_box = (
+        f"<div class='notice'>আপনার code: <b style='letter-spacing:.15em;font-size:18px'>{escape(code)}</b>"
+        "<div class='sub'>১৫ মিনিট পর্যন্ত কাজ করবে, একবারই ব্যবহার করা যাবে।</div></div>"
+    ) if code else "<div class='notice'>Code নেই? আপনার Admin/HR-এর কাছ থেকে one-time code নিন।</div>"
+    body = f"""<div class='login' style='max-width:560px'><div class='card'>
+    <div class='title'>BURAQ Duty Tracker</div>
+    <p class='sub'>অফিসের PC-তে Chrome extension install করার নিয়ম। সময় লাগবে ২ মিনিট।</p>
+    <a class='btn' href='/tracker/extension.zip'>⬇ Extension download করুন</a>
+    <ol style='line-height:1.9;padding-left:20px;margin-top:18px'>
+      <li>উপরের button থেকে <b>buraq-tracker.zip</b> download করুন, তারপর file-টিতে right-click করে <b>Extract / Unzip</b> করুন।</li>
+      <li>Chrome-এর address bar-এ লিখুন <b>chrome://extensions</b> এবং Enter চাপুন।</li>
+      <li>উপরে ডান পাশে <b>Developer mode</b> চালু করুন।</li>
+      <li><b>Load unpacked</b> চাপুন এবং unzip করা <b>buraq-tracker</b> folder-টি select করুন।</li>
+      <li>Chrome-এর উপরে puzzle (🧩) icon থেকে <b>BURAQ Duty Browsing Tracker</b> খুলুন, code লিখে <b>Connect</b> চাপুন।</li>
+    </ol>{code_box}
+    <div class='sub' style='margin-top:14px'>এই extension শুধু duty চলাকালীন (Check In থেকে Check Out) website-এর নাম ও সময় record করে।
+    পুরো link, page-এর লেখা, password বা duty-র বাইরের browsing record হয় না।</div>
+    </div></div>"""
+    return layout("BURAQ Duty Tracker", body)
+
+
 # ------------------------------------------------------------------- dashboard
 
 def fmt_duration(seconds) -> str:
@@ -262,6 +317,7 @@ def _seen(epoch) -> str:
 def _page(request: Request, date: str, new_code: dict | None = None, error: str = ""):
     from app.main import has_permission, layout
     manage = has_permission(request, "browsing_manage")
+    share_link = _public_base(request) + "/tracker"
     with get_db() as c:
         employees = c.execute("SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id").fetchall()
         usage = c.execute(
@@ -298,14 +354,18 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
             f"<div class='card'><div class='eyebrow'>One-time code for {escape(new_code['name'])}</div>"
             f"<div class='metric' style='letter-spacing:.18em'>{escape(new_code['code'])}</div>"
             "<div class='sub'>Type this into the BURAQ extension on that employee's PC. Valid for 15 minutes, works once, "
-            "and is not shown again.</div></div><div class='section-gap'></div>"
+            "and is not shown again.</div>"
+            f"<label>Or send this link to the employee (install steps + this code)</label>"
+            f"<input readonly onclick='this.select()' value='{escape(new_code['link'])}'></div><div class='section-gap'></div>"
         )
     pair_form = ""
     if manage:
         options = "".join(f"<option value='{e['id']}'>{escape(e['staff_id'])} — {escape(e['name'])}</option>" for e in employees)
         pair_form = (
-            "<div class='card'><h3>Connect a PC</h3><div class='sub'>Install the extension on the staff PC, then create a code "
-            "for that employee.</div><form method='post' action='/browsing/pair-code'>"
+            "<div class='card'><h3>Connect a PC</h3><div class='sub'>1. Share this install link with staff:</div>"
+            f"<input readonly onclick='this.select()' value='{escape(share_link)}'>"
+            "<div class='sub' style='margin-top:12px'>2. Create a one-time code for the employee.</div>"
+            "<form method='post' action='/browsing/pair-code'>"
             f"<input type='hidden' name='date' value='{date}'><label>Employee</label><select name='employee_id' required>{options}</select>"
             "<button class='btn'>Create code</button></form></div>"
         )
@@ -370,7 +430,9 @@ def browsing_create_code(request: Request, employee_id: int = Form(...), date: s
             (employee_id, _hash(code), now + PAIR_CODE_TTL_SECONDS, str(request.session.get("user_name", ""))),
         )
         audit(request, "browsing_pair_code", "employee", str(employee_id), "Browsing tracker pairing code created", db=c)
-    return _page(request, _valid_date(date), new_code={"name": employee["name"], "code": f"{code[:4]}-{code[4:]}"})
+    return _page(request, _valid_date(date), new_code={
+        "name": employee["name"], "code": f"{code[:4]}-{code[4:]}",
+        "link": f"{_public_base(request)}/tracker?code={code[:4]}-{code[4:]}"})
 
 
 @router.post("/browsing/devices/{device_id}/revoke")

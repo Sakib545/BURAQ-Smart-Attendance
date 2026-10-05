@@ -128,3 +128,16 @@ def test_dashboard_requires_permission():
         base64.b64encode(json.dumps(session).encode())).decode())
     assert viewer.get("/browsing").status_code == 403
     assert viewer.post("/browsing/pair-code", data={"employee_id": 1}).status_code == 403
+
+
+def test_public_install_page_and_download():
+    import io, zipfile
+    client = TestClient(app)
+    page = client.get("/tracker?code=abcd-efgh<script>")
+    assert page.status_code == 200 and "ABCD-EFGH" in page.text and "<script>" not in page.text.split("ABCD-EFGH")[1][:40]
+    download = client.get("/tracker/extension.zip")
+    assert download.status_code == 200 and download.headers["content-type"] == "application/zip"
+    archive = zipfile.ZipFile(io.BytesIO(download.content))
+    assert sorted(archive.namelist()) == sorted(f"buraq-tracker/{n}" for n in browsing.EXTENSION_FILES)
+    assert "http://testserver" in archive.read("buraq-tracker/background.js").decode()
+    assert "/tracker" in _admin_client().get("/browsing").text
