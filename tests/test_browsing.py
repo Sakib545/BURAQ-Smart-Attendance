@@ -139,5 +139,49 @@ def test_public_install_page_and_download():
     assert download.status_code == 200 and download.headers["content-type"] == "application/zip"
     archive = zipfile.ZipFile(io.BytesIO(download.content))
     assert sorted(archive.namelist()) == sorted(f"buraq-tracker/{n}" for n in browsing.EXTENSION_FILES)
+    assert archive.read("buraq-tracker/icons/icon128.png")[:4] == b"\x89PNG"
     assert "http://testserver" in archive.read("buraq-tracker/background.js").decode()
     assert "/tracker" in _admin_client().get("/browsing").text
+
+
+def test_personal_link_pairs_without_a_code(employee):
+    import io, zipfile
+    admin = _admin_client()
+    page = admin.get("/browsing").text
+    with get_db() as c:
+        token = browsing.invite_token(c, employee)
+    assert f"/tracker/i/{token}" in page
+    client = TestClient(app)
+    personal = client.get(f"/tracker/i/{token}")
+    assert personal.status_code == 200 and "Browse Tester" in personal.text
+    archive = zipfile.ZipFile(io.BytesIO(client.get(f"/tracker/i/{token}/extension.zip").content))
+    config = archive.read("buraq-tracker/config.js").decode()
+    assert token in config and "http://testserver" in config
+    paired = client.post("/api/browsing/pair", json={"invite": token})
+    assert paired.status_code == 200 and paired.json()["employee"] == "Browse Tester"
+    auth = {"Authorization": "Bearer " + paired.json()["token"]}
+
+    # Admin cancels the link: it stops working, the connected PC does not.
+    assert admin.post(f"/browsing/invites/{employee}/reset", follow_redirects=False).status_code == 303
+    assert client.get(f"/tracker/i/{token}").status_code == 404
+    assert client.get(f"/tracker/i/{token}/extension.zip").status_code == 404
+    assert client.post("/api/browsing/pair", json={"invite": token}).status_code == 400
+    assert client.get("/api/browsing/status", headers=auth).status_code == 200
+    assert client.post("/api/browsing/pair", json={"invite": token[:-2] + "xx"}).status_code == 400
+
+
+def test_personal_page_reports_connection_and_store_button(employee, monkeypatch):
+    client = TestClient(app)
+    with get_db() as c:
+        token = browsing.invite_token(c, employee)
+    assert client.get(f"/tracker/i/{token}/status").json() == {"connected": False}
+    assert "extension.zip" in client.get(f"/tracker/i/{token}").text
+    client.post("/api/browsing/pair", json={"invite": token})
+    assert client.get(f"/tracker/i/{token}/status").json() == {"connected": True}
+    assert client.get("/tracker/i/not-a-token/status").status_code == 404
+    monkeypatch.setenv("BROWSING_EXTENSION_STORE_URL", "https://chromewebstore.google.com/detail/buraq/abcdefghijklmnopabcdefghijklmnop")
+    page = client.get(f"/tracker/i/{token}").text
+    assert "Add to Chrome" in page and "extension.zip" not in page
+    monkeypatch.setenv("BROWSING_EXTENSION_STORE_URL", "javascript:alert(1)")
+    assert "extension.zip" in client.get(f"/tracker/i/{token}").text
+    assert client.get("/tracker/privacy").status_code == 200

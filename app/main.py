@@ -1561,7 +1561,7 @@ def reset_employee_all(request: Request, employee_id: int, confirmation: str=For
         for row in payroll_rows:
             c.execute("DELETE FROM payroll_change_logs WHERE payroll_id=?",(row['id'],))
         # Delete dependent records in a safe order. The employee master row is preserved.
-        for table in ("browsing_usage","browsing_devices","browsing_pair_codes","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
+        for table in ("browsing_usage","browsing_devices","browsing_pair_codes","browsing_invites","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
             c.execute(f"DELETE FROM {table} WHERE employee_id=?",(employee_id,))
         for phone in {employee["whatsapp_phone"], employee["phone"]}:
             if phone: c.execute("DELETE FROM conversation_states WHERE phone=?",(re.sub(r"\D","",phone),))

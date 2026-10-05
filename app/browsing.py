@@ -6,12 +6,15 @@ Deliberately narrow, because this is monitoring of real people:
   page title, search text or page content;
 * time is accepted only while the employee has an open check-in. Off duty the
   server refuses the data, whatever the extension sends;
-* a PC is tied to one employee by a one-time code an Admin creates, so staff
-  cannot report under someone else's Staff ID.
+* a PC is tied to one employee by that employee's personal install link (or a
+  one-time code) issued by an Admin, so staff cannot pick someone else's
+  Staff ID. The link is signed and an Admin can cancel it at any time.
 """
 import hashlib
 import io
+import json
 import logging
+import os
 import re
 import secrets
 import threading
@@ -24,10 +27,12 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from itsdangerous import BadSignature, URLSafeSerializer
 from sqlalchemy import text
 
 from app.config import settings
 from app.database import get_db
+from app.location_links import _secret
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -49,7 +54,15 @@ CORS = {
 }
 
 EXTENSION_DIR = Path(__file__).resolve().parent.parent / "extension"
-EXTENSION_FILES = ("manifest.json", "background.js", "popup.html", "popup.js")
+EXTENSION_FILES = ("manifest.json", "config.js", "background.js", "popup.html", "popup.js",
+                   "icons/icon16.png", "icons/icon48.png", "icons/icon128.png")
+
+
+def store_url() -> str:
+    """Chrome Web Store listing, once the extension is published there. With it
+    set, install pages offer one-click "Add to Chrome" instead of a download."""
+    value = os.getenv("BROWSING_EXTENSION_STORE_URL", "").strip()
+    return value if value.startswith("https://chromewebstore.google.com/") or value.startswith("https://chrome.google.com/webstore/") else ""
 
 _pair_attempts: dict[str, list[float]] = {}
 _pair_lock = threading.Lock()
@@ -74,6 +87,9 @@ def apply_browsing_migrations(engine, sqlite: bool) -> None:
             seconds {big} NOT NULL DEFAULT 0,
             UNIQUE(employee_id, work_date, domain))""",
         "CREATE INDEX IF NOT EXISTS ix_browsing_usage_date ON browsing_usage(work_date)",
+        f"""CREATE TABLE IF NOT EXISTS browsing_invites(
+            employee_id {big} PRIMARY KEY REFERENCES employees(id),
+            version INTEGER NOT NULL DEFAULT 1)""",
     ]
     with engine.begin() as conn:
         for statement in statements:
@@ -134,6 +150,32 @@ def _device(db, request: Request):
     ).fetchone()
 
 
+def _invite_signer() -> URLSafeSerializer:
+    return URLSafeSerializer(_secret(), salt="buraq-browsing-invite")
+
+
+def invite_token(db, employee_id: int) -> str:
+    """Personal install token. Stable until an Admin cancels the link."""
+    row = db.execute("SELECT version FROM browsing_invites WHERE employee_id=?", (employee_id,)).fetchone()
+    if not row:
+        db.execute("INSERT INTO browsing_invites(employee_id,version) VALUES(?,1)", (employee_id,))
+    return _invite_signer().dumps([int(employee_id), int(row["version"]) if row else 1])
+
+
+def invite_employee(db, token: str):
+    """Active employee a still-valid install token belongs to, else None."""
+    try:
+        employee_id, version = _invite_signer().loads(str(token or ""))
+        employee_id, version = int(employee_id), int(version)
+    except (BadSignature, TypeError, ValueError):
+        return None
+    return db.execute(
+        "SELECT e.id,e.name,e.staff_id FROM employees e JOIN browsing_invites i ON i.employee_id=e.id "
+        "WHERE e.id=? AND i.version=? AND e.is_active",
+        (employee_id, version),
+    ).fetchone()
+
+
 def _pair_throttled(ip: str) -> bool:
     cutoff = time.time() - 600
     with _pair_lock:
@@ -164,16 +206,23 @@ async def browsing_pair(request: Request):
     code = re.sub(r"[^A-Z0-9]", "", str(data.get("code") or "").upper())
     label = str(data.get("label") or "").strip()[:60]
     now = int(time.time())
+    invite = str(data.get("invite") or "")
     with get_db() as c:
-        row = c.execute(
-            "SELECT p.id,p.employee_id,e.name,e.staff_id FROM browsing_pair_codes p JOIN employees e ON e.id=p.employee_id "
-            "WHERE p.code_hash=? AND p.used_at IS NULL AND p.expires_at>=? AND e.is_active",
-            (_hash(code), now),
-        ).fetchone() if code else None
-        if not row:
-            return _json({"ok": False, "message": "Code is wrong or expired."}, 400)
+        if invite:
+            invited = invite_employee(c, invite)
+            if not invited:
+                return _json({"ok": False, "message": "This install link was cancelled. Ask Admin for a new link."}, 400)
+            row = {"employee_id": invited["id"], "name": invited["name"], "staff_id": invited["staff_id"]}
+        else:
+            row = c.execute(
+                "SELECT p.id,p.employee_id,e.name,e.staff_id FROM browsing_pair_codes p JOIN employees e ON e.id=p.employee_id "
+                "WHERE p.code_hash=? AND p.used_at IS NULL AND p.expires_at>=? AND e.is_active",
+                (_hash(code), now),
+            ).fetchone() if code else None
+            if not row:
+                return _json({"ok": False, "message": "Code is wrong or expired."}, 400)
+            c.execute("UPDATE browsing_pair_codes SET used_at=? WHERE id=?", (now, row["id"]))
         token = secrets.token_urlsafe(32)
-        c.execute("UPDATE browsing_pair_codes SET used_at=? WHERE id=?", (now, row["id"]))
         c.execute(
             "INSERT INTO browsing_devices(employee_id,token_hash,label,created_at,last_seen_at) VALUES(?,?,?,?,?)",
             (row["employee_id"], _hash(token), label, now, now),
@@ -249,20 +298,131 @@ def _public_base(request: Request) -> str:
     return settings.public_base_url or str(request.base_url).rstrip("/")
 
 
-@router.get("/tracker/extension.zip")
-def tracker_extension_zip(request: Request):
-    """The extension, with this server's address already filled in."""
-    base = _public_base(request)
+def _extension_zip(base: str, invite: str = "") -> Response:
+    """The extension with this server's address (and a personal link) built in."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for name in EXTENSION_FILES:
             path = EXTENSION_DIR / name
             if not path.is_file():
                 raise HTTPException(404, "Extension files are not installed on this server")
-            content = path.read_text(encoding="utf-8").replace("https://smart-attendance.pro", base)
+            if name == "config.js":
+                content = "self.BURAQ_CONFIG = " + json.dumps({"server": base, "invite": invite}) + ";\n"
+            elif name.endswith(".png"):
+                content = path.read_bytes()
+            else:
+                content = path.read_text(encoding="utf-8").replace("https://smart-attendance.pro", base)
             archive.writestr(f"buraq-tracker/{name}", content)
     return Response(buffer.getvalue(), media_type="application/zip", headers={
         "Content-Disposition": "attachment; filename=buraq-tracker.zip", "Cache-Control": "no-store"})
+
+
+PRIVACY_NOTE = ("<div class='sub' style='margin-top:14px'>এই extension শুধু duty চলাকালীন (Check In থেকে Check Out) "
+                "website-এর নাম ও সময় record করে। পুরো link, page-এর লেখা, password বা duty-র বাইরের browsing record হয় না।</div>")
+INSTALL_STEPS = """
+      <li>উপরের button থেকে <b>buraq-tracker.zip</b> download করুন, তারপর file-টিতে right-click করে <b>Extract / Unzip</b> করুন।</li>
+      <li>Chrome-এর address bar-এ লিখুন <b>chrome://extensions</b> এবং Enter চাপুন।</li>
+      <li>উপরে ডান পাশে <b>Developer mode</b> চালু করুন।</li>
+      <li><b>Load unpacked</b> চাপুন এবং unzip করা <b>buraq-tracker</b> folder-টি select করুন।</li>"""
+
+
+@router.get("/tracker/extension.zip")
+def tracker_extension_zip(request: Request):
+    return _extension_zip(_public_base(request))
+
+
+@router.get("/tracker/i/{token}/extension.zip")
+def tracker_personal_zip(request: Request, token: str):
+    with get_db() as c:
+        if not invite_employee(c, token):
+            raise HTTPException(404, "This install link was cancelled")
+    return _extension_zip(_public_base(request), token)
+
+
+@router.get("/tracker/i/{token}/status")
+def tracker_personal_status(token: str):
+    """Lets the install page show "connected" once the extension has paired."""
+    with get_db() as c:
+        employee = invite_employee(c, token)
+        if not employee:
+            return JSONResponse({"connected": False}, status_code=404, headers={"Cache-Control": "no-store"})
+        recent = c.execute(
+            "SELECT 1 FROM browsing_devices WHERE employee_id=? AND revoked_at IS NULL AND created_at>=? LIMIT 1",
+            (employee["id"], int(time.time()) - 600),
+        ).fetchone()
+    return JSONResponse({"connected": bool(recent)}, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/tracker/privacy", response_class=HTMLResponse)
+def tracker_privacy_page():
+    from app.main import layout
+    body = """<div class='login' style='max-width:640px'><div class='card'>
+    <div class='title'>BURAQ Duty Browsing Tracker — Privacy Policy</div>
+    <p>This Chrome extension is used by BURAQ on office computers together with BURAQ Smart Attendance.</p>
+    <h3>What is collected</h3>
+    <ul style='line-height:1.8;padding-left:20px'>
+      <li>The name of the website in the active tab (for example <b>facebook.com</b>) and how many seconds it was active.</li>
+      <li>This is recorded only while the employee is on duty — between Check In and Check Out.</li>
+    </ul>
+    <h3>What is never collected</h3>
+    <ul style='line-height:1.8;padding-left:20px'>
+      <li>Full page addresses, page titles, page content, searches, form entries, passwords or keystrokes.</li>
+      <li>Any browsing while off duty, and any browsing in Incognito windows.</li>
+    </ul>
+    <h3>How it is used</h3>
+    <p>The data is sent only to the BURAQ Smart Attendance server and is visible to authorised BURAQ HR/Admin staff.
+    It is not sold, shared with third parties, or used for advertising.</p>
+    <h3>Removal</h3>
+    <p>An Admin can disconnect a computer at any time. Removing the extension from Chrome stops all collection.</p>
+    <h3>Contact</h3>
+    <p>Questions: contact the BURAQ HR/Admin office.</p>
+    </div></div>"""
+    return layout("Privacy Policy", body)
+
+
+@router.get("/tracker/i/{token}", response_class=HTMLResponse)
+def tracker_personal_page(request: Request, token: str):
+    """One employee's own install link: the download connects itself, no code to type."""
+    from app.main import layout
+    with get_db() as c:
+        employee = invite_employee(c, token)
+    if not employee:
+        body = ("<div class='login'><div class='card'><div class='title'>BURAQ Duty Tracker</div>"
+                "<div class='notice' style='background:#fee2e2;color:#991b1b'>এই link-টি আর কাজ করছে না। "
+                "Admin/HR-এর কাছ থেকে নতুন link নিন।</div></div></div>")
+        return HTMLResponse(layout("BURAQ Duty Tracker", body).body, status_code=404)
+    store = store_url()
+    if store:
+        install = f"""<p class='sub'>নিচের button চাপুন, তারপর <b>Add to Chrome</b> দিন। আর কিছু করতে হবে না — এই page খোলা রাখুন, নিজে connect হবে।</p>
+    <a class='btn' target='_blank' rel='noopener' href='{escape(store)}'>➕ Add to Chrome</a>"""
+    else:
+        install = f"""<p class='sub'>অফিসের PC-তে Chrome extension install করুন। কোনো code লাগবে না — install হলেই নিজে connect হবে।</p>
+    <a class='btn' href='/tracker/i/{escape(token)}/extension.zip'>⬇ Extension download করুন</a>
+    <ol style='line-height:1.9;padding-left:20px;margin-top:18px'>{INSTALL_STEPS}
+      <li>শেষ। এই page খোলা রাখুন — connect হলে নিচে দেখাবে।</li>
+    </ol>"""
+    body = f"""<div class='login' style='max-width:560px'><div class='card'>
+    <div class='title'>BURAQ Duty Tracker</div>
+    <div class='notice'>এই link শুধু <b>{escape(employee['name'])}</b> ({escape(employee['staff_id'])})-এর জন্য। অন্য কাউকে দেবেন না।</div>
+    {install}
+    <div id='tracker-status' class='notice' style='margin-top:16px'>⏳ Extension-এর অপেক্ষায়…</div>
+    {PRIVACY_NOTE}<div class='sub'><a href='/tracker/privacy'>Privacy policy</a></div>
+    </div></div>
+    <script>
+    (function () {{
+      var box = document.getElementById('tracker-status');
+      function check() {{
+        fetch('/tracker/i/{escape(token)}/status', {{cache: 'no-store'}}).then(function (r) {{ return r.json(); }}).then(function (d) {{
+          if (d.connected) {{
+            box.textContent = 'Connected — এই PC connect হয়েছে। এখন page বন্ধ করতে পারেন।';
+            box.style.background = '#dcfce7'; box.style.color = '#166534';
+          }} else {{ setTimeout(check, 3000); }}
+        }}).catch(function () {{ setTimeout(check, 5000); }});
+      }}
+      check();
+    }})();
+    </script>"""
+    return layout("BURAQ Duty Tracker", body)
 
 
 @router.get("/tracker", response_class=HTMLResponse)
@@ -279,15 +439,9 @@ def tracker_install_page(request: Request, code: str = ""):
     <div class='title'>BURAQ Duty Tracker</div>
     <p class='sub'>অফিসের PC-তে Chrome extension install করার নিয়ম। সময় লাগবে ২ মিনিট।</p>
     <a class='btn' href='/tracker/extension.zip'>⬇ Extension download করুন</a>
-    <ol style='line-height:1.9;padding-left:20px;margin-top:18px'>
-      <li>উপরের button থেকে <b>buraq-tracker.zip</b> download করুন, তারপর file-টিতে right-click করে <b>Extract / Unzip</b> করুন।</li>
-      <li>Chrome-এর address bar-এ লিখুন <b>chrome://extensions</b> এবং Enter চাপুন।</li>
-      <li>উপরে ডান পাশে <b>Developer mode</b> চালু করুন।</li>
-      <li><b>Load unpacked</b> চাপুন এবং unzip করা <b>buraq-tracker</b> folder-টি select করুন।</li>
+    <ol style='line-height:1.9;padding-left:20px;margin-top:18px'>{INSTALL_STEPS}
       <li>Chrome-এর উপরে puzzle (🧩) icon থেকে <b>BURAQ Duty Browsing Tracker</b> খুলুন, code লিখে <b>Connect</b> চাপুন।</li>
-    </ol>{code_box}
-    <div class='sub' style='margin-top:14px'>এই extension শুধু duty চলাকালীন (Check In থেকে Check Out) website-এর নাম ও সময় record করে।
-    পুরো link, page-এর লেখা, password বা duty-র বাইরের browsing record হয় না।</div>
+    </ol>{code_box}{PRIVACY_NOTE}
     </div></div>"""
     return layout("BURAQ Duty Tracker", body)
 
@@ -317,7 +471,8 @@ def _seen(epoch) -> str:
 def _page(request: Request, date: str, new_code: dict | None = None, error: str = ""):
     from app.main import has_permission, layout
     manage = has_permission(request, "browsing_manage")
-    share_link = _public_base(request) + "/tracker"
+    base = _public_base(request)
+    share_link = base + "/tracker"
     with get_db() as c:
         employees = c.execute("SELECT id,staff_id,name FROM employees WHERE is_active ORDER BY staff_id").fetchall()
         usage = c.execute(
@@ -325,6 +480,7 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
             "JOIN employees e ON e.id=u.employee_id WHERE u.work_date=? ORDER BY u.seconds DESC",
             (date,),
         ).fetchall()
+        links = {e["id"]: invite_token(c, e["id"]) for e in employees} if manage else {}
         devices = c.execute(
             "SELECT d.id,d.label,d.last_seen_at,d.created_at,e.name,e.staff_id FROM browsing_devices d "
             "JOIN employees e ON e.id=d.employee_id WHERE d.revoked_at IS NULL ORDER BY e.staff_id,d.id"
@@ -361,13 +517,23 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
     pair_form = ""
     if manage:
         options = "".join(f"<option value='{e['id']}'>{escape(e['staff_id'])} — {escape(e['name'])}</option>" for e in employees)
+        link_rows = "".join(
+            f"<tr><td><b>{escape(e['name'])}</b><div class='sub'>{escape(e['staff_id'])}</div></td>"
+            f"<td><input readonly onclick='this.select()' value='{escape(base + '/tracker/i/' + links[e['id']])}'></td>"
+            f"<td><form method='post' action='/browsing/invites/{e['id']}/reset'><button class='btn secondary' "
+            "title='Cancel the old link and make a new one'>New link</button></form></td></tr>"
+            for e in employees
+        ) or "<tr><td colspan='3'>No active employees.</td></tr>"
         pair_form = (
-            "<div class='card'><h3>Connect a PC</h3><div class='sub'>1. Share this install link with staff:</div>"
-            f"<input readonly onclick='this.select()' value='{escape(share_link)}'>"
-            "<div class='sub' style='margin-top:12px'>2. Create a one-time code for the employee.</div>"
+            "<div class='card' style='overflow:auto'><h3>Install links</h3><div class='sub'>Send each employee their own link. "
+            "They install the extension from it and it connects by itself — no code needed. If a link reaches the wrong "
+            "person, press New link to cancel it.</div>"
+            f"<table><thead><tr><th>Employee</th><th>Personal link</th><th></th></tr></thead><tbody>{link_rows}</tbody></table>"
+            "<details style='margin-top:14px'><summary>Use a one-time code instead</summary>"
+            f"<div class='sub'>General install page: {escape(share_link)}</div>"
             "<form method='post' action='/browsing/pair-code'>"
             f"<input type='hidden' name='date' value='{date}'><label>Employee</label><select name='employee_id' required>{options}</select>"
-            "<button class='btn'>Create code</button></form></div>"
+            "<button class='btn'>Create code</button></form></details></div>"
         )
     body = f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty hours only</div><h2>Browsing Time</h2>
     <div class='sub'>Website names and time while an employee is checked in. Full links, page titles and off-duty browsing are never recorded.</div></div>
@@ -442,4 +608,16 @@ def browsing_revoke_device(request: Request, device_id: int):
     with get_db() as c:
         c.execute("UPDATE browsing_devices SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (int(time.time()), device_id))
         audit(request, "browsing_device_revoke", "browsing_device", str(device_id), "Browsing tracker PC disconnected", db=c)
+    return RedirectResponse("/browsing", 303)
+
+
+@router.post("/browsing/invites/{employee_id}/reset")
+def browsing_reset_invite(request: Request, employee_id: int):
+    """Cancel an employee's install link. PCs already connected keep working."""
+    from app.main import require_permission, audit
+    require_permission(request, "browsing_manage")
+    with get_db() as c:
+        invite_token(c, employee_id)
+        c.execute("UPDATE browsing_invites SET version=version+1 WHERE employee_id=?", (employee_id,))
+        audit(request, "browsing_invite_reset", "employee", str(employee_id), "Browsing tracker install link replaced", db=c)
     return RedirectResponse("/browsing", 303)

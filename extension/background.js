@@ -1,6 +1,8 @@
 // BURAQ Duty Browsing Tracker — background service worker.
 // Stores only {domain: seconds}. Never URLs, titles or page content.
-const DEFAULT_SERVER = "https://smart-attendance.pro";
+importScripts("config.js");
+const CONFIG = self.BURAQ_CONFIG || {};
+const DEFAULT_SERVER = CONFIG.server || "https://smart-attendance.pro";
 const MAX_TICK_SECONDS = 120;   // longer gaps (sleep, worker stopped) are not counted
 const IDLE_SECONDS = 120;
 
@@ -56,7 +58,44 @@ async function api(path, options = {}) {
   return { status: response.status, data };
 }
 
+// Downloaded from a personal install link: connect without asking for a code.
+// A personal install link open in any tab also identifies the employee, so a
+// copy installed from the Chrome Web Store connects itself the same way.
+async function inviteFromTabs() {
+  try {
+    // Filtered here rather than with a URL pattern: patterns cannot carry a port.
+    const prefix = DEFAULT_SERVER + "/tracker/i/";
+    for (const tab of await chrome.tabs.query({})) {
+      const url = tab.url || "";
+      if (!url.startsWith(prefix)) continue;
+      const token = url.slice(prefix.length).split(/[\/?#]/)[0];
+      if (token) return token;
+    }
+  } catch (e) { /* no matching tab */ }
+  return "";
+}
+
+async function autoPair() {
+  const s = await get(["token", "inviteRejected"]);
+  if (s.token) return;
+  const invite = CONFIG.invite || (await inviteFromTabs());
+  if (!invite || s.inviteRejected === invite) return;
+  try {
+    await set({ server: DEFAULT_SERVER });
+    const result = await api("/api/browsing/pair", { method: "POST", body: JSON.stringify({ invite }) });
+    if (result.status === 200 && result.data.ok) {
+      await set({ token: result.data.token, employee: result.data.employee, tracking: !!result.data.tracking,
+                  pending: {}, current: "", lastTick: Date.now(), error: "" });
+    } else if (result.status === 400) {
+      await set({ inviteRejected: invite, error: result.data.message || "Install link is no longer valid." });
+    }
+  } catch (e) {
+    await set({ error: "Cannot reach the server. Will retry." });
+  }
+}
+
 async function sync() {
+  await autoPair();
   await tick();
   const s = await get(["token", "pending", "tracking"]);
   if (!s.token) return;
@@ -92,6 +131,7 @@ async function sync() {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create("buraq-sync", { periodInMinutes: 1 });
   chrome.idle.setDetectionInterval(IDLE_SECONDS);
+  sync();
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create("buraq-sync", { periodInMinutes: 1 });
@@ -99,7 +139,10 @@ chrome.runtime.onStartup.addListener(() => {
 });
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === "buraq-sync") sync(); });
 chrome.tabs.onActivated.addListener(() => tick());
-chrome.tabs.onUpdated.addListener((id, change) => { if (change.url) tick(); });
+chrome.tabs.onUpdated.addListener((id, change, tab) => {
+  if (change.url) tick();
+  if (change.status === "complete" && (tab.url || "").startsWith(DEFAULT_SERVER + "/tracker/i/")) sync();
+});
 chrome.windows.onFocusChanged.addListener(() => tick());
 chrome.idle.onStateChanged.addListener(() => tick());
 
