@@ -30,6 +30,8 @@ async def _send(to: str, payload: dict):
             logger.error("WhatsApp API error %s: %s", response.status_code, response.text)
             return {"sent": False, "status_code": response.status_code, "error": response.text}
         data = response.json()
+        logger.info("WhatsApp accepted to=%s type=%s message_id=%s", to, payload.get("type", "unknown"),
+                    (data.get("messages") or [{}])[0].get("id"))
         log("outgoing", to, payload.get("type", "unknown"), str(payload), data.get("messages", [{}])[0].get("id"))
         return {"sent": True, "data": data}
     except Exception as exc:
@@ -222,10 +224,23 @@ async def handle(payload: dict, public_base_url: str = ""):
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
+            # Meta accepts a send with HTTP 200 and reports the real delivery
+            # outcome later as a status event. Without logging it, an accepted
+            # but undelivered reply (billing, 24h window, blocked number) is
+            # invisible.
+            for status in value.get("statuses", []):
+                outcome = status.get("status", "unknown")
+                if outcome == "failed":
+                    logger.error("WhatsApp delivery FAILED to=%s message_id=%s errors=%s",
+                                 status.get("recipient_id"), status.get("id"), status.get("errors"))
+                else:
+                    logger.info("WhatsApp delivery status=%s to=%s message_id=%s",
+                                outcome, status.get("recipient_id"), status.get("id"))
             for message in value.get("messages", []):
                 phone = message.get("from", "")
                 typ = message.get("type", "unknown")
                 message_id = message.get("id")
+                logger.info("WhatsApp incoming from=%s type=%s message_id=%s", phone, typ, message_id)
                 if message_id and not log("incoming", phone, typ, str(message), message_id):
                     logger.info("Ignored duplicate webhook message %s", message_id)
                     continue
