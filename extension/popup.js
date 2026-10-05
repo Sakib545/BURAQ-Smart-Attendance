@@ -22,7 +22,7 @@ $("setup").addEventListener("submit", (event) => {
   event.preventDefault();
   $("error").textContent = "Connecting…";
   chrome.runtime.sendMessage(
-    { type: "pair", code: $("code").value, label: $("label").value, server: $("server").value },
+    { type: "pair", staff_id: $("staff").value.trim(), server: $("server").value },
     (result) => {
       if (result && result.ok) render();
       else $("error").textContent = (result && result.message) || "Could not connect.";

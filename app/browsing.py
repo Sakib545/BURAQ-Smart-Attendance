@@ -207,8 +207,20 @@ async def browsing_pair(request: Request):
     label = str(data.get("label") or "").strip()[:60]
     now = int(time.time())
     invite = str(data.get("invite") or "")
+    staff_id = str(data.get("staff_id") or "").strip()[:40]
     with get_db() as c:
-        if invite:
+        if staff_id and not invite and not code:
+            # Self-service: the employee types their own Staff ID in the
+            # extension. Nothing proves it is theirs, so these PCs are labelled
+            # in the dashboard for an Admin to glance over.
+            found = c.execute(
+                "SELECT id,name,staff_id FROM employees WHERE UPPER(staff_id)=UPPER(?) AND is_active", (staff_id,)
+            ).fetchone()
+            if not found:
+                return _json({"ok": False, "message": "এই Staff ID পাওয়া যায়নি। আবার দেখে লিখুন।"}, 400)
+            row = {"employee_id": found["id"], "name": found["name"], "staff_id": found["staff_id"]}
+            label = (label or "PC") + " (Staff ID)"
+        elif invite:
             invited = invite_employee(c, invite)
             if not invited:
                 return _json({"ok": False, "message": "This install link was cancelled. Ask Admin for a new link."}, 400)
@@ -497,8 +509,13 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
         f"<td><b>{fmt_duration(p['total'])}</b></td><td>{' &nbsp;•&nbsp; '.join(p['top'])}</td></tr>"
         for eid, p in ranked
     ) or "<tr><td colspan='3'>No browsing recorded for this date.</td></tr>"
+    per_employee: dict[str, int] = {}
+    for d in devices:
+        per_employee[d["staff_id"]] = per_employee.get(d["staff_id"], 0) + 1
     device_rows = "".join(
-        f"<tr><td><b>{escape(d['name'])}</b><div class='sub'>{escape(d['staff_id'])}</div></td><td>{escape(d['label'] or 'PC')}</td>"
+        f"<tr><td><b>{escape(d['name'])}</b><div class='sub'>{escape(d['staff_id'])}</div></td><td>{escape(d['label'] or 'PC')}"
+        + ("<div class='sub' style='color:#b45309'>This employee has more than one PC — check</div>" if per_employee[d["staff_id"]] > 1 else "")
+        + "</td>"
         f"<td>{_seen(d['last_seen_at'])}</td><td>"
         + (f"<form method='post' action='/browsing/devices/{d['id']}/revoke'><button class='btn danger'>Disconnect</button></form>" if manage else "")
         + "</td></tr>"

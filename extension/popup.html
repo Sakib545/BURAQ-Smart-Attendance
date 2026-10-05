@@ -34,13 +34,10 @@
   <p id="auto" class="muted" hidden>Connect হচ্ছে… কয়েক সেকেন্ড অপেক্ষা করুন।</p>
 
   <form id="setup" hidden>
-    <p class="muted">Admin-এর দেওয়া one-time code দিন।</p>
-    <label for="code">Code</label>
-    <input id="code" placeholder="ABCD-EFGH" autocomplete="off" required>
-    <label for="label">PC name (optional)</label>
-    <input id="label" placeholder="Front desk PC" maxlength="60">
-    <label for="server">Server</label>
-    <input id="server" value="https://smart-attendance.pro" required>
+    <p class="muted">আপনার নিজের Staff ID লিখে Connect চাপুন।</p>
+    <label for="staff">Staff ID</label>
+    <input id="staff" placeholder="যেমন: B001" autocomplete="off" maxlength="40" required>
+    <input id="server" type="hidden" value="https://smart-attendance.pro">
     <button type="submit">Connect</button>
   </form>
 

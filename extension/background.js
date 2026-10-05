@@ -154,7 +154,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         await set({ server, token: "" });
         const result = await api("/api/browsing/pair", {
           method: "POST",
-          body: JSON.stringify({ code: message.code, label: message.label }),
+          body: JSON.stringify({ staff_id: message.staff_id, code: message.code, label: message.label }),
         });
         if (result.status === 200 && result.data.ok) {
           await set({ token: result.data.token, employee: result.data.employee, tracking: !!result.data.tracking,

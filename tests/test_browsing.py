@@ -185,3 +185,20 @@ def test_personal_page_reports_connection_and_store_button(employee, monkeypatch
     monkeypatch.setenv("BROWSING_EXTENSION_STORE_URL", "javascript:alert(1)")
     assert "extension.zip" in client.get(f"/tracker/i/{token}").text
     assert client.get("/tracker/privacy").status_code == 200
+
+
+def test_staff_id_pairs_from_the_extension(employee):
+    with get_db() as c:
+        staff_id = c.execute("SELECT staff_id FROM employees WHERE id=?", (employee,)).fetchone()["staff_id"]
+    client = TestClient(app)
+    assert client.post("/api/browsing/pair", json={"staff_id": "NO-SUCH-ID"}).status_code == 400
+    paired = client.post("/api/browsing/pair", json={"staff_id": f"  {staff_id.lower()} "})
+    assert paired.status_code == 200 and paired.json()["employee"] == "Browse Tester"
+    auth = {"Authorization": "Bearer " + paired.json()["token"]}
+    assert client.get("/api/browsing/status", headers=auth).status_code == 200
+    client.post("/api/browsing/pair", json={"staff_id": staff_id})
+    page = _admin_client().get("/browsing").text
+    assert "(Staff ID)" in page and "more than one PC" in page
+    with get_db() as c:
+        c.execute("UPDATE employees SET is_active=? WHERE id=?", (False, employee))
+    assert client.post("/api/browsing/pair", json={"staff_id": staff_id}).status_code == 400
