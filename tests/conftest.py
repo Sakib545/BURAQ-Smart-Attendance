@@ -30,3 +30,18 @@ os.environ.setdefault("CONFIG_ENCRYPTION_KEY", "test-config-secret-0123456789012
 
 # One clean database for the run. Deleted here and nowhere else.
 TEST_DB.unlink(missing_ok=True)
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _forged_session_hr_account():
+    """Tests forge session cookies for hr_id 987654. Sessions are now checked
+    against hr_accounts on every request, so that account has to exist."""
+    from app.database import get_db, init_db
+    init_db()
+    with get_db() as c:
+        if not c.execute("SELECT 1 FROM hr_accounts WHERE id=?", (987654,)).fetchone():
+            c.execute("INSERT INTO hr_accounts(id,name,email,password_hash,role,is_active) VALUES(?,?,?,?,?,?)",
+                      (987654, "Test Session User", "session-user@test.invalid", "x", "viewer", True))
+    yield

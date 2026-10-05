@@ -84,6 +84,8 @@ class Settings:
     def production_warnings(self) -> list[str]:
         """Non-critical integrations must never prevent attendance startup."""
         warnings: list[str] = []
+        if not os.getenv("WHATSAPP_APP_SECRET", "").strip():
+            warnings.append("WHATSAPP_APP_SECRET is not set; incoming WhatsApp webhooks are not signature-verified")
         backup_key = os.getenv("BACKUP_ENCRYPTION_KEY", "").strip()
         if backup_key and len(backup_key) < 32:
             warnings.append("BACKUP_ENCRYPTION_KEY is short; CONFIG_ENCRYPTION_KEY fallback will be used")

@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -174,6 +175,12 @@ def current_permissions(request: Request):
     if not account_id:
         return set()
     with get_db() as c:
+        # A disabled or deleted account must lose access immediately, not when
+        # its signed session cookie eventually expires.
+        account = c.execute("SELECT is_active FROM hr_accounts WHERE id=?", (account_id,)).fetchone()
+        if not account or not account["is_active"]:
+            request.session.clear()
+            raise HTTPException(401, "Login required")
         rows = c.execute("SELECT permission FROM account_permissions WHERE account_id=?", (account_id,)).fetchall()
         raw = {r["permission"] for r in rows}
         if "__configured__" in raw:
@@ -343,12 +350,46 @@ def save_setup(request: Request, email: str = Form(...), password: str = Form(..
 @app.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
     msg = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Email অথবা Password সঠিক নয়।</div>" if error else ""
+    if error == "locked": msg = "<div class='notice' style='background:#fee2e2;color:#991b1b'>অনেকবার ভুল চেষ্টা হয়েছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।</div>"
     body = f"""<div class='login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>Super Admin, Admin এবং HR-এর জন্য একটি নিরাপদ login</p>{msg}<form method='post'><label>Email</label><input type='email' name='email' placeholder='name@buraq.com' autocomplete='username' required><label>Password</label><input type='password' name='password' placeholder='Password' autocomplete='current-password' required><button class='btn' type='submit'>Sign In</button></form></div></div>"""
     return layout("Unified Login", body)
+
+LOGIN_MAX_FAILURES = int(os.getenv("LOGIN_MAX_FAILURES", "8"))
+LOGIN_LOCK_SECONDS = int(os.getenv("LOGIN_LOCK_SECONDS", "600"))
+_login_failures: dict[str, list[float]] = {}
+_login_lock = threading.Lock()
+
+def _login_keys(request: Request, email: str) -> list[str]:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[-1].strip()
+    ip = forwarded or (request.client.host if request.client else "unknown")
+    return [f"ip:{ip}", f"email:{email}"]
+
+def _login_blocked(keys: list[str]) -> bool:
+    cutoff = time.time() - LOGIN_LOCK_SECONDS
+    with _login_lock:
+        for key in list(_login_failures):
+            recent = [t for t in _login_failures[key] if t > cutoff]
+            if recent: _login_failures[key] = recent
+            else: del _login_failures[key]
+        return any(len(_login_failures.get(key, [])) >= LOGIN_MAX_FAILURES for key in keys)
+
+def _login_failed(keys: list[str]) -> None:
+    with _login_lock:
+        for key in keys:
+            _login_failures.setdefault(key, []).append(time.time())
+
+def _login_succeeded(keys: list[str]) -> None:
+    with _login_lock:
+        for key in keys:
+            _login_failures.pop(key, None)
 
 @app.post("/login")
 def login(request: Request, password: str = Form(...), email: str = Form(...)):
     normalized_email = email.strip().lower()
+    throttle_keys = _login_keys(request, normalized_email)
+    if _login_blocked(throttle_keys):
+        logger.warning("Login throttled for %s", throttle_keys[0])
+        return RedirectResponse("/login?error=locked", 303)
     admin_email = get_setting("admin_email", "admin@buraq.com").strip().lower()
     admin_hash = get_setting("admin_password_hash")
 
@@ -356,6 +397,7 @@ def login(request: Request, password: str = Form(...), email: str = Form(...)):
         request.session.clear()
         request.session["admin"] = True
         request.session["role"] = "super_admin"
+        _login_succeeded(throttle_keys)
         request.session["user_name"] = get_setting("admin_name", "Super Admin")
         audit(request, "login", "user_account", "super_admin", "super_admin login")
         return RedirectResponse("/dashboard", 303)
@@ -366,6 +408,7 @@ def login(request: Request, password: str = Form(...), email: str = Form(...)):
             (normalized_email, True),
         ).fetchone()
         if row and verify_password(password, row["password_hash"]):
+            _login_succeeded(throttle_keys)
             request.session.clear()
             request.session["hr_id"] = row["id"]
             request.session["role"] = row["role"]
@@ -375,6 +418,7 @@ def login(request: Request, password: str = Form(...), email: str = Form(...)):
             audit(request, "login", "user_account", str(row["id"]), f"{row['role']} login", db=c)
             return RedirectResponse("/dashboard", 303)
 
+    _login_failed(throttle_keys)
     return RedirectResponse("/login?error=1", 303)
 
 @app.get("/logout")
@@ -3697,7 +3741,8 @@ def review_duplicate(request: Request, fingerprint_id: int, action: str, backgro
 
 @app.get("/webhook/whatsapp", response_class=PlainTextResponse)
 def verify(hub_mode: str | None = Query(None, alias="hub.mode"), hub_verify_token: str | None = Query(None, alias="hub.verify_token"), hub_challenge: str | None = Query(None, alias="hub.challenge")):
-    if hub_mode == "subscribe" and hub_verify_token == get_setting("whatsapp_verify_token"):
+    expected = get_setting("whatsapp_verify_token") or ""
+    if hub_mode == "subscribe" and expected and hmac.compare_digest((hub_verify_token or "").encode(), expected.encode()):
         return hub_challenge or ""
     raise HTTPException(403, "Webhook verification failed")
 
@@ -3845,7 +3890,21 @@ async def attendance_location_submit(request: Request):
 
 @app.post("/webhook/whatsapp")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
-    payload = await request.json()
+    raw = await request.body()
+    # Meta signs every delivery with the App Secret. Without this check anyone
+    # who knows the URL can forge messages and locations for any employee.
+    app_secret = os.getenv("WHATSAPP_APP_SECRET", "").strip()
+    if app_secret:
+        expected = "sha256=" + hmac.new(app_secret.encode(), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(request.headers.get("x-hub-signature-256", "").encode(), expected.encode()):
+            logger.warning("Rejected WhatsApp webhook with invalid signature")
+            raise HTTPException(403, "Invalid signature")
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Invalid payload")
     # Meta needs an immediate 2xx. Download and Face AI continue only after the
     # acknowledgement, preventing Meta retries and lost selfie responses.
     background_tasks.add_task(handle, payload, settings.public_base_url or base_url(request))
