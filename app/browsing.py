@@ -493,22 +493,35 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
             (date,),
         ).fetchall()
         links = {e["id"]: invite_token(c, e["id"]) for e in employees} if manage else {}
+        categories = {r["domain"]: r["category"] for r in c.execute("SELECT domain,category FROM browsing_site_categories").fetchall()}
         devices = c.execute(
             "SELECT d.id,d.label,d.last_seen_at,d.created_at,e.name,e.staff_id FROM browsing_devices d "
             "JOIN employees e ON e.id=d.employee_id WHERE d.revoked_at IS NULL ORDER BY e.staff_id,d.id"
         ).fetchall()
     people: dict[int, dict] = {}
     for row in usage:
-        person = people.setdefault(row["employee_id"], {"name": row["name"], "staff_id": row["staff_id"], "total": 0, "top": []})
+        person = people.setdefault(row["employee_id"], {"name": row["name"], "staff_id": row["staff_id"], "total": 0, "top": [], "work": 0, "sorted": 0})
         person["total"] += int(row["seconds"])
+        if row["domain"] in categories:
+            person["sorted"] += int(row["seconds"])
+            if categories[row["domain"]] == "work":
+                person["work"] += int(row["seconds"])
         if len(person["top"]) < 3:
             person["top"].append(f"{escape(row['domain'])} <span class='sub'>{fmt_duration(row['seconds'])}</span>")
     ranked = sorted(people.items(), key=lambda item: item[1]["total"], reverse=True)
+
+    def work_share(p) -> str:
+        # Only websites that have a category count, so unsorted time is not
+        # silently treated as "not work".
+        if not p["sorted"]:
+            return "<span class='sub'>not sorted yet</span>"
+        return f"<b>{round(p['work'] * 100 / p['sorted'])}%</b> <span class='sub'>work</span>"
+
     rows = "".join(
         f"<tr><td><a href='/browsing/{eid}?date={date}'><b>{escape(p['name'])}</b></a><div class='sub'>{escape(p['staff_id'])}</div></td>"
-        f"<td><b>{fmt_duration(p['total'])}</b></td><td>{' &nbsp;•&nbsp; '.join(p['top'])}</td></tr>"
+        f"<td><b>{fmt_duration(p['total'])}</b></td><td>{work_share(p)}</td><td>{' &nbsp;•&nbsp; '.join(p['top'])}</td></tr>"
         for eid, p in ranked
-    ) or "<tr><td colspan='3'>No browsing recorded for this date.</td></tr>"
+    ) or "<tr><td colspan='4'>No browsing recorded for this date.</td></tr>"
     per_employee: dict[str, int] = {}
     for d in devices:
         per_employee[d["staff_id"]] = per_employee.get(d["staff_id"], 0) + 1
@@ -555,7 +568,7 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
     body = f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty hours only</div><h2>Browsing Time</h2>
     <div class='sub'>Website names and time while an employee is checked in. Full links, page titles and off-duty browsing are never recorded.</div></div>
     <form method='get' class='actions'><input type='date' name='date' value='{date}'><button class='btn secondary'>Open</button></form></div>
-    <div class='card' style='overflow:auto'><table><thead><tr><th>Employee</th><th>Total</th><th>Top websites</th></tr></thead><tbody>{rows}</tbody></table></div>
+    <div class='card' style='overflow:auto'><table><thead><tr><th>Employee</th><th>Total</th><th>Work share</th><th>Top websites</th></tr></thead><tbody>{rows}</tbody></table></div>
     <div class='section-gap'></div><div class='two'>{pair_form}<div class='card' style='overflow:auto'><h3>Connected PCs</h3>
     <table><thead><tr><th>Employee</th><th>PC</th><th>Last seen</th><th></th></tr></thead><tbody>{device_rows}</tbody></table></div></div>"""
     return layout("Browsing Time", body, request, "browsing")
@@ -570,10 +583,14 @@ def browsing_page(request: Request, date: str = "", error: str = ""):
 
 @router.get("/browsing/{employee_id}", response_class=HTMLResponse)
 def browsing_employee_page(request: Request, employee_id: int, date: str = ""):
-    from app.main import require_permission, layout
+    from app.main import require_permission, has_permission, layout
+    from app.ai_insights import CATEGORIES
     require_permission(request, "browsing_view")
+    manage = has_permission(request, "browsing_manage")
     date = _valid_date(date)
     with get_db() as c:
+        categories = {r["domain"]: (r["category"], r["source"]) for r in c.execute(
+            "SELECT domain,category,source FROM browsing_site_categories").fetchall()}
         employee = c.execute("SELECT name,staff_id FROM employees WHERE id=?", (employee_id,)).fetchone()
         if not employee:
             raise HTTPException(404, "Employee not found")
@@ -583,17 +600,32 @@ def browsing_employee_page(request: Request, employee_id: int, date: str = ""):
         ).fetchall()
     total = sum(int(r["seconds"]) for r in usage)
     top = int(usage[0]["seconds"]) if usage else 1
+    back = f"/browsing/{employee_id}?date={date}"
+
+    def category_cell(domain: str) -> str:
+        current, source = categories.get(domain, ("", ""))
+        if not manage:
+            return escape(CATEGORIES.get(current, "Not sorted"))
+        options = "".join(
+            f"<option value='{key}'{' selected' if key == current else ''}>{escape(label)}</option>"
+            for key, label in CATEGORIES.items())
+        hint = "" if current else "<option value='' selected disabled>Not sorted</option>"
+        note = " <span class='sub'>set by you</span>" if source == "manual" else ""
+        return (f"<form method='post' action='/browsing/categories' style='display:flex;gap:6px;align-items:center'>"
+                f"<input type='hidden' name='domain' value='{escape(domain)}'><input type='hidden' name='back' value='{back}'>"
+                f"<select name='category' onchange='this.form.submit()'>{hint}{options}</select>{note}</form>")
+
     rows = "".join(
-        f"<tr><td><b>{escape(r['domain'])}</b></td><td>{fmt_duration(r['seconds'])}</td>"
-        f"<td style='width:45%'><div style='background:var(--line,#e5e7eb);border-radius:6px;height:8px'>"
+        f"<tr><td><b>{escape(r['domain'])}</b></td><td>{category_cell(r['domain'])}</td><td>{fmt_duration(r['seconds'])}</td>"
+        f"<td style='width:35%'><div style='background:var(--line,#e5e7eb);border-radius:6px;height:8px'>"
         f"<div style='width:{max(2, round(int(r['seconds']) * 100 / top))}%;height:8px;border-radius:6px;background:var(--accent,#2563eb)'></div></div></td></tr>"
         for r in usage
-    ) or "<tr><td colspan='3'>No browsing recorded for this date.</td></tr>"
+    ) or "<tr><td colspan='4'>No browsing recorded for this date.</td></tr>"
     body = f"""<div class='hero'><div><div class='eyebrow'>Browsing Time • {escape(date)}</div><h2>{escape(employee['name'])}</h2>
     <div class='sub'>{escape(employee['staff_id'])} • Total {fmt_duration(total)} across {len(usage)} websites</div></div>
     <form method='get' class='actions'><input type='date' name='date' value='{date}'><button class='btn secondary'>Open</button>
     <a class='btn secondary' href='/browsing?date={date}'>Back</a></form></div>
-    <div class='card' style='overflow:auto'><table><thead><tr><th>Website</th><th>Time</th><th></th></tr></thead><tbody>{rows}</tbody></table></div>"""
+    <div class='card' style='overflow:auto'><table><thead><tr><th>Website</th><th>Type</th><th>Time</th><th></th></tr></thead><tbody>{rows}</tbody></table></div>"""
     return layout("Browsing Time", body, request, "browsing")
 
 

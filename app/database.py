@@ -686,3 +686,6 @@ def apply_face_ai_migrations() -> None:
     from app.browsing import apply_browsing_migrations
     apply_browsing_migrations(engine, sqlite)
     mark_migration("browsing-tracker-v1")
+    from app.ai_insights import apply_ai_migrations
+    apply_ai_migrations(engine, sqlite)
+    mark_migration("ai-insights-v1")

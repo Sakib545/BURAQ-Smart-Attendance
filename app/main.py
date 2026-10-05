@@ -31,6 +31,7 @@ from app.employee_seed import import_employees
 from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_selfie_review_result, send_text
 from app.location_links import verify_location_token
 from app.reminders import reminder_worker
+from app.ai_insights import ai_worker
 from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
@@ -146,6 +147,8 @@ PERMISSION_CATALOG = {
     "department_manage": ("Department Management", "Department manage করবে"),
     "browsing_view": ("Browsing Time: View", "Duty-time website usage দেখবে"),
     "browsing_manage": ("Browsing Time: Manage", "Staff PC connect/disconnect করবে"),
+    "ai_view": ("AI Insights: View", "AI summary, unusual days ও প্রশ্নের উত্তর দেখবে"),
+    "ai_manage": ("AI Insights: Run", "AI report এখনই চালাবে"),
     "audit_view": ("Audit Log: View", "Activity log দেখবে"),
     "settings_view": ("Settings: View", "সাধারণ settings page দেখবে"),
     "whatsapp_settings": ("WhatsApp Settings", "Token, Phone ID ও Webhook দেখবে/পরিবর্তন করবে"),
@@ -280,10 +283,11 @@ def startup():
 async def start_reminders():
     app.state.reminder_task=asyncio.create_task(reminder_worker())
     app.state.payroll_backup_task=asyncio.create_task(payroll_backup_worker())
+    app.state.ai_task=asyncio.create_task(ai_worker())
 
 @app.on_event("shutdown")
 async def stop_reminders():
-    for name in ("reminder_task","payroll_backup_task"):
+    for name in ("reminder_task","payroll_backup_task","ai_task"):
         task=getattr(app.state,name,None)
         if task:
             task.cancel()
@@ -1561,7 +1565,7 @@ def reset_employee_all(request: Request, employee_id: int, confirmation: str=For
         for row in payroll_rows:
             c.execute("DELETE FROM payroll_change_logs WHERE payroll_id=?",(row['id'],))
         # Delete dependent records in a safe order. The employee master row is preserved.
-        for table in ("browsing_usage","browsing_devices","browsing_pair_codes","browsing_invites","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
+        for table in ("ai_reports","browsing_usage","browsing_devices","browsing_pair_codes","browsing_invites","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
             c.execute(f"DELETE FROM {table} WHERE employee_id=?",(employee_id,))
         for phone in {employee["whatsapp_phone"], employee["phone"]}:
             if phone: c.execute("DELETE FROM conversation_states WHERE phone=?",(re.sub(r"\D","",phone),))
@@ -3918,3 +3922,6 @@ app.include_router(special_duty_router)
 
 from app.browsing import router as browsing_router
 app.include_router(browsing_router)
+
+from app.ai_insights import router as ai_router
+app.include_router(ai_router)
