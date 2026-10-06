@@ -73,7 +73,7 @@ def test_off_duty_reports_are_not_saved(employee):
     client = TestClient(app)
     assert client.get("/api/browsing/status", headers=auth).json()["tracking"] is False
     r = client.post("/api/browsing/report", headers=auth, json={"entries": [{"domain": "facebook.com", "seconds": 120}]})
-    assert r.json() == {"ok": True, "tracking": False, "saved": 0}
+    assert r.json() == {"ok": True, "tracking": False, "saved": 0, "idle_seconds": browsing.idle_minutes() * 60}
     _check_in(employee, checked_out=True)
     client.post("/api/browsing/report", headers=auth, json={"entries": [{"domain": "facebook.com", "seconds": 120}]})
     assert _usage(employee) == {}
@@ -202,3 +202,60 @@ def test_staff_id_pairs_from_the_extension(employee):
     with get_db() as c:
         c.execute("UPDATE employees SET is_active=? WHERE id=?", (False, employee))
     assert client.post("/api/browsing/pair", json={"staff_id": staff_id}).status_code == 400
+
+
+def test_outside_and_no_signal_are_tracked(employee):
+    client = TestClient(app)
+    _, auth = _pair(employee)
+    date = _check_in(employee, hours_ago=2)
+    with get_db() as c:   # pretend the PC last checked in a minute ago
+        c.execute("UPDATE browsing_devices SET last_seen_at=?,last_report_at=? WHERE employee_id=?",
+                  (int(time.time()) - 60, int(time.time()) - 60, employee))
+    r = client.post("/api/browsing/report", headers=auth, json={"entries": [
+        {"domain": "~outside", "seconds": 40}, {"domain": "facebook.com", "seconds": 20}]})
+    assert r.json()["saved"] == 20
+    assert _usage(employee) == {"facebook.com": 20}                       # "outside" is never a website
+    with get_db() as c:
+        row = c.execute("SELECT online_seconds,outside_seconds FROM browsing_presence WHERE employee_id=? AND work_date=?",
+                        (employee, date)).fetchone()
+        assert int(row["outside_seconds"]) == 40 and 55 <= int(row["online_seconds"]) <= 65
+        assert 7100 <= browsing.duty_seconds(c, employee, date) <= 7300
+    client.get("/api/browsing/status", headers=auth)                       # heartbeats count as signal too
+    with get_db() as c:
+        assert int(c.execute("SELECT online_seconds FROM browsing_presence WHERE employee_id=?", (employee,)).fetchone()["online_seconds"]) <= 70
+    page = _admin_client().get(f"/browsing?date={date}").text
+    assert "Outside tracker" in page and "No signal" in page and "Browse Tester" in page
+    assert "1h 5" in page                                                  # ~2h duty, ~1 min signal -> ~1h 58m silent
+
+
+def test_silent_tracker_still_listed(employee):
+    _pair(employee)
+    date = _check_in(employee, hours_ago=3)
+    page = _admin_client().get(f"/browsing?date={date}").text
+    assert "Browse Tester" in page and "100%" in page                      # connected, on duty, never heard from
+
+
+def test_idle_rule_and_idle_time(employee):
+    client = TestClient(app)
+    admin = _admin_client()
+    assert admin.post("/browsing/idle-rule", data={"minutes": 10}, follow_redirects=False).status_code == 303
+    _, auth = _pair(employee)
+    assert client.get("/api/browsing/status", headers=auth).json()["idle_seconds"] == 600
+    admin.post("/browsing/idle-rule", data={"minutes": 99})                # clamped
+    assert browsing.idle_minutes() == browsing.IDLE_MAX_MINUTES
+    admin.post("/browsing/idle-rule", data={"minutes": 6})
+    date = _check_in(employee, hours_ago=1)
+    with get_db() as c:
+        c.execute("UPDATE browsing_devices SET last_seen_at=?,last_report_at=? WHERE employee_id=?",
+                  (int(time.time()) - 400, int(time.time()) - 400, employee))
+    r = client.post("/api/browsing/report", headers=auth, json={"entries": [
+        {"domain": "~idle", "seconds": 360}, {"domain": "facebook.com", "seconds": 30}]})
+    assert r.json()["saved"] == 30 and r.json()["idle_seconds"] == 360
+    assert _usage(employee) == {"facebook.com": 30}
+    with get_db() as c:
+        assert int(c.execute("SELECT idle_seconds FROM browsing_presence WHERE employee_id=? AND work_date=?",
+                             (employee, date)).fetchone()["idle_seconds"]) == 360
+    page = admin.get(f"/browsing?date={date}").text
+    assert "<th>Idle</th>" in page and "Idle rule" in page and "6 minutes or more" in page
+    viewer = TestClient(app)
+    assert viewer.post("/browsing/idle-rule", data={"minutes": 2}).status_code == 401

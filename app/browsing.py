@@ -90,10 +90,19 @@ def apply_browsing_migrations(engine, sqlite: bool) -> None:
         f"""CREATE TABLE IF NOT EXISTS browsing_invites(
             employee_id {big} PRIMARY KEY REFERENCES employees(id),
             version INTEGER NOT NULL DEFAULT 1)""",
+        f"""CREATE TABLE IF NOT EXISTS browsing_presence(
+            id {pk}, employee_id {big} NOT NULL REFERENCES employees(id),
+            work_date TEXT NOT NULL, online_seconds {big} NOT NULL DEFAULT 0,
+            outside_seconds {big} NOT NULL DEFAULT 0, idle_seconds {big} NOT NULL DEFAULT 0,
+            UNIQUE(employee_id, work_date))""",
     ]
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
+    from sqlalchemy import inspect
+    if "idle_seconds" not in {col["name"] for col in inspect(engine).get_columns("browsing_presence")}:
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE browsing_presence ADD COLUMN idle_seconds {big} NOT NULL DEFAULT 0"))
 
 
 def _hash(value: str) -> str:
@@ -144,7 +153,7 @@ def _device(db, request: Request):
     if len(token) < 20:
         return None
     return db.execute(
-        "SELECT d.id,d.employee_id,d.last_report_at,e.name,e.staff_id FROM browsing_devices d "
+        "SELECT d.id,d.employee_id,d.last_report_at,d.last_seen_at,e.name,e.staff_id FROM browsing_devices d "
         "JOIN employees e ON e.id=d.employee_id WHERE d.token_hash=? AND d.revoked_at IS NULL AND e.is_active",
         (_hash(token),),
     ).fetchone()
@@ -174,6 +183,61 @@ def invite_employee(db, token: str):
         "WHERE e.id=? AND i.version=? AND e.is_active",
         (employee_id, version),
     ).fetchone()
+
+
+OUTSIDE_KEY = "~outside"            # reserved "domain" the extension uses for time away from tracked Chrome
+IDLE_KEY = "~idle"                  # ... and for time with no mouse or keyboard use
+IDLE_SETTING = "browsing_idle_minutes"
+IDLE_DEFAULT_MINUTES, IDLE_MIN_MINUTES, IDLE_MAX_MINUTES = 6, 2, 10
+
+
+def idle_minutes() -> int:
+    """The rule: this many minutes without a click or key press counts as idle."""
+    from app.runtime import get_setting
+    try:
+        return min(IDLE_MAX_MINUTES, max(IDLE_MIN_MINUTES, int(get_setting(IDLE_SETTING, str(IDLE_DEFAULT_MINUTES)))))
+    except ValueError:
+        return IDLE_DEFAULT_MINUTES
+HEARTBEAT_GAP_SECONDS = 150         # the extension checks in every minute; a longer gap is "no signal"
+
+
+def record_presence(db, device, work_date: str, now: int, outside_seconds: int = 0, idle_seconds: int = 0) -> None:
+    """Count how long the tracker was actually reachable during duty.
+
+    Duty time the tracker cannot account for is the signal that someone worked
+    in another Chrome profile or browser, or closed the tracked one."""
+    last = device["last_seen_at"]
+    gap = now - int(last) if last else HEARTBEAT_GAP_SECONDS + 1
+    online = max(0, gap) if gap <= HEARTBEAT_GAP_SECONDS else 60
+    db.execute(
+        "INSERT INTO browsing_presence(employee_id,work_date,online_seconds,outside_seconds,idle_seconds) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(employee_id,work_date) DO UPDATE SET "
+        "online_seconds=browsing_presence.online_seconds+excluded.online_seconds,"
+        "outside_seconds=browsing_presence.outside_seconds+excluded.outside_seconds,"
+        "idle_seconds=browsing_presence.idle_seconds+excluded.idle_seconds",
+        (device["employee_id"], work_date, online, max(0, int(outside_seconds)), max(0, int(idle_seconds))),
+    )
+
+
+def duty_seconds(db, employee_id: int, work_date: str) -> int:
+    """Length of that day's duty so far: check-in to check-out, or to now if still open."""
+    row = db.execute("SELECT check_in,check_out FROM attendance WHERE employee_id=? AND work_date=?",
+                     (employee_id, work_date)).fetchone()
+    if not row or not row["check_in"]:
+        return 0
+    zone = ZoneInfo(settings.timezone)
+
+    def parse(value):
+        moment = datetime.fromisoformat(str(value))
+        return moment if moment.tzinfo else moment.replace(tzinfo=zone)
+
+    try:
+        start = parse(row["check_in"])
+        limit = start + timedelta(hours=OPEN_CHECKIN_MAX_HOURS)
+        end = min(parse(row["check_out"]), limit) if row["check_out"] else min(_now_local(), limit)
+    except ValueError:
+        return 0
+    return max(0, int((end - start).total_seconds()))
 
 
 def _pair_throttled(ip: str) -> bool:
@@ -241,7 +305,8 @@ async def browsing_pair(request: Request):
         )
         tracking = bool(duty_work_date(c, int(row["employee_id"])))
     logger.info("Browsing device paired employee_id=%s", row["employee_id"])
-    return _json({"ok": True, "token": token, "employee": row["name"], "staff_id": row["staff_id"], "tracking": tracking})
+    return _json({"ok": True, "token": token, "employee": row["name"], "staff_id": row["staff_id"], "tracking": tracking,
+                  "idle_seconds": idle_minutes() * 60})
 
 
 @router.get("/api/browsing/status")
@@ -250,9 +315,14 @@ def browsing_status(request: Request):
         device = _device(c, request)
         if not device:
             return _json({"ok": False, "message": "Device is not paired."}, 401)
-        c.execute("UPDATE browsing_devices SET last_seen_at=? WHERE id=?", (int(time.time()), device["id"]))
-        tracking = bool(duty_work_date(c, int(device["employee_id"])))
-    return _json({"ok": True, "tracking": tracking, "employee": device["name"], "staff_id": device["staff_id"]})
+        now = int(time.time())
+        work_date = duty_work_date(c, int(device["employee_id"]))
+        if work_date:
+            record_presence(c, device, work_date, now)
+        c.execute("UPDATE browsing_devices SET last_seen_at=? WHERE id=?", (now, device["id"]))
+        tracking = bool(work_date)
+    return _json({"ok": True, "tracking": tracking, "employee": device["name"], "staff_id": device["staff_id"],
+                  "idle_seconds": idle_minutes() * 60})
 
 
 @router.post("/api/browsing/report")
@@ -268,7 +338,8 @@ async def browsing_report(request: Request):
     for entry in entries[:MAX_ENTRIES_PER_REPORT]:
         if not isinstance(entry, dict):
             continue
-        domain = clean_domain(entry.get("domain"))
+        reserved = entry.get("domain") in (OUTSIDE_KEY, IDLE_KEY)
+        domain = entry.get("domain") if reserved else clean_domain(entry.get("domain"))
         try:
             seconds = int(float(entry.get("seconds") or 0))
         except (TypeError, ValueError):
@@ -287,9 +358,11 @@ async def browsing_report(request: Request):
         allowed = MAX_REPORT_SECONDS if not last else min(MAX_REPORT_SECONDS, max(0, now - int(last)) + REPORT_SLACK_SECONDS)
         c.execute("UPDATE browsing_devices SET last_seen_at=?,last_report_at=? WHERE id=?", (now, now, device["id"]))
         if not work_date:
-            return _json({"ok": True, "tracking": False, "saved": 0})
+            return _json({"ok": True, "tracking": False, "saved": 0, "idle_seconds": idle_minutes() * 60})
         claimed = sum(totals.values())
         scale = min(1.0, allowed / claimed) if claimed else 0
+        record_presence(c, device, work_date, now, int(totals.pop(OUTSIDE_KEY, 0) * scale),
+                        int(totals.pop(IDLE_KEY, 0) * scale))
         saved = 0
         for domain, seconds in totals.items():
             seconds = int(seconds * scale)
@@ -301,7 +374,7 @@ async def browsing_report(request: Request):
                 (device["employee_id"], work_date, domain, seconds),
             )
             saved += seconds
-    return _json({"ok": True, "tracking": True, "saved": saved})
+    return _json({"ok": True, "tracking": True, "saved": saved, "idle_seconds": idle_minutes() * 60})
 
 
 # ---------------------------------------------------------- public install page
@@ -505,6 +578,15 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
         ).fetchall()
         links = {e["id"]: invite_token(c, e["id"]) for e in employees} if manage else {}
         categories = {r["domain"]: r["category"] for r in c.execute("SELECT domain,category FROM browsing_site_categories").fetchall()}
+        presence = {r["employee_id"]: r for r in c.execute(
+            "SELECT employee_id,online_seconds,outside_seconds,idle_seconds FROM browsing_presence WHERE work_date=?", (date,)).fetchall()}
+        # Everyone with a connected PC who was on duty belongs in the list, even
+        # with nothing recorded — a silent tracker is exactly what to notice.
+        tracked = c.execute(
+            "SELECT DISTINCT e.id,e.name,e.staff_id FROM employees e JOIN browsing_devices d ON d.employee_id=e.id "
+            "JOIN attendance a ON a.employee_id=e.id AND a.work_date=? WHERE d.revoked_at IS NULL AND a.check_in IS NOT NULL",
+            (date,)).fetchall()
+        duty = {r["id"]: duty_seconds(c, r["id"], date) for r in tracked}
         devices = c.execute(
             "SELECT d.id,d.label,d.last_seen_at,d.created_at,e.name,e.staff_id FROM browsing_devices d "
             "JOIN employees e ON e.id=d.employee_id WHERE d.revoked_at IS NULL ORDER BY e.staff_id,d.id"
@@ -519,7 +601,25 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
                 person["work"] += int(row["seconds"])
         if len(person["top"]) < 3:
             person["top"].append(f"{escape(row['domain'])} <span class='sub'>{fmt_duration(row['seconds'])}</span>")
+    for row in tracked:
+        people.setdefault(row["id"], {"name": row["name"], "staff_id": row["staff_id"], "total": 0, "top": [], "work": 0, "sorted": 0})
     ranked = sorted(people.items(), key=lambda item: item[1]["total"], reverse=True)
+
+    def coverage(eid) -> str:
+        """Duty time the tracker could not see. A hint to look, not proof of anything."""
+        seen = presence.get(eid)
+        on_duty = duty.get(eid, 0)
+        if not on_duty:
+            return "<td><span class='sub'>—</span></td>" * 3
+        outside = int(seen["outside_seconds"]) if seen else 0
+        idle = int(seen["idle_seconds"]) if seen else 0
+        silent = max(0, on_duty - (int(seen["online_seconds"]) if seen else 0))
+        def cell(seconds):
+            share = seconds * 100 / on_duty
+            tone = "#b91c1c" if share >= 50 else "#b45309" if share >= 25 else ""
+            style = f" style='color:{tone}'" if tone else ""
+            return f"<td><b{style}>{fmt_duration(seconds)}</b> <span class='sub'>{round(share)}%</span></td>"
+        return cell(idle) + cell(outside) + cell(silent)
 
     def work_share(p) -> str:
         # Only websites that have a category count, so unsorted time is not
@@ -530,9 +630,9 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
 
     rows = "".join(
         f"<tr><td><a href='/browsing/{eid}?date={date}'><b>{escape(p['name'])}</b></a><div class='sub'>{escape(p['staff_id'])}</div></td>"
-        f"<td><b>{fmt_duration(p['total'])}</b></td><td>{work_share(p)}</td><td>{' &nbsp;•&nbsp; '.join(p['top'])}</td></tr>"
+        f"<td><b>{fmt_duration(p['total'])}</b></td><td>{work_share(p)}</td>{coverage(eid)}<td>{' &nbsp;•&nbsp; '.join(p['top'])}</td></tr>"
         for eid, p in ranked
-    ) or "<tr><td colspan='4'>No browsing recorded for this date.</td></tr>"
+    ) or "<tr><td colspan='7'>No browsing recorded for this date.</td></tr>"
     per_employee: dict[str, int] = {}
     for d in devices:
         per_employee[d["staff_id"]] = per_employee.get(d["staff_id"], 0) + 1
@@ -576,11 +676,23 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
             f"<input type='hidden' name='date' value='{date}'><label>Employee</label><select name='employee_id' required>{options}</select>"
             "<button class='btn'>Create code</button></form></details></div>"
         )
+    idle_form = ""
+    if manage:
+        options_idle = "".join(f"<option value='{m}'{' selected' if m == idle_minutes() else ''}>{m} minutes</option>"
+                               for m in range(IDLE_MIN_MINUTES, IDLE_MAX_MINUTES + 1))
+        idle_form = ("<div class='section-gap'></div><div class='card'><h3>Idle rule</h3><div class='sub'>If nobody clicks or types for this long, "
+                     "the time counts as Idle instead of work. PCs pick up a change within a minute.</div>"
+                     f"<form method='post' action='/browsing/idle-rule' class='actions'><select name='minutes'>{options_idle}</select>"
+                     "<button class='btn secondary'>Save</button></form></div>")
     body = f"""{notice}<div class='hero'><div><div class='eyebrow'>Duty hours only</div><h2>Browsing Time</h2>
     <div class='sub'>Website names and time while an employee is checked in. Full links, page titles and off-duty browsing are never recorded.</div></div>
     <form method='get' class='actions'><input type='date' name='date' value='{date}'><button class='btn secondary'>Open</button></form></div>
-    <div class='card' style='overflow:auto'><table><thead><tr><th>Employee</th><th>Total</th><th>Work share</th><th>Top websites</th></tr></thead><tbody>{rows}</tbody></table></div>
-    <div class='section-gap'></div><div class='two'>{pair_form}<div class='card' style='overflow:auto'><h3>Connected PCs</h3>
+    <div class='card' style='overflow:auto'><table><thead><tr><th>Employee</th><th>On websites</th><th>Work share</th><th>Idle</th><th>Outside tracker</th><th>No signal</th><th>Top websites</th></tr></thead><tbody>{rows}</tbody></table>
+    <div class='sub' style='margin-top:10px'><b>Idle</b>: no click or key press for {idle_minutes()} minutes or more — the whole untouched stretch counts, even with a tab open.
+    Time on a website counts only when the mouse or keyboard was used.<br><b>Outside tracker</b>: the PC was in use but not in the tracked Chrome — another Chrome profile, another browser or another program.
+    <b>No signal</b>: on duty but the extension was silent — tracked Chrome closed, extension removed, or PC off. Percent is of duty time.
+    Neither says what the person was doing; work in Excel or another program counts too.</div></div>
+    {idle_form}<div class='section-gap'></div><div class='two'>{pair_form}<div class='card' style='overflow:auto'><h3>Connected PCs</h3>
     <table><thead><tr><th>Employee</th><th>PC</th><th>Last seen</th><th></th></tr></thead><tbody>{device_rows}</tbody></table></div></div>"""
     return layout("Browsing Time", body, request, "browsing")
 
@@ -680,4 +792,15 @@ def browsing_reset_invite(request: Request, employee_id: int):
         invite_token(c, employee_id)
         c.execute("UPDATE browsing_invites SET version=version+1 WHERE employee_id=?", (employee_id,))
         audit(request, "browsing_invite_reset", "employee", str(employee_id), "Browsing tracker install link replaced", db=c)
+    return RedirectResponse("/browsing", 303)
+
+
+@router.post("/browsing/idle-rule")
+def browsing_set_idle_rule(request: Request, minutes: int = Form(...)):
+    from app.main import require_permission, audit
+    from app.runtime import set_setting
+    require_permission(request, "browsing_manage")
+    minutes = min(IDLE_MAX_MINUTES, max(IDLE_MIN_MINUTES, int(minutes)))
+    set_setting(IDLE_SETTING, str(minutes))
+    audit(request, "browsing_idle_rule", "setting", IDLE_SETTING, f"Idle after {minutes} minutes without input")
     return RedirectResponse("/browsing", 303)

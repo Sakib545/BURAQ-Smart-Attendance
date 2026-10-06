@@ -4,7 +4,9 @@ importScripts("config.js");
 const CONFIG = self.BURAQ_CONFIG || {};
 const DEFAULT_SERVER = CONFIG.server || "https://smart-attendance.pro";
 const MAX_TICK_SECONDS = 120;   // longer gaps (sleep, worker stopped) are not counted
-const IDLE_SECONDS = 120;
+const RECENT_INPUT_SECONDS = 60; // "touched the mouse or keyboard in the last minute"
+const DEFAULT_IDLE_SECONDS = 360; // no input this long = idle; the server can change it
+const IDLE = "~idle";
 
 const get = (keys) => chrome.storage.local.get(keys);
 const set = (values) => chrome.storage.local.set(values);
@@ -19,13 +21,16 @@ function domainOf(url) {
   }
 }
 
+// Time when the PC is in use but this Chrome profile is not in front: another
+// Chrome profile, another browser or another program. Reported as one total,
+// with no detail about what was open.
+const OUTSIDE = "~outside";
+
 async function activeDomain() {
-  const state = await chrome.idle.queryState(IDLE_SECONDS);
-  if (state !== "active") return "";
   const win = await chrome.windows.getLastFocused({ populate: false }).catch(() => null);
-  if (!win || !win.focused) return "";
+  if (!win || !win.focused) return OUTSIDE;
   const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
-  if (!tab || tab.incognito) return "";
+  if (!tab || tab.incognito) return OUTSIDE;
   return domainOf(tab.url || "");
 }
 
@@ -35,18 +40,38 @@ function tick() {
   ticking = ticking.then(doTick, doTick);
   return ticking;
 }
+// A tab that is merely open is not work. Time first goes into "hold". It is
+// credited to the website only once the mouse or keyboard is used again; if
+// nobody touches the PC for the idle limit, the whole held stretch counts as
+// idle instead. So "no click for N minutes" is idle from its first minute.
 async function doTick() {
   const now = Date.now();
-  const s = await get(["token", "tracking", "current", "lastTick", "pending"]);
+  const s = await get(["token", "tracking", "current", "lastTick", "pending", "hold", "idleSeconds"]);
   const pending = s.pending || {};
-  if (s.token && s.tracking && s.current && s.lastTick) {
+  let hold = s.hold || {};
+  const on = !!(s.token && s.tracking);
+  if (on && s.current && s.lastTick) {
     const elapsed = Math.round((now - s.lastTick) / 1000);
     if (elapsed > 0 && elapsed <= MAX_TICK_SECONDS) {
-      pending[s.current] = (pending[s.current] || 0) + elapsed;
+      hold[s.current] = (hold[s.current] || 0) + elapsed;
     }
   }
-  const current = s.token && s.tracking ? await activeDomain() : "";
-  await set({ pending, current, lastTick: now });
+  if (!on) {
+    hold = {};
+  } else if (Object.keys(hold).length) {
+    const limit = Math.max(60, Number(s.idleSeconds) || DEFAULT_IDLE_SECONDS);
+    const longState = await chrome.idle.queryState(limit);
+    if (longState !== "active") {
+      const total = Object.values(hold).reduce((a, b) => a + b, 0);
+      pending[IDLE] = (pending[IDLE] || 0) + total;
+      hold = {};
+    } else if ((await chrome.idle.queryState(RECENT_INPUT_SECONDS)) === "active") {
+      for (const [key, seconds] of Object.entries(hold)) pending[key] = (pending[key] || 0) + seconds;
+      hold = {};
+    }
+  }
+  const current = on ? await activeDomain() : "";
+  await set({ pending, hold, current, lastTick: now });
 }
 
 async function api(path, options = {}) {
@@ -110,6 +135,7 @@ async function sync() {
     }
     if (result.status === 200 && result.data.ok) {
       const update = { tracking: !!result.data.tracking, lastSync: Date.now(), error: "" };
+      if (result.data.idle_seconds) update.idleSeconds = Number(result.data.idle_seconds);
       if (result.data.employee) update.employee = result.data.employee;
       if (entries.length) {
         // Subtract what was sent; keep anything added while the request ran.
@@ -120,7 +146,7 @@ async function sync() {
         }
         update.pending = update.tracking ? latest : {};
       }
-      if (!update.tracking) { update.pending = {}; update.current = ""; }
+      if (!update.tracking) { update.pending = {}; update.hold = {}; update.current = ""; }
       await set(update);
     }
   } catch (e) {
@@ -130,12 +156,12 @@ async function sync() {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create("buraq-sync", { periodInMinutes: 1 });
-  chrome.idle.setDetectionInterval(IDLE_SECONDS);
+  chrome.idle.setDetectionInterval(RECENT_INPUT_SECONDS);
   sync();
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create("buraq-sync", { periodInMinutes: 1 });
-  chrome.idle.setDetectionInterval(IDLE_SECONDS);
+  chrome.idle.setDetectionInterval(RECENT_INPUT_SECONDS);
 });
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === "buraq-sync") sync(); });
 chrome.tabs.onActivated.addListener(() => tick());
