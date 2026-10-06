@@ -3925,3 +3925,6 @@ app.include_router(browsing_router)
 
 from app.ai_insights import router as ai_router
 app.include_router(ai_router)
+
+from app.ai_commands import router as ai_command_router
+app.include_router(ai_command_router)

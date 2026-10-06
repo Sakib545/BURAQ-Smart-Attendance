@@ -689,3 +689,6 @@ def apply_face_ai_migrations() -> None:
     from app.ai_insights import apply_ai_migrations
     apply_ai_migrations(engine, sqlite)
     mark_migration("ai-insights-v1")
+    from app.ai_commands import apply_ai_command_migrations
+    apply_ai_command_migrations(engine, sqlite)
+    mark_migration("ai-commands-v1")

@@ -531,6 +531,7 @@ def _page(request: Request, result: dict | None = None, error: str = "", notice:
     weekly_rows = "".join(
         f"<tr><td>{person(w['employee_id'])}</td><td>{escape(w['content'])}</td></tr>" for w in weekly
     ) or "<tr><td colspan='2'>No weekly summary yet.</td></tr>"
+    command_link = "<a class='btn' href='/ai/command'>Manage by typing</a>" if manage else ""
     run_buttons = ""
     if manage and configured:
         run_buttons = "".join(
@@ -539,7 +540,7 @@ def _page(request: Request, result: dict | None = None, error: str = "", notice:
         )
     body = f"""{top}<div class='hero'><div><div class='eyebrow'>Gemini • {escape(model_name())}</div><h2>AI Insights</h2>
     <div class='sub'>Suggestions for a person to review. Nothing here changes attendance or pay.</div>
-    <div class='sub'>{escape(usage)}</div></div><div class='actions'>{run_buttons}</div></div>
+    <div class='sub'>{escape(usage)}</div></div><div class='actions'>{command_link}{run_buttons}</div></div>
     <div class='card'><h3>Ask about attendance, leave or browsing</h3>
     <form method='post' action='/ai/ask'><input name='question' maxlength='400' required
     placeholder='যেমন: এই মাসে কে সবচেয়ে বেশি late? / Who had no check-out last week?'{'' if configured else ' disabled'}>
