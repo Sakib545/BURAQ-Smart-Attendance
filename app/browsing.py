@@ -439,21 +439,32 @@ def tracker_personal_page(request: Request, token: str):
 
 @router.get("/tracker", response_class=HTMLResponse)
 def tracker_install_page(request: Request, code: str = ""):
-    """Shareable page: staff open it, download the extension and follow the steps.
-    Public on purpose — the extension is useless without an Admin-issued code."""
+    """Shareable page for all staff: add the extension, then type your Staff ID."""
     from app.main import layout
     code = re.sub(r"[^A-Z0-9-]", "", code.upper())[:9]
     code_box = (
         f"<div class='notice'>আপনার code: <b style='letter-spacing:.15em;font-size:18px'>{escape(code)}</b>"
         "<div class='sub'>১৫ মিনিট পর্যন্ত কাজ করবে, একবারই ব্যবহার করা যাবে।</div></div>"
-    ) if code else "<div class='notice'>Code নেই? আপনার Admin/HR-এর কাছ থেকে one-time code নিন।</div>"
-    body = f"""<div class='login' style='max-width:560px'><div class='card'>
-    <div class='title'>BURAQ Duty Tracker</div>
-    <p class='sub'>অফিসের PC-তে Chrome extension install করার নিয়ম। সময় লাগবে ২ মিনিট।</p>
+    ) if code else ""
+    connect_step = ("<li>Chrome-এর উপরে puzzle (🧩) icon থেকে <b>BURAQ Duty Browsing Tracker</b> খুলুন, "
+                    "<b>নিজের Staff ID</b> লিখে <b>Connect</b> চাপুন।</li>")
+    store = store_url()
+    if store:
+        install = f"""<p class='sub'>অফিসের PC-র Chrome-এ এই page খুলুন। সময় লাগবে ১ মিনিট।</p>
+    <a class='btn' target='_blank' rel='noopener' href='{escape(store)}'>➕ Add to Chrome</a>
+    <ol style='line-height:1.9;padding-left:20px;margin-top:18px'>
+      <li>উপরের button চাপুন, তারপর <b>Add to Chrome</b> → <b>Add extension</b> দিন।</li>
+      {connect_step}
+    </ol>"""
+    else:
+        install = f"""<p class='sub'>অফিসের PC-তে Chrome extension install করার নিয়ম। সময় লাগবে ২ মিনিট।</p>
     <a class='btn' href='/tracker/extension.zip'>⬇ Extension download করুন</a>
     <ol style='line-height:1.9;padding-left:20px;margin-top:18px'>{INSTALL_STEPS}
-      <li>Chrome-এর উপরে puzzle (🧩) icon থেকে <b>BURAQ Duty Browsing Tracker</b> খুলুন, code লিখে <b>Connect</b> চাপুন।</li>
-    </ol>{code_box}{PRIVACY_NOTE}
+      {connect_step}
+    </ol>"""
+    body = f"""<div class='login' style='max-width:560px'><div class='card'>
+    <div class='title'>BURAQ Duty Tracker</div>
+    {install}{code_box}{PRIVACY_NOTE}<div class='sub'><a href='/tracker/privacy'>Privacy policy</a></div>
     </div></div>"""
     return layout("BURAQ Duty Tracker", body)
 
