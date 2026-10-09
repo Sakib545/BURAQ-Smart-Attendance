@@ -1565,7 +1565,7 @@ def reset_employee_all(request: Request, employee_id: int, confirmation: str=For
         for row in payroll_rows:
             c.execute("DELETE FROM payroll_change_logs WHERE payroll_id=?",(row['id'],))
         # Delete dependent records in a safe order. The employee master row is preserved.
-        for table in ("ai_reports","browsing_presence","browsing_usage","browsing_devices","browsing_pair_codes","browsing_invites","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
+        for table in ("salary_sheet_imports","web_checkin_pins","ai_reports","browsing_presence","browsing_usage","browsing_devices","browsing_pair_codes","browsing_invites","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
             c.execute(f"DELETE FROM {table} WHERE employee_id=?",(employee_id,))
         for phone in {employee["whatsapp_phone"], employee["phone"]}:
             if phone: c.execute("DELETE FROM conversation_states WHERE phone=?",(re.sub(r"\D","",phone),))
@@ -2900,11 +2900,10 @@ def _build_payslip_pdf(r) -> bytes:
     doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=50,rightMargin=50,topMargin=36,bottomMargin=36,title=f"BURAQ Payment Sheet - {month_label}")
     doc.build([Paragraph("BURAQ PAYMENT SHEET",styles['Title']),Paragraph(month_label,month_style),employee_table,Spacer(1,14),duty_table,Spacer(1,14),table,Spacer(1,14),Paragraph("Confidential • Generated for HR/Admin use only",muted)]); return out.getvalue()
 
-@app.get("/payroll/{payroll_id}/payslip.pdf")
-def payroll_payslip(request: Request, payroll_id: int):
-    require_permission(request,"payroll_export")
+def payslip_pdf_for(payroll_id: int, employee_id: int | None = None):
+    """(pdf bytes, file name) for one payroll record, or None. employee_id limits it to that person's own record."""
     with get_db() as c: r=c.execute("SELECT p.*,e.staff_id,e.name,e.department,e.designation FROM payroll_records p JOIN employees e ON e.id=p.employee_id WHERE p.id=?",(payroll_id,)).fetchone()
-    if not r: raise HTTPException(404,"Payroll not found")
+    if not r or (employee_id is not None and int(r['employee_id'])!=int(employee_id)): return None
     payslip=dict(r)
     if r['payment_status']=='draft':
         mode=str(r['overtime_mode'] or 'auto'); manual_hours=float(r['overtime_hours'] or 0) if mode=='manual' else 0
@@ -2916,8 +2915,15 @@ def payroll_payslip(request: Request, payroll_id: int):
         except Exception: pass
     payslip.setdefault('earned_basic_salary',max(float(payslip.get('fixed_salary') or 0)-float(payslip.get('absent_deduction') or 0)-float(payslip.get('unpaid_leave_deduction') or 0),0))
     payslip.setdefault('late_minutes',0); payslip.setdefault('late_deduction',0)
-    out=io.BytesIO(_build_payslip_pdf(payslip))
-    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=BURAQ-Payment-Sheet-{r['staff_id']}-{r['salary_month']}.pdf"})
+    return _build_payslip_pdf(payslip), f"BURAQ-Payment-Sheet-{r['staff_id']}-{r['salary_month']}.pdf"
+
+@app.get("/payroll/{payroll_id}/payslip.pdf")
+def payroll_payslip(request: Request, payroll_id: int):
+    require_permission(request,"payroll_export")
+    made=payslip_pdf_for(payroll_id)
+    if not made: raise HTTPException(404,"Payroll not found")
+    pdf,filename=made
+    return StreamingResponse(io.BytesIO(pdf),media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename={filename}"})
 
 @app.get("/reports", response_class=HTMLResponse)
 def reports_page(request: Request, start_date: str = "", end_date: str = "", status: str = "", department: str = ""):
@@ -3928,3 +3934,10 @@ app.include_router(ai_router)
 
 from app.ai_commands import router as ai_command_router
 app.include_router(ai_command_router)
+
+from app.web_checkin import router as web_checkin_router
+app.include_router(web_checkin_router)
+from app.employee_portal import router as employee_portal_router
+app.include_router(employee_portal_router)
+from app.salary_sheet import router as salary_sheet_router
+app.include_router(salary_sheet_router)

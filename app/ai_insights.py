@@ -17,6 +17,7 @@ shown to the Admin without going back to Gemini.
 Nothing here acts on its own: it never changes attendance, pay or messages.
 """
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -121,8 +122,8 @@ def _post(url: str, headers: dict, body: dict) -> dict:
     return response.json()
 
 
-def ask_gemini(system: str, prompt: str):
-    """Send one prompt, return the parsed JSON answer."""
+def ask_gemini(system: str, prompt: str, files: list[tuple[str, bytes]] | None = None, temperature: float = 0.2):
+    """Send one prompt (optionally with PDF/image files), return the parsed JSON answer."""
     key = api_key()
     if not key:
         raise AIUnavailable("GEMINI_API_KEY is not set.")
@@ -133,8 +134,10 @@ def ask_gemini(system: str, prompt: str):
             raise AIUnavailable("Today's AI call limit is used up (AI_DAILY_CALL_LIMIT).")
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
+        "contents": [{"role": "user", "parts": [
+            *({"inline_data": {"mime_type": mime, "data": base64.b64encode(content).decode()}} for mime, content in (files or [])),
+            {"text": prompt}]}],
+        "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name()}:generateContent"
     try:

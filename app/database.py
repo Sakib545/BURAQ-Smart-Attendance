@@ -692,3 +692,9 @@ def apply_face_ai_migrations() -> None:
     from app.ai_commands import apply_ai_command_migrations
     apply_ai_command_migrations(engine, sqlite)
     mark_migration("ai-commands-v1")
+    from app.web_checkin import apply_web_checkin_migrations
+    apply_web_checkin_migrations(engine, sqlite)
+    from app.salary_sheet import apply_salary_sheet_migrations
+    apply_salary_sheet_migrations(engine, sqlite)
+    mark_migration("web-checkin-v1")
+    mark_migration("salary-sheet-v1")

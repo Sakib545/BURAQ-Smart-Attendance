@@ -131,11 +131,13 @@ NAV_BLUEPRINT: list[tuple[str, list[tuple[str, str, str, str, str]]]] = [
         ("dashboard", "Dashboard", "/dashboard", "home", "dashboard_view"),
         ("attendance", "Attendance", "/attendance", "clock", "attendance"),
         ("duty", "Duty", "/duty", "calendar-check", "duty_view"),
+        ("webcheckin", "Employee portal", "/web-checkin", "lock", "attendance_edit"),
     ]),
     ("People", [
         ("employees", "Employees", "/employees", "users", "employees"),
         ("leave", "Leave", "/hr-operations", "calendar-minus", "leave_view"),
         ("payroll", "Payroll", "/payroll", "banknote", "payroll_view"),
+        ("salarysheet", "Salary sheet upload", "/payroll/sheet", "receipt", "payroll_manage"),
         ("performance", "Performance", "/performance", "trending-up", "performance_view"),
         ("browsing", "Browsing time", "/browsing", "chart-bar", "browsing_view"),
         ("ai", "AI insights", "/ai", "panel", "ai_view"),
