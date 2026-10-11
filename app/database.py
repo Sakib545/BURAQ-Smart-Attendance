@@ -148,6 +148,10 @@ def init_db(max_attempts: int = 5) -> None:
                 time.sleep(min(attempt * 2, 8))
     if _active_url.startswith("sqlite"):
         raise RuntimeError(f"Could not initialize SQLite database: {last_error}") from last_error
+    if settings.environment == "production":
+        # A /tmp SQLite file is wiped on every restart, so check-ins written to it
+        # are lost. Production must crash and let the platform restart it instead.
+        raise RuntimeError(f"Primary database unavailable; refusing temporary SQLite fallback in production: {last_error}") from last_error
     if not settings.allow_temp_db_fallback:
         raise RuntimeError(f"Primary database unavailable and temporary fallback is disabled: {last_error}") from last_error
     _fallback_to_sqlite(last_error or RuntimeError("Unknown database error"))

@@ -79,6 +79,8 @@ class Settings:
                     issues.append(f"{key} must be at least 32 characters")
         if self.environment == "production" and not os.getenv("DATABASE_URL", "").strip():
             issues.append("DATABASE_URL is required in production")
+        if self.environment == "production" and self.allow_temp_db_fallback:
+            issues.append("ALLOW_TEMP_DB_FALLBACK must be off in production; temporary SQLite data is lost on restart")
         return issues
 
     def production_warnings(self) -> list[str]:
