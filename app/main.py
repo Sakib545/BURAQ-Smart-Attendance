@@ -32,6 +32,8 @@ from app.whatsapp import handle, send_approval_flow, send_document_bytes, send_s
 from app.location_links import verify_location_token
 from app.reminders import reminder_worker
 from app.ai_insights import ai_worker
+from app.daily_summary import summary_worker
+from app import loans, overtime
 from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
@@ -149,6 +151,9 @@ PERMISSION_CATALOG = {
     "browsing_manage": ("Browsing Time: Manage", "Staff PC connect/disconnect করবে"),
     "ai_view": ("AI Insights: View", "AI summary, unusual days ও প্রশ্নের উত্তর দেখবে"),
     "ai_manage": ("AI Insights: Run", "AI report এখনই চালাবে"),
+    "overtime_manage": ("Overtime: Approve", "Overtime আগে থেকে অনুমোদন ও আবেদন approve/reject করবে"),
+    "notices_manage": ("Notice Board: Publish", "সব staff-কে নোটিশ পাঠাবে"),
+    "daily_summary_manage": ("Daily HR Summary", "প্রতিদিনের WhatsApp সারাংশ চালু/বন্ধ ও নম্বর ঠিক করবে"),
     "audit_view": ("Audit Log: View", "Activity log দেখবে"),
     "settings_view": ("Settings: View", "সাধারণ settings page দেখবে"),
     "whatsapp_settings": ("WhatsApp Settings", "Token, Phone ID ও Webhook দেখবে/পরিবর্তন করবে"),
@@ -156,8 +161,8 @@ PERMISSION_CATALOG = {
     "user_accounts_manage": ("User Accounts: Manage", "Admin/HR account create, disable বা delete করবে"),
 }
 DEFAULT_ROLE_PERMISSIONS = {
-    "admin": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","face_security_view","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
-    "hr_manager": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","face_security_view","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "admin": {"overtime_manage","notices_manage","daily_summary_manage","dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","face_security_view","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
+    "hr_manager": {"overtime_manage","notices_manage","daily_summary_manage","dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","face_reset","face_security_view","approvals_view","approvals_manage","reports_view","reports_export","payroll_view","payroll_manage","payroll_export","duty_view","duty_manage","leave_view","leave_manage","attendance_edit","shift_manage","department_manage","audit_view"},
     "hr_executive": {"dashboard_view","employees_view","employees_add","employees_edit","performance_view","performance_manage","approvals_view","approvals_manage","reports_view","reports_export","leave_view","leave_manage","attendance_edit"},
     "hr_officer": {"dashboard_view","employees_view","performance_view","reports_view","leave_view"},
     "viewer": {"dashboard_view","reports_view"},
@@ -284,10 +289,11 @@ async def start_reminders():
     app.state.reminder_task=asyncio.create_task(reminder_worker())
     app.state.payroll_backup_task=asyncio.create_task(payroll_backup_worker())
     app.state.ai_task=asyncio.create_task(ai_worker())
+    app.state.summary_task=asyncio.create_task(summary_worker())
 
 @app.on_event("shutdown")
 async def stop_reminders():
-    for name in ("reminder_task","payroll_backup_task","ai_task"):
+    for name in ("reminder_task","payroll_backup_task","ai_task","summary_task"):
         task=getattr(app.state,name,None)
         if task:
             task.cancel()
@@ -1308,7 +1314,7 @@ def employee_profile(request: Request, employee_id: int, month: str = ""):
     if can_payroll_view:
         payroll_tab="<a class='tab' href='#payroll'>Payroll</a>"
         current_payroll=next((p for p in payroll if p['salary_month']==month),None)
-        fixed=float(current_payroll['fixed_salary']) if current_payroll else float(e['fixed_salary'] or 0); hours=float(current_payroll['overtime_hours']) if current_payroll else 0; rate=float(current_payroll['overtime_rate']) if current_payroll else float(e['default_overtime_rate'] or 0); bonus=float(current_payroll['bonus']) if current_payroll else 0; deduction=float(current_payroll['deduction']) if current_payroll else 0; advance=float(current_payroll['advance_amount']) if current_payroll else 0; fine=float(current_payroll['fine_amount']) if current_payroll else 0; adjustment_reason=str(current_payroll['adjustment_reason'] or '') if current_payroll else ''
+        fixed=float(current_payroll['fixed_salary']) if current_payroll else float(e['fixed_salary'] or 0); hours=float(current_payroll['overtime_hours']) if current_payroll else overtime.approved_hours(employee_id,month); rate=float(current_payroll['overtime_rate']) if current_payroll else float(e['default_overtime_rate'] or 0); bonus=float(current_payroll['bonus']) if current_payroll else 0; deduction=float(current_payroll['deduction']) if current_payroll else 0; advance=float(current_payroll['advance_amount']) if current_payroll else loans.total_due(employee_id,month); fine=float(current_payroll['fine_amount']) if current_payroll else 0; adjustment_reason=str(current_payroll['adjustment_reason'] or '') if current_payroll else (loans.LOAN_REASON if advance else '')
         if current_payroll and str(current_payroll['overtime_mode'] or 'auto')!='manual': hours=0
         night_allow=float(current_payroll['night_allowance'] or 0) if current_payroll else 0.0
         friday_allow=float(current_payroll['friday_allowance'] or 0) if current_payroll else 0.0
@@ -1565,7 +1571,7 @@ def reset_employee_all(request: Request, employee_id: int, confirmation: str=For
         for row in payroll_rows:
             c.execute("DELETE FROM payroll_change_logs WHERE payroll_id=?",(row['id'],))
         # Delete dependent records in a safe order. The employee master row is preserved.
-        for table in ("salary_sheet_imports","web_checkin_pins","ai_reports","browsing_presence","browsing_usage","browsing_devices","browsing_pair_codes","browsing_invites","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
+        for table in ("overtime_requests","loan_installments","employee_loans","salary_sheet_imports","web_checkin_pins","ai_reports","browsing_presence","browsing_usage","browsing_devices","browsing_pair_codes","browsing_invites","attendance_fingerprints","attendance_evidence","attendance_corrections","leave_requests","performance_reviews","employee_notes","duty_reminder_logs","custom_duties","duty_schedules","payroll_records","attendance","pending_registrations","face_samples","face_profiles"):
             c.execute(f"DELETE FROM {table} WHERE employee_id=?",(employee_id,))
         for phone in {employee["whatsapp_phone"], employee["phone"]}:
             if phone: c.execute("DELETE FROM conversation_states WHERE phone=?",(re.sub(r"\D","",phone),))
@@ -1950,7 +1956,12 @@ def payroll_inputs(request: Request, employee_id: int, month: str):
     with get_db() as db:
         row=db.execute('SELECT * FROM payroll_records WHERE employee_id=? AND salary_month=?',(employee_id,month)).fetchone()
     fields=('fixed_salary','overtime_rate','overtime_hours','night_allowance','friday_allowance','eid_duty_allowance','bonus','advance_amount','fine_amount','deduction','adjustment_reason','note')
-    return {key:row[key] for key in fields} if row else {}
+    if row: return {key:row[key] for key in fields}
+    # A new payslip starts with the approved overtime and any loan installment due.
+    suggested={'overtime_hours':overtime.approved_hours(employee_id,month)}
+    loan_due=loans.total_due(employee_id,month)
+    if loan_due: suggested.update(advance_amount=loan_due,adjustment_reason=loans.LOAN_REASON)
+    return suggested
 
 
 @app.get("/payroll/preview")
@@ -2580,6 +2591,7 @@ def save_payroll(request: Request, employee_id: int=Form(...), salary_month: str
         else:
             insert_values=(employee_id,salary_month)+payload[:9]+(actor,)+payload[9:]
             c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,note,created_by,updated_by,scheduled_duty_days,worked_duty_days,paid_leave_days,absent_days,absent_deduction,worked_duty_units,paid_leave_units,unpaid_leave_units,absent_duty_units,unpaid_leave_deduction,earned_basic_salary,late_minutes,late_deduction,payable_duty_minutes,advance_amount,fine_amount,gross_salary,total_deduction,overtime_mode,adjustment_reason,calculation_snapshot,night_allowance,friday_allowance,eid_duty_allowance,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft')""",insert_values); payroll_id=c.execute("SELECT id FROM payroll_records WHERE employee_id=? AND salary_month=?",(employee_id,salary_month)).fetchone()['id']
+        loans.record_for_payroll(c,employee_id,salary_month,advance)
         _log_payroll_change(c,payroll_id,"saved",actor,adjustment_reason.strip())
     audit(request,"save","payroll",f"{employee_id}:{salary_month}",f"Net salary: {calc['net_salary']:.2f}")
     if profile_employee_id==employee_id: return RedirectResponse(f"/employees/{employee_id}?month={salary_month}#payroll",303)
@@ -2680,8 +2692,14 @@ def payroll_bulk_prepare(request: Request, month: str=Form(...)):
             if float(employee['fixed_salary'] or 0) <= 0:
                 skipped += 1
                 continue
-            calc=_calculate_employee_payroll(employee['id'],month,float(employee['fixed_salary'] or 0),float(employee['default_overtime_rate'] or 0))
-            c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,created_by,updated_by,scheduled_duty_days,worked_duty_days,paid_leave_days,absent_days,absent_deduction,worked_duty_units,paid_leave_units,unpaid_leave_units,absent_duty_units,unpaid_leave_deduction,earned_basic_salary,late_minutes,late_deduction,payable_duty_minutes,advance_amount,fine_amount,gross_salary,total_deduction,overtime_mode,calculation_snapshot,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft')""",(employee['id'],month,calc['fixed_salary'],calc['overtime_hours'],calc['overtime_rate'],calc['overtime_amount'],0,0,calc['net_salary'],actor,actor,int(calc['scheduled']),int(calc['worked']),int(calc['paid_leave']),int(calc['absent']),calc['absent_deduction'],calc['worked'],calc['paid_leave'],calc['unpaid_leave'],calc['absent'],calc['unpaid_leave_deduction'],calc['earned_basic_salary'],int(calc['late_minutes']),calc['late_deduction'],int(calc['payable_duty_minutes']),0,0,calc['gross_salary'],calc['total_deduction'],'manual',json.dumps(calc,default=str))); prepared+=1
+            # Approved overtime and loan installments due are the only amounts
+            # filled in for HR; everything else starts at zero as before.
+            ot_hours=overtime.approved_hours(employee['id'],month)
+            loan_due=round(sum(amount for _,amount in loans.due_for_month(c,employee['id'],month)),2)
+            calc=_calculate_employee_payroll(employee['id'],month,float(employee['fixed_salary'] or 0),float(employee['default_overtime_rate'] or 0),'manual',ot_hours,0,loan_due)
+            c.execute("""INSERT INTO payroll_records(employee_id,salary_month,fixed_salary,overtime_hours,overtime_rate,overtime_amount,bonus,deduction,net_salary,created_by,updated_by,scheduled_duty_days,worked_duty_days,paid_leave_days,absent_days,absent_deduction,worked_duty_units,paid_leave_units,unpaid_leave_units,absent_duty_units,unpaid_leave_deduction,earned_basic_salary,late_minutes,late_deduction,payable_duty_minutes,advance_amount,fine_amount,gross_salary,total_deduction,overtime_mode,adjustment_reason,calculation_snapshot,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft')""",(employee['id'],month,calc['fixed_salary'],calc['overtime_hours'],calc['overtime_rate'],calc['overtime_amount'],0,0,calc['net_salary'],actor,actor,int(calc['scheduled']),int(calc['worked']),int(calc['paid_leave']),int(calc['absent']),calc['absent_deduction'],calc['worked'],calc['paid_leave'],calc['unpaid_leave'],calc['absent'],calc['unpaid_leave_deduction'],calc['earned_basic_salary'],int(calc['late_minutes']),calc['late_deduction'],int(calc['payable_duty_minutes']),loan_due,0,calc['gross_salary'],calc['total_deduction'],'manual',loans.LOAN_REASON if loan_due else '',json.dumps(calc,default=str)))
+            if loan_due: loans.record_for_payroll(c,employee['id'],month,loan_due)
+            prepared+=1
     audit(request,"bulk_prepare","payroll",month,f"Prepared {prepared} employee payrolls, skipped {skipped} with no basic salary")
     return RedirectResponse(f"/payroll?month={month}&saved=bulk&made={prepared}&skipped={skipped}",303)
 
@@ -3941,3 +3959,9 @@ from app.employee_portal import router as employee_portal_router
 app.include_router(employee_portal_router)
 from app.salary_sheet import router as salary_sheet_router
 app.include_router(salary_sheet_router)
+from app.daily_summary import router as daily_summary_router
+app.include_router(daily_summary_router)
+app.include_router(overtime.router)
+app.include_router(loans.router)
+from app.notices import router as notices_router
+app.include_router(notices_router)

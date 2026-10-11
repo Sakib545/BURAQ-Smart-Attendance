@@ -137,6 +137,9 @@ NAV_BLUEPRINT: list[tuple[str, list[tuple[str, str, str, str, str]]]] = [
         ("employees", "Employees", "/employees", "users", "employees"),
         ("leave", "Leave", "/hr-operations", "calendar-minus", "leave_view"),
         ("payroll", "Payroll", "/payroll", "banknote", "payroll_view"),
+        ("overtime", "Overtime approval", "/overtime", "clock", "overtime_manage"),
+        ("loans", "Loans & advances", "/loans", "receipt", "payroll_view"),
+        ("notices", "Notice board", "/notices", "file-text", "notices_manage"),
         ("salarysheet", "Salary sheet upload", "/payroll/sheet", "receipt", "payroll_manage"),
         ("performance", "Performance", "/performance", "trending-up", "performance_view"),
         ("browsing", "Browsing time", "/browsing", "chart-bar", "browsing_view"),
@@ -147,6 +150,7 @@ NAV_BLUEPRINT: list[tuple[str, list[tuple[str, str, str, str, str]]]] = [
         ("face-security", "Face Security", "/face-security", "shield", "face_security_view"),
         ("reports", "Reports", "/reports", "file-text", "reports_view"),
         ("users", "User accounts", "/hr-accounts", "shield", "user_accounts_view"),
+        ("daily-summary", "Daily HR summary", "/daily-summary", "panel", "daily_summary_manage"),
         ("settings", "Settings", "/settings", "sliders", "settings_view"),
     ]),
 ]
