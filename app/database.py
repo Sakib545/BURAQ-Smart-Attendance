@@ -698,3 +698,10 @@ def apply_face_ai_migrations() -> None:
     apply_salary_sheet_migrations(engine, sqlite)
     mark_migration("web-checkin-v1")
     mark_migration("salary-sheet-v1")
+    from app.overtime import apply_overtime_migrations
+    apply_overtime_migrations(engine, sqlite)
+    from app.loans import apply_loan_migrations
+    apply_loan_migrations(engine, sqlite)
+    from app.notices import apply_notice_migrations
+    apply_notice_migrations(engine, sqlite)
+    mark_migration("hr-tools-v1")

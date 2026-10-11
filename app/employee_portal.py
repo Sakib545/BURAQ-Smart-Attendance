@@ -22,7 +22,7 @@ from html import escape
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from app import web_checkin as wc
+from app import notices as notice_board, overtime, web_checkin as wc
 from app.database import get_db
 from app.time_format import format_time_12h
 
@@ -617,16 +617,20 @@ def portal(request: Request, month: str = ""):
         leave_html = _leave_block(c, employee, today)
         salary_html = _salary_block(request, c, employee)
         browsing_html = _browsing_block(c, employee, today)
+        notices_html = notice_board.portal_block(c, employee)
+        overtime_html = overtime.portal_block(c, employee, today)
     flash = _take_flash(request)
     first_name = escape(str(employee["name"]).split()[0]) if employee["name"] else ""
     return _shell(f"""<header class='today' id='today'><div class='wrap'>{_bar(employee)}
       <p class='date' style='margin-top:10px;color:#fff;font-size:19px'>সালাম, {first_name}</p>
       {today_html}{flash}</div></header>
       <main class='wrap'>
+        {notices_html}
         <section id='month'>{month_html}</section>
         <section id='week'>{week_html}</section>
         <section id='leave'>{leave_html}</section>
         <section id='salary'>{salary_html}</section>
+        {overtime_html}
         {browsing_html}{_fix_block(today)}{_pin_block()}
         <p class='small' style='margin:36px 0 12px'>BURAQ Smart Attendance. এখানে শুধু আপনার নিজের তথ্য দেখা যায়।</p>
       </main>""")
