@@ -13,9 +13,9 @@ jobs:
   pytest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           # Matches the Dockerfile base image (python:3.12-slim).
           python-version: "3.12"
@@ -28,4 +28,6 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run tests
-        run: pytest -q
+        # `python -m` puts the repo root on sys.path so tests can import `app`;
+        # the bare `pytest` entry point does not.
+        run: python -m pytest -q
