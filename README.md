@@ -88,7 +88,7 @@ This release hardens the existing v8.3 application without deleting existing emp
 ### Added
 - Strict production configuration validation.
 - PostgreSQL failure now stops deployment instead of silently using temporary storage.
-- Temporary SQLite fallback is available only when `ALLOW_TEMP_DB_FALLBACK=true` is explicitly set.
+- Temporary SQLite fallback is available only outside production (`ENVIRONMENT` not `production`) and only when `ALLOW_TEMP_DB_FALLBACK=true` is explicitly set. In production the app refuses to start without PostgreSQL.
 - Separate `/health` liveness and `/ready` database-readiness endpoints.
 - Request IDs, response timing, structured request logs and safe 500 responses.
 - Security response headers.
