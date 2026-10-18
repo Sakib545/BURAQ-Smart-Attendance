@@ -556,26 +556,64 @@ def _hours_minutes(minutes) -> str:
     return f"{total // 60}h {total % 60:02d}m"
 
 
+BN_DIGITS = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
+
+
+def _bn(value) -> str:
+    """Bengali numerals.
+
+    The WhatsApp flow already speaks to staff in Bangla, and most of the
+    workforce reads these more fluently than ASCII digits. Used for the plain
+    sentence under the headline, never for figures someone has to copy.
+    """
+    return str(value).translate(BN_DIGITS)
+
+
+def _delta(current: int, previous: int | None, unit: str = "vs yesterday") -> str:
+    """A count on its own says nothing about whether today is normal.
+
+    Returns a direction chip comparing against the same figure one period
+    back, so "5 absent" reads as better or worse rather than just a number.
+    """
+    if previous is None:
+        return ""
+    diff = current - previous
+    if diff == 0:
+        return f"<span class='delta delta-flat'>Same as {unit.replace('vs ', '')}</span>"
+    way = "up" if diff > 0 else "down"
+    return (f"<span class='delta delta-{way}'>"
+            f"<i class='delta-icon' aria-hidden='true'></i>{abs(diff)} {escape(unit)}</span>")
+
+
 def _kpi_card(icon_name: str, tone: str, label: str, value: str,
-              foot: str, pct: float | None = None, href: str = "") -> str:
+              foot: str, pct: float | None = None, href: str = "",
+              note: str = "", minor: bool = False) -> str:
     """One KPI tile. Every tile has a bar track, so the cards never
-    end up different heights when one of them has no percentage."""
+    end up different heights when one of them has no percentage.
+
+    `note` is a short qualifier printed beside the figure — it exists so a
+    sub-count that belongs to this metric (late arrivals are a subset of
+    Present) can sit inside the tile instead of becoming its own tile that
+    looks like it adds to the total.
+    """
     width = 0.0 if pct is None else pct
     empty = " is-empty" if pct is None else ""
+    note_html = f"<span class='kpi-note'>{note}</span>" if note else ""
     inner = (
         f"<div class='kpi-row'>"
         f"<span class='kpi-symbol kpi-{tone}'>{ui.icon(icon_name)}</span>"
         f"<div class='kpi-text'>"
         f"<div class='metric-label'>{escape(label)}</div>"
-        f"<div class='metric'>{escape(value)}</div>"
+        f"<div class='metric-line'><span class='metric'>{escape(value)}</span>{note_html}</div>"
         f"</div></div>"
         f"<div class='metric-foot'>{foot}</div>"
         f"<div class='mini-line{empty}'><span class='mini-{tone}' style='width:{width}%'></span></div>"
     )
+    cls = "card dashboard-kpi" + (" is-minor" if minor else "")
     if href:
-        return (f"<a class='card dashboard-kpi dashboard-kpi-link' href='{href}'>"
+        return (f"<a class='{cls} dashboard-kpi-link' href='{href}'>"
                 f"{inner}<span class='kpi-go' aria-hidden='true'></span></a>")
-    return f"<div class='card dashboard-kpi'>{inner}</div>"
+    return f"<div class='{cls}'>{inner}</div>"
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -585,6 +623,9 @@ def dashboard(request: Request):
     today = now.date().isoformat()
     month = now.strftime("%Y-%m")
     week_days = [(now.date() - timedelta(days=i)) for i in range(6, -1, -1)]
+    # Two weeks, so the 7-day chart can say whether it is up or down on the
+    # previous 7 days instead of just drawing bars.
+    history_from = now.date() - timedelta(days=13)
 
     with get_db() as c:
         # ------------------------------------------------------------------
@@ -637,13 +678,14 @@ def dashboard(request: Request):
                 WHERE p.employee_id=e.id AND p.salary_month=?)
         """, (month,)).fetchone()["c"] or 0)
 
-        # 7-day trend, active employees only, matching the KPI scope.
+        # 14-day trend, active employees only, matching the KPI scope. The
+        # chart draws the last 7; the first 7 are the baseline it compares to.
         week_counts = c.execute("""
             SELECT a.work_date, COUNT(*) c
             FROM attendance a JOIN employees e ON e.id=a.employee_id
             WHERE a.work_date>=? AND a.work_date<=? AND a.check_in IS NOT NULL AND e.is_active
             GROUP BY a.work_date
-        """, (week_days[0].isoformat(), week_days[-1].isoformat())).fetchall()
+        """, (history_from.isoformat(), week_days[-1].isoformat())).fetchall()
 
         live_rows = c.execute("""
             SELECT e.name, e.staff_id, a.check_in, a.check_out, a.late_minutes,
@@ -670,12 +712,65 @@ def dashboard(request: Request):
     late_pct = _pct(late, employees)
     unregistered = max(employees - registered, 0)
 
+    # --- today in one sentence -------------------------------------------
+    # Someone opening this wants "is today all right?" answered before they
+    # read a single figure. Staff on approved leave are not a shortfall, so
+    # the rate is measured against the people actually expected in.
+    expected_in = max(employees - on_leave, 0)
+    turnout = _pct(present, expected_in)
+    if employees == 0:
+        state, state_word = "leave", "No active staff"
+    elif expected_in == 0:
+        state, state_word = "leave", "Everyone on leave"
+    elif turnout >= 90:
+        state, state_word = "present", "On track"
+    elif turnout >= 75:
+        state, state_word = "late", "Needs attention"
+    else:
+        state, state_word = "absent", "Action needed"
+
+    def _plural(n, one, many):
+        return one if n == 1 else many
+
+    if expected_in:
+        headline = (f"<b>{present}</b> of the <b>{expected_in}</b> "
+                    f"{_plural(expected_in, 'person', 'people')} expected in today "
+                    f"{_plural(present, 'is', 'are')} here.")
+        bits = []
+        if late:
+            bits.append(f"{late} of them arrived late")
+        if absent:
+            bits.append(f"{absent} {_plural(absent, 'has', 'have')} not checked in yet")
+        detail = " " + (" and ".join(bits) + "." if bits else "Everyone is in and on time.")
+    else:
+        headline = "Nobody is expected in today."
+        detail = ""
+    if on_leave:
+        detail += (f" {on_leave} more {_plural(on_leave, 'is', 'are')} on approved leave, "
+                   f"which is not counted against the figure above.")
+
+    bn_parts = []
+    if late:
+        bn_parts.append(f"{_bn(late)} জন দেরিতে এসেছেন")
+    if absent:
+        bn_parts.append(f"{_bn(absent)} জন এখনও আসেননি")
+    if on_leave:
+        bn_parts.append(f"{_bn(on_leave)} জন ছুটিতে")
+    bn_line = (f"আজ {_bn(expected_in)} জনের মধ্যে "
+               f"{_bn(present)} জন কাজে এসেছেন"
+               + ("। " + "। ".join(bn_parts) + "।" if bn_parts else "।"))
+
     # --- 7-day bar chart -------------------------------------------------
     by_day = {str(r["work_date"]): int(r["c"]) for r in week_counts}
     weekly = [(d, by_day.get(d.isoformat(), 0)) for d in week_days]
     max_week = max([v for _, v in weekly] + [1])
     week_total = sum(v for _, v in weekly)
     week_avg = round(week_total / 7, 1)
+    prior_days = [week_days[0] - timedelta(days=i) for i in range(7, 0, -1)]
+    prior_total = sum(by_day.get(d.isoformat(), 0) for d in prior_days)
+    yesterday_present = by_day.get((now.date() - timedelta(days=1)).isoformat())
+    week_delta = _delta(week_total, prior_total or None, "vs the 7 days before")
+    present_delta = _delta(present, yesterday_present)
     chart = "".join(
         f"<div class='bar-wrap'>"
         f"<div class='bar{' is-today' if d == now.date() else ''}' "
@@ -721,33 +816,40 @@ def dashboard(request: Request):
             "<button class='btn secondary' type='submit'>Search</button></form>")
 
     # --- KPI tiles -------------------------------------------------------
+    # Present, Absent and On leave account for every active employee exactly
+    # once, so the three tiles and the donut tell the same story. Late used to
+    # be a fourth tile of equal weight, which read as a separate group of
+    # people; it is a subset of Present and now sits inside that tile.
     kpis = [
         _kpi_card("check", "present", "Present today", str(present),
-                  f"{present_pct}% of {employees} active staff", present_pct),
-        _kpi_card("clock", "late", "Late arrivals", str(late),
-                  ("All on time today" if late == 0 else f"{late_pct}% of staff — already counted in Present"),
-                  late_pct),
+                  f"{present_pct}% of {employees} active staff {present_delta}", present_pct,
+                  note=(f"{late} late" if late else "all on time")),
         _kpi_card("x", "absent", "Absent", str(absent),
-                  f"{absent_pct}% of {employees} active staff", absent_pct),
+                  f"{absent_pct}% of {employees} active staff · leave excluded", absent_pct),
         _kpi_card("calendar-minus", "leave", "On approved leave", str(on_leave),
-                  f"{leave_pct}% of {employees} active staff", leave_pct),
-        _kpi_card("trending-up", "overtime", "Checked out today", str(checked_out),
-                  f"{checked_out} of {present} have checked out · Overtime: manual only",
-                  _pct(checked_out, present) if present else 0.0),
+                  f"{leave_pct}% of {employees} active staff · not counted as absent", leave_pct),
+    ]
+    minor = [
+        _kpi_card("trending-up", "overtime", "Checked out", str(checked_out),
+                  (f"{checked_out} of {present} present have left for the day"
+                   if present else "Nobody has checked in yet"),
+                  _pct(checked_out, present) if present else 0.0, minor=True),
     ]
     if has_permission(request, "approvals_view"):
-        kpis.append(_kpi_card(
-            "user", "late", "Selfies awaiting review", str(pending_selfie),
-            "Open the review queue" if pending_selfie else "Queue is clear",
-            _pct(pending_selfie, max(present, 1)), "/duplicates?review=pending"))
+        minor.append(_kpi_card(
+            "user", "late", "Selfies to review", str(pending_selfie),
+            "Check-in photos waiting for your decision" if pending_selfie else "Queue is clear",
+            _pct(pending_selfie, max(present, 1)), "/duplicates?review=pending", minor=True))
     if has_permission(request, "face_security_view"):
         spoof = int(face_today["spoof"] or 0)
         checks = int(face_today["checks"] or 0)
-        kpis.append(_kpi_card(
-            "shield", "absent", "Spoof attempts today", str(spoof),
-            f"{checks} face checks · {face_today['rejected']} rejected",
-            _pct(spoof, max(checks, 1)), "/face-security"))
+        minor.append(_kpi_card(
+            "shield", "absent", "Spoof attempts", str(spoof),
+            (f"out of {checks} face {_plural(checks, 'check', 'checks')} today"
+             if checks else "No face checks yet today"),
+            _pct(spoof, max(checks, 1)), "/face-security", minor=True))
     kpi_html = "".join(kpis)
+    minor_html = "".join(minor)
 
     # --- workforce breakdown donut (segments actually add up to 100%) ----
     seg_present = _pct(present, employees)
@@ -833,14 +935,34 @@ def dashboard(request: Request):
       <div class='dashboard-tools'>{search_html}</div>
     </div>
 
+    <section class='today-band card state-{state}' aria-label='Attendance summary for today'>
+      <div class='today-rate'>
+        <div class='today-pct'>{round(turnout)}<span>%</span></div>
+        <span class='status-badge status-{state} today-state'>{state_word}</span>
+      </div>
+      <div class='today-copy'>
+        <p class='today-line'>{headline}{detail}</p>
+        <p class='today-bn' lang='bn'>{bn_line}</p>
+        <div class='today-meta'>
+          <span>Turnout counts the {expected_in} expected in — approved leave is left out</span>
+        </div>
+      </div>
+    </section>
+
+    <div class='section-head'>
+      <div><h3>Today at a glance</h3>
+      <div class='sub'>Present, absent and on leave together cover all {employees} active staff</div></div>
+    </div>
     <div class='dashboard-kpis'>{kpi_html}</div>
+    <div class='dashboard-kpis dashboard-kpis-minor'>{minor_html}</div>
 
     <div class='section-gap'></div>
     <div class='dashboard-main-grid'>
       <div class='card dashboard-panel'>
         <div class='card-head'>
           <div><h3>Attendance, last 7 days</h3>
-          <div class='sub'>{week_total} check-ins · {week_avg} per day on average</div></div>
+          <div class='sub'>{week_total} check-ins · {week_avg} a day on average
+          {week_delta}</div></div>
           {report_btn}
         </div>
         <div class='chart'>{chart}</div>
@@ -851,7 +973,7 @@ def dashboard(request: Request):
         <div class='readiness-wrap'>
           <div class='donut donut-stack' style='--stop1:{stop_1};--stop2:{stop_2}'
                role='img' aria-label='{present} present, {on_leave} on leave, {absent} absent'>
-            <div class='donut-value'><b>{round(present_pct)}%</b><span class='sub'>Present</span></div>
+            <div class='donut-value'><b>{round(present_pct)}%</b><span class='sub'>of all staff<br>present</span></div>
           </div>
           <div class='legend-list'>{legend_html}</div>
         </div>
@@ -872,7 +994,7 @@ def dashboard(request: Request):
       </div>
       <div class='card'>
         <div class='card-head'><div><h3>Needs your attention</h3>
-        <div class='sub'>Items waiting for a decision</div></div>
+        <div class='sub'>Nothing here moves until someone approves or rejects it</div></div>
         <span class='pill{'' if pending_total else ' chip-zero'}'>{pending_total}</span></div>
         <div class='pending-list'>{pending_html}</div>
       </div>

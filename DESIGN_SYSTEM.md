@@ -10,6 +10,7 @@ rewritten; `app/ui.py` post-processes what they emit.
 | `static/css/app.css` | All styling. Tokens at the top, components below |
 | `static/js/app.js` | Theme toggle, sidebar rail, mobile drawer, ribbon rendering |
 | `tests/test_ui_shell.py` | Regressions for the two render passes and the nav model |
+| `tests/test_dashboard_summary.py` | Regressions for the dashboard headline and its helpers |
 | `app/ui.py` | Icon sprite, navigation model, Jinja2 renderer |
 
 ## Colour
@@ -80,6 +81,32 @@ Handlers write fields as `<label>Shift</label><select …>`: siblings, with no
 and screen readers announce it. A control left with only a `placeholder` gets
 that promoted to `aria-label`; one that already has a visible label does not,
 since `aria-label` would outrank it.
+
+## Dashboard reading order
+
+The page is built to be understood top to bottom, so nobody has to assemble
+the answer from a grid of numbers:
+
+1. **The headline band** states today in a sentence, in English and Bangla,
+   with one big turnout figure and a status word (On track / Needs attention /
+   Action needed). Turnout is measured against the people *expected in* —
+   approved leave is excluded, because someone on sanctioned leave is not a
+   shortfall. The band's left edge takes the colour of that state.
+2. **Three primary tiles** — Present, Absent, On leave — which account for
+   every active employee exactly once, so they reconcile with the donut.
+   Late arrivals are a subset of Present and sit *inside* that tile as a
+   qualifier; as a fourth tile of equal weight they read as a separate group
+   and the counts appeared not to add up.
+3. **Three supporting tiles**, visibly lighter: checked out, selfies to
+   review, spoof attempts.
+4. Then the trends, the live table, and what is waiting for a decision.
+
+Counts carry a `_delta()` chip comparing them with the same figure a period
+earlier, since a bare number says nothing about whether today is normal. Use
+it only where an increase is good — the chip colours a rise green.
+
+`_bn()` renders Bengali numerals for the Bangla line. Keep it to prose; any
+figure somebody has to read back, copy or reconcile stays in ASCII digits.
 
 ## Attendance ribbon
 

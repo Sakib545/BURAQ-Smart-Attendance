@@ -1330,11 +1330,15 @@ tbody tr:last-child td { border-bottom: 0; }
 .mini-line { transition: none; }
 .mini-line span { transition: width .5s cubic-bezier(.4, 0, .2, 1); }
 .mini-line.is-empty { opacity: 0; }
-.mini-present  { background: var(--present); }
-.mini-late     { background: var(--late); }
-.mini-absent   { background: var(--absent); }
-.mini-leave    { background: var(--leave); }
-.mini-overtime { background: var(--overtime); }
+/* `.mini-line span` already sets a background and, as a class plus an
+   element, outranks a bare `.mini-absent`. Every bar therefore rendered
+   green whatever tone it was given — the tokens below had never once
+   applied. Matching the span makes them win. */
+.mini-line span.mini-present  { background: var(--present); }
+.mini-line span.mini-late     { background: var(--late); }
+.mini-line span.mini-absent   { background: var(--absent); }
+.mini-line span.mini-leave    { background: var(--leave); }
+.mini-line span.mini-overtime { background: var(--overtime); }
 
 
 /* --- 3. Card heads ------------------------------------------------------- */
@@ -1396,7 +1400,15 @@ tbody tr:last-child td { border-bottom: 0; }
 
 /* --- 6. Live attendance table -------------------------------------------- */
 
+/* `table { width: 100% }` makes a table fit its container rather than
+   overflow it, so the scroll container never scrolled — the table just
+   squeezed. At 390px the employee cell collapsed to 117px and wrapped a
+   name over five lines. A floor lets the columns stay readable and hands
+   the overflow to the scroller, which is what it is there for. */
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-scroll > table { min-width: 440px; }
+.table-scroll .kpi-row { flex-wrap: nowrap; }
+.table-scroll .kpi-row b { white-space: nowrap; }
 .dashboard-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .late-tag { background: var(--late-bg); color: var(--late); margin-left: 6px; }
 
@@ -2034,4 +2046,173 @@ input:focus, select:focus, textarea:focus {
   /* A button whose label is longer than the screen should wrap, not stretch
      the row: these are full sentences like "Download salary sheet". */
   .dashboard-tools > .btn { white-space: normal; text-align: center; }
+}
+
+
+/* ==========================================================================
+   Dashboard v10.1 — read it in one pass
+   The page used to open with seven identical tiles and leave you to work out
+   whether today was fine. It now answers that first, in words, and only then
+   shows the figures behind the answer.
+   ========================================================================== */
+
+/* --- 1. The headline band ------------------------------------------------ */
+
+.today-band {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  padding: 20px 22px;
+  margin-bottom: 18px;
+  border-left: 3px solid var(--rule-strong);
+}
+
+.today-band.state-present { border-left-color: var(--present); }
+.today-band.state-late    { border-left-color: var(--late); }
+.today-band.state-absent  { border-left-color: var(--absent); }
+.today-band.state-leave   { border-left-color: var(--leave); }
+
+.today-rate {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-width: 108px;
+}
+
+.today-pct {
+  font-family: var(--f-display);
+  font-size: 52px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -.035em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The unit should read as a unit, not as another digit. */
+.today-pct span { font-size: 22px; font-weight: 500; margin-left: 2px; opacity: .55; }
+
+.state-present .today-pct { color: var(--present); }
+.state-late    .today-pct { color: var(--late); }
+.state-absent  .today-pct { color: var(--absent); }
+.state-leave   .today-pct { color: var(--leave); }
+
+.today-state { font-size: 12px; }
+
+.today-copy { min-width: 0; flex: 1; }
+
+.today-line {
+  margin: 0;
+  font-size: 16.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  max-width: 68ch;
+}
+
+.today-line b { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Bangla sits a step quieter than the English line: it repeats it rather
+   than adding to it, and Hind Siliguri needs a touch more leading. */
+.today-bn {
+  margin: 7px 0 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--muted);
+  max-width: 68ch;
+}
+
+.today-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 11px;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+/* --- 2. Direction chips -------------------------------------------------- */
+
+.delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.delta-up   { color: var(--present); }
+.delta-down { color: var(--absent); }
+.delta-flat { color: var(--faint); font-weight: 400; }
+
+.delta-icon {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+}
+
+.delta-up .delta-icon   { border-bottom: 5px solid currentColor; }
+.delta-down .delta-icon { border-top: 5px solid currentColor; }
+
+/* --- 3. Two tiers of KPI ------------------------------------------------- */
+
+/* The three tiles that account for every employee carry the weight. */
+.dashboard-kpis { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+
+.metric-line { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+
+/* Late arrivals are a subset of Present, so the count lives beside that
+   figure rather than in a tile of its own that looked like a fourth group. */
+.kpi-note {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+
+/* Supporting tiles: same anatomy, visibly secondary. */
+.dashboard-kpis-minor {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 12px;
+}
+
+.dashboard-kpi.is-minor { padding: 13px 15px; }
+.dashboard-kpi.is-minor .metric { font-size: 21px; }
+.dashboard-kpi.is-minor .kpi-symbol { width: 28px; height: 28px; font-size: 14px; }
+.dashboard-kpi.is-minor .metric-foot { font-size: 11.5px; }
+
+/* --- 4. Donut label ------------------------------------------------------
+   `<b>92%</b><span class="sub">Present</span>` ran together as "92%Present",
+   because .sub is inline and nothing separated them. */
+
+.donut-value b { display: block; line-height: 1.05; }
+.donut-value .sub { display: block; margin-top: 3px; line-height: 1.3; }
+
+/* --- 5. Narrow screens --------------------------------------------------- */
+
+@media (max-width: 760px) {
+  .today-band {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 17px;
+  }
+
+  .today-rate {
+    flex-direction: row;
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    min-width: 0;
+  }
+
+  .today-pct { font-size: 42px; }
+  .today-line { font-size: 15.5px; }
 }
