@@ -48,31 +48,49 @@ def sample_body() -> str:
         for name, staff_id, dept, state, cin, cout in SAMPLE_PEOPLE
     )
 
+    week = [("Sun", 142), ("Mon", 151), ("Tue", 138), ("Wed", 147),
+            ("Thu", 150), ("Fri", 12), ("Sat", 144)]
+    peak = max(v for _, v in week)
     bars = ""
-    for day, value in zip(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], [142, 151, 138, 147, 150, 12, 144]):
-        height = max(6, int(value / 151 * 150))
-        bars += (f"<div class='bar-wrap'><div class='bar' style='height:{height}px'>"
-                 f"<span class='bar-value'>{value}</span></div><div class='bar-label'>{day}</div></div>")
+    for day, value in week:
+        today = " is-today" if day == "Sat" else ""
+        bars += (f"<div class='bar-wrap'><div class='bar{today}' "
+                 f"style='height:{max(4.0, value / peak * 100):.1f}%' "
+                 f"title='{day}: {value} present'>"
+                 f"<span class='bar-value'>{value}</span></div>"
+                 f"<div class='bar-label'>{day}</div></div>")
 
+    # Tone names and icons match app/main.py's _kpi_card, so the preview and
+    # the real dashboard cannot drift apart again.
     kpis = [
-        ("kpi-green", "♙", "Present today", "144", "92% of workforce", 92, "var(--present)"),
-        ("kpi-orange", "◷", "Late today", "7", "Needs attention", 12, "var(--late)"),
-        ("kpi-red", "♙", "Absent", "5", "3.2% of workforce", 8, "var(--absent)"),
-        ("kpi-blue", "☂", "On leave", "8", "5.1% of workforce", 14, "var(--leave)"),
-        ("kpi-purple", "◷", "Overtime today", "320m", "96 check-outs", 0, "var(--overtime)"),
+        ("present", "check", "Present today", "144", "92% of workforce", 92.0),
+        ("late", "clock", "Late arrivals", "7", "Needs attention", 12.0),
+        ("absent", "x", "Absent", "5", "3.2% of workforce", 8.0),
+        ("leave", "calendar-minus", "On approved leave", "8", "5.1% of workforce", 14.0),
+        ("overtime", "trending-up", "Checked out today", "96", "61% of those present", 61.0),
     ]
     kpi_html = ""
-    for cls, glyph, label, value, foot, pct, colour in kpis:
-        line = f"<div class='mini-line'><span style='width:{pct}%;background:{colour}'></span></div>" if pct else ""
-        kpi_html += (f"<div class='card dashboard-kpi'><div class='kpi-row'><span class='kpi-symbol {cls}'>{glyph}</span>"
-                     f"<div><div class='metric-label'>{label}</div><div class='metric'>{value}</div></div></div>"
-                     f"<div class='metric-foot'>{foot}</div>{line}</div>")
+    for tone, icon_name, label, value, foot, pct in kpis:
+        kpi_html += (
+            f"<div class='card dashboard-kpi'><div class='kpi-row'>"
+            f"<span class='kpi-symbol kpi-{tone}'>{ui.icon(icon_name)}</span>"
+            f"<div class='kpi-text'><div class='metric-label'>{label}</div>"
+            f"<div class='metric'>{value}</div></div></div>"
+            f"<div class='metric-foot'>{foot}</div>"
+            f"<div class='mini-line'><span class='mini-{tone}' style='width:{pct}%'></span></div>"
+            f"</div>")
 
+    # A three-segment breakdown of one total, like the app. The old preview
+    # drew a single-value ring beside four legend rows that did not sum to it.
+    staff = 157
+    seg = [("present", "Present", 144), ("leave", "On leave", 8), ("absent", "Absent", 5)]
+    stop_1 = seg[0][2] / staff * 100
+    stop_2 = (seg[0][2] + seg[1][2]) / staff * 100
     legend = "".join(
-        f"<div class='legend-row'><span class='legend-dot' style='background:var(--{key})'></span>"
-        f"<span>{label}</span><b>{count}</b></div>"
-        for key, label, count in [("present", "Present", 144), ("late", "Late", 7),
-                                  ("absent", "Absent", 5), ("leave", "On leave", 8)]
+        f"<div class='legend-row'><span class='legend-dot legend-{key}'></span>"
+        f"<span>{label}</span><b>{count}</b>"
+        f"<span class='legend-pct'>{count / staff * 100:.1f}%</span></div>"
+        for key, label, count in seg
     )
 
     quick = "".join(
@@ -91,12 +109,12 @@ def sample_body() -> str:
 <div class='dashboard-main-grid'>
   <div class='card dashboard-panel'><div class='card-head'><h3>7-day attendance trend</h3><a class='btn secondary' href='#'>View report</a></div><div class='chart'>{bars}</div></div>
   <div class='card dashboard-panel'><div class='card-head'><h3>Workforce readiness</h3></div>
-    <div class='readiness-wrap'><div class='donut' style='--pct:92'><div class='donut-value'><b>92%</b><span class='sub'>Today</span></div></div>
+    <div class='readiness-wrap'><div class='donut donut-stack' style='--stop1:{stop_1:.1f};--stop2:{stop_2:.1f}'><div class='donut-value'><b>92%</b><span class='sub'>Today</span></div></div>
     <div class='legend-list'>{legend}</div></div></div>
 </div>
 <div class='section-gap'></div>
 <div class='card'><div class='card-head'><h3>Live attendance</h3><span class='pill'>157 employees</span></div>
-  <div style='overflow:auto'><table><thead><tr><th>Employee</th><th>Status</th><th>Check in</th><th>Check out</th><th>Last 30 days</th></tr></thead><tbody>{rows}</tbody></table></div></div>
+  <div class='table-scroll'><table class='dashboard-table'><thead><tr><th>Employee</th><th>Status</th><th>Check in</th><th>Check out</th><th>Last 30 days</th></tr></thead><tbody>{rows}</tbody></table></div></div>
 <div class='section-gap'></div>
 <h3 style='margin:2px 0 12px'>Quick actions</h3>
 <div class='dashboard-quick'>{quick}</div>

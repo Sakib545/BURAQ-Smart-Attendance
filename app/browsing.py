@@ -473,7 +473,7 @@ def tracker_personal_page(request: Request, token: str):
         employee = invite_employee(c, token)
     if not employee:
         body = ("<div class='login'><div class='card'><div class='title'>BURAQ Duty Tracker</div>"
-                "<div class='notice' style='background:#fee2e2;color:#991b1b'>এই link-টি আর কাজ করছে না। "
+                "<div class='notice notice-bad'>এই link-টি আর কাজ করছে না। "
                 "Admin/HR-এর কাছ থেকে নতুন link নিন।</div></div></div>")
         return HTMLResponse(layout("BURAQ Duty Tracker", body).body, status_code=404)
     store = store_url()
@@ -645,7 +645,7 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
         + "</td></tr>"
         for d in devices
     ) or "<tr><td colspan='4'>No PC connected yet.</td></tr>"
-    notice = f"<div class='notice' style='background:#fee2e2;color:#991b1b'>{escape(error)}</div>" if error else ""
+    notice = f"<div class='notice notice-bad'>{escape(error)}</div>" if error else ""
     if new_code:
         notice += (
             f"<div class='card'><div class='eyebrow'>One-time code for {escape(new_code['name'])}</div>"
@@ -653,14 +653,14 @@ def _page(request: Request, date: str, new_code: dict | None = None, error: str 
             "<div class='sub'>Type this into the BURAQ extension on that employee's PC. Valid for 15 minutes, works once, "
             "and is not shown again.</div>"
             f"<label>Or send this link to the employee (install steps + this code)</label>"
-            f"<input readonly onclick='this.select()' value='{escape(new_code['link'])}'></div><div class='section-gap'></div>"
+            f"<input readonly aria-label='Tracker link' onclick='this.select()' value='{escape(new_code['link'])}'></div><div class='section-gap'></div>"
         )
     pair_form = ""
     if manage:
         options = "".join(f"<option value='{e['id']}'>{escape(e['staff_id'])} — {escape(e['name'])}</option>" for e in employees)
         link_rows = "".join(
             f"<tr><td><b>{escape(e['name'])}</b><div class='sub'>{escape(e['staff_id'])}</div></td>"
-            f"<td><input readonly onclick='this.select()' value='{escape(base + '/tracker/i/' + links[e['id']])}'></td>"
+            f"<td><input readonly aria-label='Tracker link for {escape(str(e['name']))}' onclick='this.select()' value='{escape(base + '/tracker/i/' + links[e['id']])}'></td>"
             f"<td><form method='post' action='/browsing/invites/{e['id']}/reset'><button class='btn secondary' "
             "title='Cancel the old link and make a new one'>New link</button></form></td></tr>"
             for e in employees

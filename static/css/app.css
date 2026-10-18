@@ -46,6 +46,11 @@
   --overtime: #6e5aae;
   --overtime-bg: #eeeafa;
 
+  /* Text that sits ON TOP of a solid state fill (.btn.danger, filled bars).
+     The state colours themselves are dark in light mode and light in dark
+     mode, so the ink on top has to flip with them. */
+  --state-ink: #ffffff;
+
   /* geometry */
   --r-sm: 6px;
   --r: 10px;
@@ -85,10 +90,25 @@
   --rule-strong: #35453e;
   --brand: #0a2b22;
   --brand-ink: #cfe3da;
+  --brand-hover: #0f3f31;
   --action: #e8f0ec;
   --action-hover: #ffffff;
   --action-ink: #0e1512;
-  --present-bg: #10312400;
+
+  /* Semantic colour has to flip too. The light-mode values (#1c7c54,
+     #b4690e, #b42318, #3d6db5, #6e5aae) are dark by design, so on a dark
+     ground they measured 2.6-4.1:1 — every status pill, KPI tile, calendar
+     day, chart bar, legend swatch and the active mobile tab failed WCAG AA.
+     These are the same hues lifted to pass on canvas, all three surfaces
+     and their own tinted pill ground (worst case 4.98:1). */
+  --present: #34d399;
+  --late: #fbbf24;
+  --absent: #f87171;
+  --leave: #60a5fa;
+  --overtime: #a78bfa;
+  --focus: #35b980;
+  --state-ink: #0e1512;
+
   --present-bg: #14312455;
   --late-bg: #3a2a0e55;
   --absent-bg: #3a161255;
@@ -211,6 +231,9 @@ table td,
   font-weight: 700;
   letter-spacing: -.02em;
   color: #fff;
+  /* Every other link in the shell clears this; the wordmark was missed, so
+     the brand sat under a default underline. */
+  text-decoration: none;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -544,14 +567,6 @@ a.card:hover,
 }
 
 .btn.secondary:hover { background: var(--surface-2); }
-
-.btn.danger {
-  background: var(--absent-bg);
-  border-color: color-mix(in srgb, var(--absent) 28%, transparent);
-  color: var(--absent);
-}
-
-.btn.danger:hover { background: color-mix(in srgb, var(--absent) 16%, var(--surface)); }
 
 .btn[disabled], .btn.disabled { opacity: .5; pointer-events: none; }
 
@@ -926,6 +941,9 @@ tbody tr:last-child td { border-bottom: 0; }
   display: inline-flex;
   gap: 2px;
   align-items: center;
+  flex-wrap: wrap;
+  max-width: 100%;
+  row-gap: 3px;
 }
 
 .ribbon i {
@@ -1136,6 +1154,7 @@ tbody tr:last-child td { border-bottom: 0; }
   [data-nav="rail"] .logo { justify-content: flex-start; padding: 8px; }
 
   .menu-btn { display: grid; }
+  #navToggle { display: none; }
   .page { padding: 18px 14px 92px; }
   .topbar { padding: 0 14px; }
   .dashboard-main-grid, .two, .readiness-wrap { grid-template-columns: minmax(0, 1fr); }
@@ -1644,8 +1663,8 @@ input[aria-invalid="true"] { border-color: var(--absent); }
 .warn-card b { color: var(--late); }
 .warn-card .sub { margin-top: 5px; line-height: 1.55; }
 
-.btn.danger { background: var(--absent); border-color: var(--absent); color: #fff; }
-.btn.danger:hover { background: color-mix(in srgb, var(--absent) 85%, #000); }
+.btn.danger { background: var(--absent); border-color: var(--absent); color: var(--state-ink); }
+.btn.danger:hover { background: color-mix(in srgb, var(--absent) 85%, var(--ink)); }
 
 .pay-form .hint { margin: 0 0 10px; }
 
@@ -1921,4 +1940,98 @@ input:focus, select:focus, textarea:focus {
   .card, .btn, .side-nav a, .dashboard-table tbody tr,
   input, select, textarea { transition: none; }
   a.card:hover, .control-card:hover, .dashboard-kpi-link:hover { transform: none; }
+}
+
+
+/* ==========================================================================
+   Shell accessibility + mobile tab bar
+   ========================================================================== */
+
+/* The sidebar puts 16 nav links ahead of the content for keyboard users. */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  padding: 9px 14px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  box-shadow: var(--sh-2);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transform: translateY(-160%);
+  transition: transform .16s ease;
+}
+
+.skip-link:focus-visible { transform: none; }
+
+/* "More" is a button now, not an <a href="#"> that forwarded its click, so
+   it needs the surrounding tab styling to apply to a <button> as well. */
+.tabbar-more {
+  font-family: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+@media (max-width: 980px) {
+  .tabbar-more {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 5px 2px;
+    font-size: 10.5px;
+    border-radius: var(--r-sm);
+  }
+
+  .tabbar-more .ic { font-size: 19px; }
+}
+
+/* Rank badges for the leaderboard podium and table.
+   These replaced 🥇🥈🥉, which were the only colour emoji left in a table
+   and carried their meaning purely as an image a screen reader skips. */
+.rank {
+  display: inline-grid;
+  place-items: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  border: 1px solid var(--hairline);
+}
+
+.rank-1 { background: color-mix(in srgb, var(--late) 18%, var(--surface)); color: var(--late); border-color: color-mix(in srgb, var(--late) 34%, transparent); }
+.rank-2 { background: var(--surface-3); color: var(--ink-2); border-color: var(--rule-strong); }
+.rank-3 { background: color-mix(in srgb, var(--absent) 13%, var(--surface)); color: var(--absent); border-color: color-mix(in srgb, var(--absent) 26%, transparent); }
+
+.rank-lg { min-width: 42px; height: 42px; font-size: 17px; font-family: var(--f-display); }
+
+
+/* ==========================================================================
+   Narrow-viewport overflow
+   ========================================================================== */
+
+/* .dashboard-tools is a plain non-wrapping flex row. On the dashboard that is
+   two controls and fits, but /payroll puts a month picker and four action
+   buttons in it — 719px of content in a 390px viewport, which pushed the whole
+   page sideways and left a horizontal scrollbar under every screen. */
+.dashboard-tools { flex-wrap: wrap; }
+
+@media (max-width: 620px) {
+  .dashboard-tools { width: 100%; }
+  .dashboard-tools > .btn,
+  .dashboard-tools > form { flex: 1 1 auto; }
+  /* A button whose label is longer than the screen should wrap, not stretch
+     the row: these are full sentences like "Download salary sheet". */
+  .dashboard-tools > .btn { white-space: normal; text-align: center; }
 }

@@ -54,6 +54,10 @@ ICON_PATHS: dict[str, str] = {
     "refresh": '<path d="M20.2 12a8.2 8.2 0 1 1-2.5-5.9"/><path d="M20.2 4.4v4.6h-4.6"/>',
     "receipt": '<path d="M6.2 3.6h11.6v17l-2.3-1.5-2.3 1.5-2.3-1.5-2.4 1.5-2.3-1.5z"/><path d="M9.2 8.6h5.6M9.2 12.2h5.6"/>',
     "chevron-right": '<path d="M9.6 5.6 16 12l-6.4 6.4"/>',
+    "trophy": '<path d="M8 4.2h8v4.4a4 4 0 0 1-8 0z"/><path d="M8 5.4H5.6v1.4a3 3 0 0 0 2.4 2.9"/><path d="M16 5.4h2.4v1.4a3 3 0 0 1-2.4 2.9"/><path d="M12 12.6v3.2M9 19.8h6M10.2 15.8h3.6l.6 4h-4.8z"/>',
+    "medal": '<circle cx="12" cy="14.6" r="5.2"/><path d="M12 12.4l.9 1.8 2 .3-1.45 1.4.34 2L12 17l-1.79.9.34-2L9.1 14.5l2-.3z"/><path d="M8.6 9.6 6.4 3.6h4L12 7.4M15.4 9.6l2.2-6h-4"/>',
+    "clipboard": '<rect x="5.4" y="4.6" width="13.2" height="16" rx="2.2"/><path d="M9.2 4.6V3.4a1 1 0 0 1 1-1h3.6a1 1 0 0 1 1 1v1.2z"/><path d="M8.8 11h6.4M8.8 14.6h4.2"/>',
+    "pin": '<path d="M12 21.2s6.2-5.6 6.2-10.2a6.2 6.2 0 1 0-12.4 0C5.8 15.6 12 21.2 12 21.2z"/><circle cx="12" cy="10.6" r="2.4"/>',
 }
 
 
@@ -112,13 +116,125 @@ GLYPH_ICONS: dict[str, str] = {
     "🏢": "building",
     "🔄": "refresh",
     "🏖": "calendar-minus",
+    # Missed by the original sweep, so these rendered as colour emoji right
+    # next to the monochrome stroke icons — most visibly the Attendance
+    # Center cards, where 5 of 7 were icons and 2 were emoji.
+    "🏆": "trophy",
+    "🥇": "medal",
+    "📋": "clipboard",
+    "📍": "pin",
+    "👏": "check",
+    "➕": "plus",
+    "⬇": "download",
+    "✓": "check",
+    "✕": "x",
 }
 
 _GLYPH_RE = re.compile("[" + "".join(GLYPH_ICONS) + "]\ufe0f?")
 
+# A tag, or a whole <script>/<style> element. Quoted attribute values are
+# consumed as a unit so a ">" inside one (`onsubmit="... a > b ..."`) does not
+# end the tag early.
+_ATTRS = r'(?:[^>"\']|"[^"]*"|\'[^\']*\')*'
+_MARKUP_RE = re.compile(
+    rf"(<(script|style)\b{_ATTRS}>.*?</\2\s*>|<[a-zA-Z/!?]{_ATTRS}>)",
+    re.S | re.I,
+)
+
 
 def iconify(html: str) -> str:
-    return _GLYPH_RE.sub(lambda m: str(icon(GLYPH_ICONS[m.group()[0]])), html)
+    """Swap legacy decorative glyphs for sprite icons in text content only.
+
+    Substituting blindly across the whole document would also rewrite glyphs
+    inside attribute values and <script> bodies, injecting an <svg> element
+    into JavaScript. `app/main.py` already ships `message('\u26a0\ufe0f ' + ...)`
+    inside an inline script, so mapping that character used to be enough to
+    break the page. Only the text between tags is rewritten.
+    """
+    def sub(text: str) -> str:
+        return _GLYPH_RE.sub(lambda m: str(icon(GLYPH_ICONS[m.group()[0]])), text)
+
+    out: list[str] = []
+    pos = 0
+    for m in _MARKUP_RE.finditer(html):
+        out.append(sub(html[pos:m.start()]))
+        out.append(m.group())
+        pos = m.end()
+    out.append(sub(html[pos:]))
+    return "".join(out)
+
+
+# --------------------------------------------------------------------------
+# Label association
+#
+# Route handlers write fields as `<label>Shift</label><select ...>`: a sibling
+# label with no `for=` and no wrapping. It looks right, but nothing connects
+# the two, so a screen reader announces the control unnamed and clicking the
+# label does not focus the field. There were 85 of them across 12 pages.
+#
+# Rather than hand-editing 90-odd handlers, the pair is wired up at render
+# time, the same way `iconify()` handles glyphs.
+# --------------------------------------------------------------------------
+
+_ID_RE = re.compile(r'\bid=["\']([^"\']+)["\']')
+_CONTROL_RE = re.compile(
+    rf'<label(?![^>]*\bfor=)({_ATTRS})>(?!\s*<(?:input|select|textarea))'
+    rf'(.*?)</label>(\s*)<(input|select|textarea)\b({_ATTRS})(/?)>',
+    re.S | re.I,
+)
+
+
+def associate_labels(html: str) -> str:
+    taken = set(_ID_RE.findall(html))
+    seq = 0
+
+    def fresh() -> str:
+        nonlocal seq
+        while True:
+            seq += 1
+            candidate = f"fld-{seq}"
+            if candidate not in taken:
+                taken.add(candidate)
+                return candidate
+
+    def fix(m: re.Match[str]) -> str:
+        label_attrs, text, gap, tag, attrs, slash = m.groups()
+        found = _ID_RE.search(attrs)
+        if found:
+            control_id, control = found.group(1), f"<{tag}{attrs}{slash}>"
+        else:
+            control_id = fresh()
+            control = f'<{tag} id="{control_id}"{attrs}{slash}>'
+        return f'<label{label_attrs} for="{control_id}">{text}</label>{gap}{control}'
+
+    wired = _CONTROL_RE.sub(fix, html)
+
+    # A control left with only a placeholder is still unnamed: a placeholder
+    # is a hint, it vanishes as soon as you type, and it is not a label. Those
+    # get the hint promoted to a real name. Controls that just picked up a
+    # visible label above are skipped, because aria-label would outrank it and
+    # the field would be announced by its hint instead of its label.
+    labelled = set(_FOR_RE.findall(wired))
+
+    def name_from_placeholder(m: re.Match[str]) -> str:
+        attrs = m.group(1)
+        found = _ID_RE.search(attrs)
+        if found and found.group(1) in labelled:
+            return m.group(0)
+        hint = _PLACEHOLDER_RE.search(attrs)
+        if not hint or not hint.group(2).strip():
+            return m.group(0)
+        return f'<input aria-label="{hint.group(2).strip()}"{attrs}>'
+
+    return _NAMELESS_RE.sub(name_from_placeholder, wired)
+
+
+_FOR_RE = re.compile(r'\bfor=["\']([^"\']+)["\']')
+_NAMELESS_RE = re.compile(
+    rf'<input(?![^>]*\b(?:aria-label|aria-labelledby)=)({_ATTRS})>',
+    re.I,
+)
+_PLACEHOLDER_RE = re.compile(r'\bplaceholder=(["\'])(.*?)\1', re.S)
 
 
 # --------------------------------------------------------------------------
@@ -163,7 +279,14 @@ ACTIVE_ALIASES = {
     "operations": "leave",
     "hr": "users",
     "audit": "users",
+    # The leaderboard is reached from the Attendance Center and belongs to
+    # Performance. Without this it matched no nav entry, so neither the
+    # sidebar nor the mobile tab bar showed where you were.
+    "leaderboard": "performance",
+    # Hub pages that own no nav entry. Mapped explicitly so an unhighlighted
+    # sidebar reads as deliberate rather than as a missing alias.
     "account": "",
+    "admin": "",
 }
 
 
@@ -181,9 +304,22 @@ def build_nav(perm: Callable[[str], bool], badges: dict[str, int] | None = None)
     return groups
 
 
-def build_tabbar(groups: list[dict]) -> list[dict]:
+def build_tabbar(groups: list[dict], active: str = "") -> list[dict]:
+    """The four mobile tabs, always including the page you are on.
+
+    This used to return `flat[:4]` unconditionally, so on any page outside the
+    first four nav entries — Employees, Payroll, Reports, Settings and nine
+    others, 13 of 23 pages — no tab was marked active and the bar gave no
+    clue where you were. The first three stay put so the bar does not reshuffle
+    under your thumb; only the fourth slot follows you.
+    """
     flat = [item for group in groups for item in group["entries"]]
-    return flat[:4]
+    tabs = flat[:4]
+    if active and not any(item["key"] == active for item in tabs):
+        current = next((item for item in flat if item["key"] == active), None)
+        if current is not None:
+            tabs = tabs[:3] + [current]
+    return tabs
 
 
 # --------------------------------------------------------------------------
@@ -216,14 +352,15 @@ def render_page(
     today_line: str = "",
 ) -> str:
     nav_groups = nav_groups or []
+    current = ACTIVE_ALIASES.get(active, active)
     return env.get_template("base.html").render(
         title=title,
-        body=Markup(iconify(body)),
+        body=Markup(iconify(associate_labels(body))),
         sprite=sprite(),
         chrome=chrome,
         nav_groups=nav_groups,
-        tabbar=build_tabbar(nav_groups),
-        active=ACTIVE_ALIASES.get(active, active),
+        tabbar=build_tabbar(nav_groups, current),
+        active=current,
         user_name=user_name,
         role_label=role_label,
         initials=initials_of(user_name),

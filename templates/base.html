@@ -11,11 +11,14 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Hind+Siliguri:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="/static/css/app.css?v={{ asset_v }}">
 <script>
-(function(){var r=document.documentElement;try{var t=localStorage.getItem('buraq-theme');if(t)r.dataset.theme=t;var n=localStorage.getItem('buraq-nav');if(n)r.dataset.nav=n;}catch(e){}})();
+(function(){var r=document.documentElement,t=null,n=null;try{t=localStorage.getItem('buraq-theme');n=localStorage.getItem('buraq-nav');}catch(e){}
+if(!t&&window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)t='dark';
+r.dataset.theme=t||'light';if(n)r.dataset.nav=n;})();
 </script>
 </head>
 <body>
 {{ sprite }}
+{% if chrome %}<a class="skip-link" href="#content">Skip to content</a>{% endif %}
 
 {% if chrome %}
 <div class="scrim" aria-hidden="true"></div>
@@ -58,24 +61,24 @@
   <main class="main">
     <header class="topbar">
       <div class="topbar-left">
-        <button class="icon-btn menu-btn" id="menuToggle" type="button" aria-label="Open navigation">{{ icon('menu') }}</button>
-        <button class="icon-btn" id="navToggle" type="button" aria-label="Collapse navigation">{{ icon('panel') }}</button>
+        <button class="icon-btn menu-btn" id="menuToggle" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">{{ icon('menu') }}</button>
+        <button class="icon-btn" id="navToggle" type="button" aria-label="Collapse navigation" aria-controls="sidebar" aria-pressed="false">{{ icon('panel') }}</button>
         <div class="title">{{ title }}</div>
       </div>
       <div class="actions">
         <div class="today-strip"><span class="dot"></span>{{ today_line }}</div>
-        <button class="icon-btn" id="themeToggle" type="button" aria-label="Switch theme">{{ icon('contrast') }}</button>
+        <button class="icon-btn" id="themeToggle" type="button" aria-label="Switch theme" aria-pressed="false">{{ icon('contrast') }}</button>
       </div>
     </header>
 
-    <div class="page">{{ body }}</div>
+    <div class="page" id="content">{{ body }}</div>
   </main>
 
   <nav class="tabbar">
     {% for item in tabbar %}
-    <a href="{{ item.url }}" class="{{ 'active' if item.key == active else '' }}">{{ icon(item.icon) }}<span>{{ item.label }}</span></a>
+    <a href="{{ item.url }}" class="{{ 'active' if item.key == active else '' }}"{% if item.key == active %} aria-current="page"{% endif %}>{{ icon(item.icon) }}<span>{{ item.label }}</span></a>
     {% endfor %}
-    <a href="#" id="menuToggle2" onclick="document.getElementById('menuToggle').click();return false;">{{ icon('menu') }}<span>More</span></a>
+    <button type="button" class="tabbar-more" id="menuToggle2" aria-controls="sidebar" aria-expanded="false">{{ icon('menu') }}<span>More</span></button>
   </nav>
 </div>
 {% else %}

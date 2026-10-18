@@ -355,8 +355,8 @@ def save_setup(request: Request, email: str = Form(...), password: str = Form(..
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
-    msg = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Email অথবা Password সঠিক নয়।</div>" if error else ""
-    if error == "locked": msg = "<div class='notice' style='background:#fee2e2;color:#991b1b'>অনেকবার ভুল চেষ্টা হয়েছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।</div>"
+    msg = "<div class='notice notice-bad'>Email অথবা Password সঠিক নয়।</div>" if error else ""
+    if error == "locked": msg = "<div class='notice notice-bad'>অনেকবার ভুল চেষ্টা হয়েছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।</div>"
     body = f"""<div class='login'><div class='card'><div class='title'>BURAQ Smart Attendance</div><p class='sub'>Super Admin, Admin এবং HR-এর জন্য একটি নিরাপদ login</p>{msg}<form method='post'><label>Email</label><input type='email' name='email' placeholder='name@buraq.com' autocomplete='username' required><label>Password</label><input type='password' name='password' placeholder='Password' autocomplete='current-password' required><button class='btn' type='submit'>Sign In</button></form></div></div>"""
     return layout("Unified Login", body)
 
@@ -436,15 +436,15 @@ def my_account_page(request: Request, saved: str = "", error: str = ""):
     require_login(request)
     notice = ""
     if saved:
-        notice = "<div class='notice'>Account information updated successfully.</div>"
+        notice = "<div class='notice notice-ok'>Account information updated successfully.</div>"
     elif error == "password":
-        notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Current password is incorrect.</div>"
+        notice = "<div class='notice notice-bad'>Current password is incorrect.</div>"
     elif error == "mismatch":
-        notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>New passwords do not match or are shorter than 8 characters.</div>"
+        notice = "<div class='notice notice-bad'>New passwords do not match or are shorter than 8 characters.</div>"
     elif error == "email":
-        notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>This email is already being used by another account.</div>"
+        notice = "<div class='notice notice-bad'>This email is already being used by another account.</div>"
     elif error:
-        notice = "<div class='notice' style='background:#fee2e2;color:#991b1b'>Account could not be updated.</div>"
+        notice = "<div class='notice notice-bad'>Account could not be updated.</div>"
 
     if request.session.get("role") == "super_admin" and request.session.get("admin"):
         name = get_setting("admin_name", "Super Admin")
@@ -1048,7 +1048,7 @@ def mask_secret(value: str, visible: int = 4) -> str:
 def settings_page(request: Request, saved: str = "", error: str = ""):
     require_permission(request, "settings_view")
     access=get_setting("whatsapp_access_token"); phone=get_setting("whatsapp_phone_number_id"); verify=get_setting("whatsapp_verify_token")
-    notice = "<div class='notice'>Settings সফলভাবে save হয়েছে।</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Action ব্যর্থ হয়েছে। তথ্য পরীক্ষা করুন।</div>" if error else "")
+    notice = "<div class='notice notice-ok'>Settings সফলভাবে save হয়েছে।</div>" if saved else ("<div class='notice notice-bad'>Action ব্যর্থ হয়েছে। তথ্য পরীক্ষা করুন।</div>" if error else "")
     webhook=f"{base_url(request)}/webhook/whatsapp"
     if has_permission(request, "whatsapp_settings"):
         body=f"{notice}<div class='two'><div class='card'><h2>WhatsApp Connection</h2><p><span class='status {'ok' if configured() else 'warn'}'>{'Connected' if configured() else 'Setup needed'}</span></p><div class='sub'>Access Token</div><div class='masked'>{escape(mask_secret(access))}</div><br><div class='sub'>Phone Number ID</div><div class='masked'>{escape(mask_secret(phone))}</div><br><div class='sub'>Verify Token</div><div class='masked'>{escape(mask_secret(verify))}</div><br><details><summary class='btn secondary'>Edit credentials</summary><form method='post' style='margin-top:15px'><label>New Access Token</label><input type='password' name='access_token'><label>New Phone Number ID</label><input name='phone_id'><label>New Verify Token</label><input type='password' name='verify_token'><button class='btn'>Save securely</button></form></details></div><div class='card'><h2>Connection & Webhook</h2><div class='sub'>Callback URL</div><div class='code'>{escape(webhook)}</div><p class='sub'>Sensitive access is controlled by Super Admin permission.</p></div></div>"
@@ -1080,7 +1080,7 @@ def settings_page(request: Request, saved: str = "", error: str = ""):
         <details><summary class='btn secondary'>Verify a backup</summary><form method='post' action='/settings/full-backup/inspect' enctype='multipart/form-data' style='margin-top:14px'>
         <input type='file' name='backup_file' accept='.buraq,.gz' required><button class='btn secondary'>Check Without Restoring</button></form></details>
         <details><summary class='btn danger'>Restore on this server</summary>
-        <div class='notice' style='background:#fee2e2;color:#991b1b;margin-top:14px'>Restore বর্তমান database replace করবে। Restore-এর আগে automatic safety backup রাখা হবে।</div>
+        <div class='notice notice-bad' style='margin-top:14px'>Restore বর্তমান database replace করবে। Restore-এর আগে automatic safety backup রাখা হবে।</div>
         <form method='post' action='/settings/full-restore' enctype='multipart/form-data'>
         <label>BURAQ encrypted full backup (.buraq)</label><input type='file' name='backup_file' accept='.buraq,.gz' required>
         <label>Confirmation</label><input name='confirmation' placeholder='RESTORE BURAQ' required>
@@ -1175,7 +1175,7 @@ async def full_backup_inspect(request: Request):
         return layout("Backup Verification",body,request,"settings")
     except Exception as exc:
         logger.warning("Backup inspection failed: %s",exc)
-        body=f"<div class='card'><h2>Backup Verification Failed</h2><div class='notice' style='background:#fee2e2;color:#991b1b'>{escape(str(exc))}</div><a class='btn' href='/settings'>Back to Settings</a></div>"
+        body=f"<div class='card'><h2>Backup Verification Failed</h2><div class='notice notice-bad'>{escape(str(exc))}</div><a class='btn' href='/settings'>Back to Settings</a></div>"
         return layout("Backup Verification",body,request,"settings")
     finally:
         temporary.unlink(missing_ok=True)
@@ -1222,7 +1222,7 @@ def employees_page(request: Request, q: str = "", department: str = "", shift: s
         actions=f"<a class='btn secondary' href='/employees/{r['id']}'>Profile</a>"
         if has_permission(request,'duty_view'): actions += f"<a class='btn secondary' href='/employees/{r['id']}/duty'>Duty</a>"
         if can_reset: actions += f"<a class='btn danger' href='/employees/{r['id']}/reset'>Reset</a>"
-        tr.append(f"<tr><td><input class='checkbox' type='checkbox' name='employee_ids' value='{r['id']}'></td><td><div style='display:flex;gap:9px;align-items:center'><span class='avatar'>{escape(initials)}</span><span><b>{escape(r['name'])}</b><br><span class='sub'>{escape(r['staff_id'])}</span></span></div></td><td>{escape(r['designation'] or '—')}</td><td>{escape(r['department'] or '—')}</td><td>{escape(r['shift'])}</td><td><span class='status {reg}'>{escape(r['registration_status'])}</span><br><span class='status {face}' style='margin-top:5px'>{r['face_count']}/3 Face</span></td><td>{escape(r['last_attendance'] or 'Never')}</td><td><div class='table-actions'>{actions}</div></td></tr>")
+        tr.append(f"<tr><td><input class='checkbox' type='checkbox' name='employee_ids' value='{r['id']}' aria-label='Select {escape(str(r['name']))}'></td><td><div style='display:flex;gap:9px;align-items:center'><span class='avatar'>{escape(initials)}</span><span><b>{escape(r['name'])}</b><br><span class='sub'>{escape(r['staff_id'])}</span></span></div></td><td>{escape(r['designation'] or '—')}</td><td>{escape(r['department'] or '—')}</td><td>{escape(r['shift'])}</td><td><span class='status {reg}'>{escape(r['registration_status'])}</span><br><span class='status {face}' style='margin-top:5px'>{r['face_count']}/3 Face</span></td><td>{escape(r['last_attendance'] or 'Never')}</td><td><div class='table-actions'>{actions}</div></td></tr>")
     depopts=''.join(f"<option {'selected' if department==d['department'] else ''}>{escape(d['department'])}</option>" for d in deps)
     add=''
     if can_add:
@@ -1432,11 +1432,13 @@ def leaderboard_page(request: Request, month: str=""):
     chosen=(request.query_params.get("department") or "").strip()
     if chosen: eligible=[r for r in eligible if str(r["department"] or "")==chosen]
 
-    medals={1:"🥇",2:"🥈",3:"🥉"}
+    def medal(rank, large=False):
+        size=" rank-lg" if large else ""
+        return f"<span class='rank rank-{rank}{size}' title='Rank {rank}'>{rank}</span>"
     def row_html(r, rank):
-        badge=medals.get(rank,f"<span class='sub'>#{rank}</span>")
+        badge=medal(rank) if rank<=3 else f"<span class='sub'>#{rank}</span>"
         worked=int(r["worked"]); expected=int(r["expected_days"])
-        return (f"<tr><td style='font-size:20px'>{badge}</td>"
+        return (f"<tr><td>{badge}</td>"
                 f"<td><b>{escape(str(r['name']))}</b>"
                 f"<div class='sub'>{escape(str(r['staff_id']))}</div></td>"
                 f"<td>{escape(str(r['department'] or '—'))}</td>"
@@ -1451,10 +1453,10 @@ def leaderboard_page(request: Request, month: str=""):
 
     top=eligible[:3]
     podium="".join(
-        f"<div class='card' style='flex:1'><div style='font-size:34px'>{medals.get(i+1,'')}</div>"
+        f"<div class='card' style='flex:1'>{medal(i+1, large=True)}"
         f"<h3 style='margin:8px 0 2px'>{escape(str(r['name']))}</h3>"
         f"<div class='sub'>{escape(str(r['staff_id']))} · {escape(str(r['department'] or '—'))}</div>"
-        f"<div style='font-size:38px;font-weight:800;margin-top:10px'>{r['score']}</div>"
+        f"<div class='metric' style='font-size:38px;margin-top:10px'>{r['score']}</div>"
         f"<div class='sub'>out of 100</div></div>"
         for i,r in enumerate(top)) if top else ""
 
@@ -1634,7 +1636,7 @@ def hr_accounts_page(request: Request, saved: str = "", error: str = ""):
     by_account = {}
     for pr in permission_rows:
         by_account.setdefault(pr["account_id"], set()).add(pr["permission"])
-    notice = "<div class='notice'>Account or permissions saved successfully.</div>" if saved else ("<div class='notice' style='background:#fee2e2;color:#991b1b'>Action failed. Check account data and permissions.</div>" if error else "")
+    notice = "<div class='notice notice-ok'>Account or permissions saved successfully.</div>" if saved else ("<div class='notice notice-bad'>Action failed. Check account data and permissions.</div>" if error else "")
     trs=[]
     for r in rows:
         perms=by_account.get(r['id']) or DEFAULT_ROLE_PERMISSIONS.get(r['role'], set())
@@ -3699,7 +3701,7 @@ def duplicate_analysis(request: Request, decision: str="", review: str="", scope
             history.append(f"<tr><td>#{r['id']}</td><td><b>{escape(str(r['name']))}</b><br><span class='sub'>{escape(str(r['staff_id']))}</span></td><td>{'Check in' if r['action']=='check_in' else 'Check out'}</td><td><span class='status {state}'>{escape(str(r['review_status']).title())}</span><div class='sub'>{applied}</div></td><td>{float(r['face_score'] or 0)*100:.1f}%</td><td>{float(r['duplicate_score'] or 0)*100:.1f}%</td><td>{escape(str(r['attendance_result'] or '—'))}</td><td>{escape(str(r['created_at']))}</td></tr>")
         content=f"<div style='overflow:auto'><table><thead><tr><th>ID</th><th>Employee</th><th>Action</th><th>Status</th><th>Face</th><th>Duplicate</th><th>Attendance result</th><th>Submitted</th></tr></thead><tbody>{''.join(history)}</tbody></table></div>" if history else empty
     error_messages={"checkin-first":"আগে ওই employee-এর Check-in selfie approve করুন; এরপর Check-out approve হবে।","invalid-action":"এই পুরোনো selfie-এর action সঠিক নয়। Employee-কে নতুন attendance দিতে বলুন।","failed":"Approval সাময়িকভাবে সম্পন্ন হয়নি। আবার চেষ্টা করুন; সমস্যা থাকলে Deploy Logs দেখুন।"}
-    notice = "<div class='notice'>Attendance selfie approved and finalized.</div>" if saved=="approved" else ("<div class='notice'>Selfie rejected; employee notification queued.</div>" if saved=="rejected" else (f"<div class='notice bad'>{error_messages.get(error,'Approval সম্পন্ন হয়নি।')}</div>" if error else ""))
+    notice = "<div class='notice notice-ok'>Attendance selfie approved and finalized.</div>" if saved=="approved" else ("<div class='notice'>Selfie rejected; employee notification queued.</div>" if saved=="rejected" else (f"<div class='notice bad'>{error_messages.get(error,'Approval সম্পন্ন হয়নি।')}</div>" if error else ""))
     body=f"""<div class='hero'>
       <div><div class='eyebrow'>Attendance Approval</div><h2>Pending Selfies</h2><div class='sub'>প্রতিটি valid attendance selfie HR/Admin approve করার পর final হবে। · {thresholds}</div></div>
       <span class='pill'>{waiting} waiting</span>
