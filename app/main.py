@@ -34,6 +34,7 @@ from app.reminders import reminder_worker
 from app.ai_insights import ai_worker
 from app.time_format import format_time_12h
 from app.payroll import PayrollInput, adjustment_reason_required, calculate_payroll
+from app.selfie_retention import initialize_policy, preview_sql, selfie_retention_worker
 from app.backups import backup_status, create_full_backup, inspect_backup, payroll_backup_worker, read_backup, restore_full_backup, upload_offsite
 from app.services import approve_pending_attendance, phones_match, receive_location, state
 from app.leave_flow import decision_message
@@ -268,6 +269,7 @@ def startup():
     for warning in settings.production_warnings():
         logger.warning("Optional configuration warning: %s", warning)
     init_db()
+    initialize_policy()
     import_environment_defaults()
     if not get_setting("admin_email"):
         set_setting("admin_email", os.getenv("SUPER_ADMIN_EMAIL", "admin@buraq.com").strip().lower())
@@ -284,10 +286,11 @@ async def start_reminders():
     app.state.reminder_task=asyncio.create_task(reminder_worker())
     app.state.payroll_backup_task=asyncio.create_task(payroll_backup_worker())
     app.state.ai_task=asyncio.create_task(ai_worker())
+    app.state.selfie_retention_task=asyncio.create_task(selfie_retention_worker())
 
 @app.on_event("shutdown")
 async def stop_reminders():
-    for name in ("reminder_task","payroll_backup_task","ai_task"):
+    for name in ("reminder_task","payroll_backup_task","ai_task","selfie_retention_task"):
         task=getattr(app.state,name,None)
         if task:
             task.cancel()
@@ -3648,7 +3651,7 @@ def duplicate_analysis(request: Request, decision: str="", review: str="", scope
     clauses, params = ["1=1"], []
     if decision in {"accept", "pending", "reject"}: clauses.append("f.decision=?"); params.append(decision)
     if review in {"none", "pending", "approved", "rejected"}: clauses.append("f.review_status=?"); params.append(review)
-    image_field = "f.image_data" if review == "pending" and scope != "all" else "NULL AS image_data"
+    image_field = preview_sql("f") if review == "pending" and scope != "all" else "NULL AS image_data"
     row_limit = 60 if review == "pending" and scope != "all" else 300
     with get_db() as c:
         pending_order = "e.id, CASE WHEN f.action IN ('check_in','checkin','in') THEN 0 ELSE 1 END, f.created_at ASC" if review == "pending" and scope != "all" else "f.id DESC"
@@ -3674,7 +3677,7 @@ def duplicate_analysis(request: Request, decision: str="", review: str="", scope
             risk_state="bad" if r["decision"]=="reject" else "warn" if r["decision"]=="pending" else "ok"
             risk_label="High duplicate risk" if r["decision"]=="reject" else "Needs review" if r["decision"]=="pending" else "Security clear"
             initials=escape("".join(part[:1] for part in str(r["name"]).split()[:2]).upper() or "E")
-            photo=(f"<img src='data:image/jpeg;base64,{r['image_data']}' alt='{escape(str(r['name']))} attendance selfie' loading='lazy'>" if r["image_data"] else f"<div class='review-photo-fallback'>{initials}<span>Preview unavailable</span></div>")
+            photo=(f"<img src='data:image/jpeg;base64,{r['image_data']}' alt='{escape(str(r['name']))} attendance selfie' loading='lazy'>" if r["image_data"] else f"<div class='review-photo-fallback'>{initials}<span>ছবি নেই / ৪৮ ঘণ্টার মেয়াদ শেষ</span></div>")
             location=(f"Verified · {float(r['distance_meters']):.0f} m" if r["distance_meters"] is not None else "Verified · office radius not configured")
             action_label="Check in" if r["action"]=="check_in" else "Check out"
             submitted=escape(str(r["created_at"]).replace("T"," ")[:19])
