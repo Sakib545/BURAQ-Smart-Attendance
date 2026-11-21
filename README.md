@@ -341,3 +341,24 @@ python scripts/restore_full_backup.py latest.buraq --confirm RESTORE-BURAQ
 - Sidebar simplified into direct module links based on permissions.
 - Removed non-essential global subtitle text and payroll calculation formula from the visible UI.
 - Existing attendance, duty, payroll, permission, WhatsApp, and Face AI logic remains unchanged.
+
+## Attendance selfie retention (48 hours)
+
+On first startup with this version, a persistent high-water mark protects all
+existing attendance selfie images. Only attendance thumbnails submitted after
+that boundary expire 48 hours after their database submission timestamp.
+Expired previews are hidden immediately on the next page request; a lightweight
+worker clears their `image_data` payload within the next minute while the app is
+running (or on restart after downtime). Pending, approved and rejected thumbnails
+follow the same deadline; HR should review new submissions within 48 hours.
+
+No attendance/fingerprint rows are deleted. Check-in/out, GPS, review status,
+payroll, employee data, face registration, embeddings and duplicate hashes remain
+unchanged. No schema migration, database reset, or deletion of historical photos
+is performed. Restarting does not reset or move the policy boundary.
+
+Existing encrypted backups are intentionally untouched and may retain images
+until the configured backup retention expires. This feature expires live database
+thumbnails, not copies already downloaded or stored in backups/WhatsApp. Clearing
+payloads allows database space to be reused; it does not guarantee an immediate
+reduction in the allocated disk or the hosting bill.
