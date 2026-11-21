@@ -86,3 +86,22 @@ def test_missing_policy_cannot_expire_anything(retention_db):
     before = snapshot(engine)
     assert expire_selfie_images() == 0
     assert snapshot(engine) == before
+
+
+def test_historical_cleanup_excludes_pending_fresh_and_post_policy(retention_db):
+    from app.selfie_retention import cleanup_reviewed_historical_images
+    engine = retention_db
+    ids = [insert_photo(engine, hours, status) for hours, status in
+           [(60, 'approved'), (60, 'rejected'), (60, 'pending'), (1, 'approved')]]
+    initialize_policy()
+    ids.append(insert_photo(engine, 60, 'approved'))
+    before = snapshot(engine)
+    cleanup_reviewed_historical_images()
+    cleanup_reviewed_historical_images()
+    after = snapshot(engine)
+    for row in before['attendance_fingerprints']:
+        if row['id'] in ids[:2]:
+            row['image_data'] = None
+    marker = after['system_settings'].pop()
+    assert marker['value'] == 'photos=2 payload_bytes=10'
+    assert before == after

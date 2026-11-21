@@ -44,7 +44,39 @@ def expire_selfie_images():
         return result.rowcount
 
 
+def cleanup_reviewed_historical_images():
+    """One atomic pass over reviewed photos protected by the original rollout."""
+    marker = "attendance_reviewed_historical_cleanup_v1"
+    with database.engine.begin() as conn:
+        boundary = conn.execute(text("SELECT value FROM system_settings WHERE key=:key"),
+                                {"key": POLICY_KEY}).scalar_one_or_none()
+        if boundary is None:
+            return
+        claimed = conn.execute(text("INSERT INTO system_settings(key,value) VALUES(:k,'running') "
+                                    "ON CONFLICT(key) DO NOTHING RETURNING key"), {"k": marker}).first()
+        if not claimed:
+            return
+        cutoff = ("CURRENT_TIMESTAMP - INTERVAL '48 hours'" if database.database_kind() == "postgresql"
+                  else "datetime('now','-48 hours')")
+        where = (f"id <= :boundary AND created_at <= {cutoff} "
+                 "AND review_status IN ('approved','rejected') AND image_data IS NOT NULL AND image_data <> ''")
+        params = {"boundary": int(boundary)}
+        # Thumbnails are ASCII base64, so length is the payload size in bytes.
+        count, size = conn.execute(text("SELECT COUNT(*),COALESCE(SUM(length(image_data)),0) "
+                                        "FROM attendance_fingerprints WHERE " + where), params).one()
+        updated = conn.execute(text("UPDATE attendance_fingerprints SET image_data=NULL WHERE " + where), params)
+        if updated.rowcount != count:
+            raise RuntimeError("Candidate count changed; rolling back historical cleanup")
+        result = f"photos={count} payload_bytes={size}"
+        conn.execute(text("UPDATE system_settings SET value=:v WHERE key=:k"), {"v": result, "k": marker})
+    logger.info("Historical reviewed selfie cleanup %s", result)
+
+
 async def selfie_retention_worker():
+    try:
+        await asyncio.to_thread(cleanup_reviewed_historical_images)
+    except Exception:
+        logger.exception("Historical selfie cleanup rolled back; retry on next startup")
     while True:
         try:
             count = await asyncio.to_thread(expire_selfie_images)
